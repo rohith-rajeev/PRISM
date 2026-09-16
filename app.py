@@ -20,7 +20,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent))
 from orchestrator import (  # noqa: E402
     full_pipeline, list_available_models, detect_local_repos, normalise_verdict,
-    REGION_DEFAULT,
+    Cancelled, RunControl, REGION_DEFAULT,
     STAGE_REVIEW, STAGE_DESCRIBE, STAGE_MERGE_CHECK, STAGE_SYNC, STAGE_MERGE,
 )
 
@@ -161,6 +161,7 @@ class RoundedButton(tk.Canvas):
         self._anchor = anchor
         self._hover = False
         self._enabled = True
+        self._selected = False
         self._fontobj = None
         self.bind("<Configure>", lambda _e: self._draw())
         self.bind("<Enter>", lambda _e: (setattr(self, "_hover", True), self._draw()))
@@ -203,6 +204,11 @@ class RoundedButton(tk.Canvas):
         self._enabled = enabled
         self._draw()
 
+    def set_selected(self, selected):
+        """Toggle state for buttons used as a segmented choice (BE / FE)."""
+        self._selected = bool(selected)
+        self._draw()
+
     def refresh_theme(self):
         self.config(bg=self.master.cget("bg") if self._style == "field" else PAL["page"])
         self._draw()
@@ -215,6 +221,8 @@ class RoundedButton(tk.Canvas):
         s = self._style
         if not self._enabled:
             return PAL["disabled_bg"], "", PAL["disabled_fg"]
+        if self._selected:
+            return PAL["accent"], PAL["accent"], "white"
         if s == "primary":
             fill = PAL["run_bg"]
             if self._hover:
@@ -251,69 +259,97 @@ class RoundedButton(tk.Canvas):
                          anchor="w" if self._anchor == "w" else "center")
 
 
-class SegmentBar(tk.Canvas):
-    """Four-cell segmented progress control (Review/Describe/Merge check/Merge)."""
+class ProgressBar(tk.Canvas):
+    """Pipeline progress: one continuous track plus stage captions.
 
-    def __init__(self, parent, height=34):
+    Deliberately not a segmented control. The previous version drew four
+    bordered cells with dividers, which reads as a row of clickable tabs —
+    people tried to click it. Here there are no cell borders and no dividers;
+    a single fill grows left to right, which is the one shape everybody
+    already understands as progress.
+    """
+
+    TRACK_TOP, TRACK_H = 6, 7
+
+    def __init__(self, parent, height=44):
         super().__init__(parent, height=height, highlightthickness=0, bd=0)
-        self.cells = {sid: {"state": "pending", "text": f"{i + 1}. {label}"}
-                      for i, (sid, label) in enumerate(STAGE_DEFS)}
+        self.reset()
         self.bind("<Configure>", lambda _e: self._draw())
         REFRESH.append(self)
 
-    def set_cell(self, sid, state, text=None):
-        cell = self.cells[sid]
-        cell["state"] = state
+    def reset(self):
+        self.states = {sid: "pending" for sid, _ in STAGE_DEFS}
+        self.notes = {}
+        self._draw()
+
+    def set_stage(self, sid, state, text=None):
+        if sid not in self.states:
+            return
+        self.states[sid] = state
         if text is not None:
-            cell["text"] = text
-        elif sid == STAGE_MERGE:
-            n = [s for s, _ in STAGE_DEFS].index(sid) + 1
-            cell["text"] = f"{n}. {STAGE_LABEL[sid]}"
+            self.notes[sid] = text
+        elif state != "active":
+            self.notes.pop(sid, None)
         self._draw()
 
     def refresh_theme(self):
         self.config(bg=PAL["page"])
         self._draw()
 
+    def _fraction(self):
+        """How full the track is: resolved stages, plus half for one in flight."""
+        n = len(STAGE_DEFS)
+        states = [self.states.get(sid, "pending") for sid, _ in STAGE_DEFS]
+        if all(s in ("done", "skipped") for s in states):
+            return 1.0
+        for i, s in enumerate(states):
+            if s in ("active", "error"):
+                return (i + 0.5) / n        # stop on the current stage's dot
+        done = sum(1 for s in states if s in ("done", "skipped"))
+        return done / n
+
+    def _fill_colour(self):
+        if any(s == "error" for s in self.states.values()):
+            return PAL["bad"]
+        if all(self.states.get(sid) in ("done", "skipped") for sid, _ in STAGE_DEFS):
+            return PAL["good"]
+        return PAL["accent"]
+
     def _draw(self):
         self.delete("all")
-        w = self.winfo_width()
-        h = self.winfo_height()
+        w, h = self.winfo_width(), self.winfo_height()
         if w <= 10 or h <= 10:
             return
         self.config(bg=PAL["page"])
-        _rr(self, 1, 1, w - 1, h - 1, 12, PAL["card"], PAL["border"])
         n = len(STAGE_DEFS)
-        for i in range(1, n):
-            x = w * i / n
-            self.create_line(x, 10, x, h - 10, fill=PAL["border"])
-        order = [sid for sid, _ in STAGE_DEFS]
-        for i, sid in enumerate(order):
-            cell = self.cells[sid]
-            st = cell["state"]
-            x0, x1 = w * i / n, w * (i + 1) / n
-            if st == "active":
-                _rr(self, x0 + 3, 4, x1 - 3, h - 4, 8, PAL["accent_tint"], None)
-                fg, font = PAL["accent_text"], FONT_B
-            elif st == "done":
-                fg, font = PAL["good"], FONT
-                cell_text = "✓ " + cell["text"]
-                self.create_text((x0 + x1) / 2, h / 2, text=cell_text, fill=fg, font=font)
-                continue
-            elif st == "skipped":
-                fg, font = PAL["muted"], FONT_S
-            elif st == "error":
-                _rr(self, x0 + 3, 4, x1 - 3, h - 4, 8, PAL["bad_bg"], None)
-                fg, font = PAL["bad"], FONT_B
+        y0, y1 = self.TRACK_TOP, self.TRACK_TOP + self.TRACK_H
+        r = self.TRACK_H / 2
+
+        _rr(self, 0, y0, w, y1, r, PAL["field"], None)          # track
+        frac = self._fraction()
+        if frac > 0:
+            _rr(self, 0, y0, max(self.TRACK_H, w * frac), y1, r, self._fill_colour(), None)
+
+        for i, (sid, label) in enumerate(STAGE_DEFS):
+            state = self.states.get(sid, "pending")
+            cx = w * (i + 0.5) / n
+            mx = min(max(cx, r + 1), w - r - 1)   # clamped so end dots stay on the track
+            if state == "done":
+                dot, fg, font = PAL["good"], PAL["good"], FONT_XS
+            elif state == "active":
+                dot, fg, font = PAL["accent_text"], PAL["accent_text"], ("Segoe UI", 8, "bold")
+            elif state == "error":
+                dot, fg, font = PAL["bad"], PAL["bad"], ("Segoe UI", 8, "bold")
+            elif state == "skipped":
+                dot, fg, font = PAL["border"], PAL["muted"], FONT_XS
             else:
-                fg, font = PAL["muted"], FONT_S
-            if st == "skipped":
-                text = "– " + cell["text"]
-            elif st == "error":
-                text = "✕ " + cell["text"]
-            else:
-                text = cell["text"]
-            self.create_text((x0 + x1) / 2, h / 2, text=text, fill=fg, font=font)
+                dot, fg, font = PAL["border"], PAL["muted"], FONT_XS
+            self.create_oval(mx - 3, (y0 + y1) / 2 - 3, mx + 3, (y0 + y1) / 2 + 3,
+                             fill=dot, outline=PAL["page"], width=2)
+            mark = {"done": "✓ ", "error": "✕ ", "skipped": "– "}.get(state, "")
+            caption = self.notes.get(sid) or label
+            self.create_text(cx, y1 + 13, text=f"{mark}{caption}", fill=fg,
+                             font=font, anchor="n")
 
 
 class StatusPill(tk.Canvas):
@@ -382,6 +418,116 @@ class CheckRow(tk.Frame):
         _rr(self.box, 2, 2, 18, 18, 5, fill, PAL["accent"] if on else PAL["muted"])
         if on:
             self.box.create_text(10, 10, text="✓", fill="white", font=("Segoe UI", 9, "bold"))
+
+
+class AgentPanel(RoundedCard):
+    """Conditional conversation panel — hidden until the reviewer asks.
+
+    The agent stops and asks when an input is missing or a branch is
+    ambiguous; without this the run simply dead-ended on "could not parse a
+    verdict". Height is deliberately fixed: the panel appears mid-run, above
+    the log, and a panel that grew with the question pushed its own Send
+    button off-screen. The question scrolls instead. Plain Tk — no new
+    dependencies, nothing added to the packaged size.
+    """
+
+    def __init__(self, parent, on_send, on_skip):
+        super().__init__(parent, fill_key="card", outline_key="accent")
+        self._on_send, self._on_skip = on_send, on_skip
+        inner = self.inner
+        inner.config(padx=12, pady=7)
+
+        # Actions live on the header row rather than a row of their own: it
+        # keeps them at a fixed, always-visible position and saves the height.
+        head = tk.Frame(inner, bg=PAL["card"])
+        head.pack(fill="x")
+        REFRESH_PLAIN.append((head, {"bg": "card"}))
+        lb = tk.Label(head, text="💬  Reviewer needs your input", font=FONT_B,
+                      bg=PAL["card"], fg=PAL["accent_text"])
+        lb.pack(side="left")
+        REFRESH_PLAIN.append((lb, {"bg": "card", "fg": "accent_text"}))
+        RoundedButton(head, text="Send  ▸", command=self._send, style="primary",
+                      height=26, width=104, font=FONT_S).pack(side="right")
+        RoundedButton(head, text="Skip", command=self._skip, style="outline",
+                      height=26, width=74, font=FONT_S).pack(side="right", padx=(0, 6))
+
+        self.question = tk.Text(inner, height=3, font=FONT_S, bg=PAL["card"],
+                                fg=PAL["text"], relief="flat", wrap="word",
+                                highlightthickness=0, cursor="arrow")
+        self.question.pack(fill="x", pady=(5, 5))
+        self.question.config(state="disabled")
+        REFRESH_PLAIN.append((self.question, {"bg": "card", "fg": "text"}))
+
+        self.entry = tk.Text(inner, height=2, font=FONT, bg=PAL["field"],
+                             fg=PAL["text"], insertbackground=PAL["text"],
+                             relief="flat", wrap="word", highlightthickness=1,
+                             highlightbackground=PAL["border"],
+                             highlightcolor=PAL["accent"])
+        self.entry.pack(fill="x")
+        REFRESH_PLAIN.append((self.entry, {"bg": "field", "fg": "text",
+                                           "insertbackground": "text",
+                                           "highlightbackground": "border",
+                                           "highlightcolor": "accent"}))
+        self.entry.bind("<Return>", self._enter)
+        self.entry.bind("<Shift-Return>", lambda _e: None)
+        hint = tk.Label(inner, text="Enter to send · Shift+Enter for a new line",
+                        font=FONT_XS, bg=PAL["card"], fg=PAL["muted"], anchor="w")
+        hint.pack(fill="x", pady=(3, 0))
+        REFRESH_PLAIN.append((hint, {"bg": "card", "fg": "muted"}))
+
+    def present(self, question):
+        self.question.config(state="normal")
+        self.question.delete("1.0", "end")
+        self.question.insert("1.0", question)
+        self.question.config(state="disabled")
+        self.question.see("1.0")
+        self.entry.delete("1.0", "end")
+        self.entry.focus_set()
+
+    def _text(self):
+        return self.entry.get("1.0", "end").strip()
+
+    def _enter(self, _e):
+        self._send()
+        return "break"          # keep Tk from also inserting the newline
+
+    def _send(self):
+        msg = self._text()
+        if msg:
+            self._on_send(msg)
+
+    def _skip(self):
+        self._on_skip()
+
+
+class AskBridge:
+    """Blocking ask() for the worker thread, answered on the Tk thread.
+
+    The pipeline runs off-thread and Tk is not thread-safe, so the question
+    goes through the same queue as log lines and the worker parks on an Event
+    until the UI resolves it. The wait is polled rather than indefinite so a
+    Stop while a question is on screen releases the worker instead of leaking
+    a parked thread.
+    """
+
+    def __init__(self, app):
+        self.app = app
+        self._event = threading.Event()
+        self._answer = None
+
+    def ask(self, question):
+        self._event.clear()
+        self._answer = None
+        self.app.log_q.put(("ask", question))
+        while not self._event.wait(0.2):
+            control = self.app._control
+            if control is None or control.cancelled():
+                return None
+        return self._answer
+
+    def resolve(self, answer):
+        self._answer = answer
+        self._event.set()
 
 
 class Picker(tk.Frame):
@@ -568,16 +714,21 @@ class App(tk.Tk):
         # "Tk", so desktop shells can't tell PRISM from any other Tk app and
         # a launched window won't group under its own dock/taskbar icon.
         super().__init__(className="prism")
-        self.title("PRISM — Pull Request Inspection & Safety Manager")
-        self.geometry("960x900")
-        self.minsize(860, 600)
+        self.title("PRISM")
+        self.geometry("1020x900")
+        self.minsize(900, 620)
         self.configure(bg=PAL["page"])
         self.log_q = queue.Queue()
         self.running = False
         self.stage_state = {}
         self._verdict_key = ""
+        self._control = None          # orchestrator.RunControl for the live run
+        self._ask = AskBridge(self)
+        self._asking = False
+        self._drain_job = None
         self._build()
-        self.after(80, self._drain_logs)
+        self._drain_job = self.after(80, self._drain_logs)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ----- themed primitives -----
     def _lab(self, parent, text, font=FONT_XS, fg="muted", bg="card"):
@@ -602,22 +753,8 @@ class App(tk.Tk):
     # ----- layout -----
     def _build(self):
         root = tk.Frame(self, bg=PAL["page"])
-        root.pack(fill="both", expand=True, padx=16, pady=10)
+        root.pack(fill="both", expand=True, padx=14, pady=8)
         REFRESH_PLAIN.append((root, {"bg": "page"}))
-
-        # ---- bottom buttons FIRST in pack order so they always get space,
-        # even when the window is shorter than the content (log squeezes).
-        brow = tk.Frame(root, bg=PAL["page"])
-        brow.pack(side="bottom", fill="x", pady=(4, 0))
-        REFRESH_PLAIN.append((brow, {"bg": "page"}))
-        brow.columnconfigure(0, weight=1, uniform="b")
-        brow.columnconfigure(1, weight=1, uniform="b")
-        self.copy_btn = RoundedButton(brow, text="Copy verdict", command=self._copy,
-                                      style="outline", height=32)
-        self.copy_btn.grid(row=0, column=0, sticky="ew", padx=(0, 5))
-        self.clear_btn = RoundedButton(brow, text="Clear log", command=self._clear_log,
-                                       style="outline", height=32)
-        self.clear_btn.grid(row=0, column=1, sticky="ew", padx=(5, 0))
 
         # header: badge + titles … status pill
         h = tk.Frame(root, bg=PAL["page"])
@@ -644,7 +781,7 @@ class App(tk.Tk):
         pc = RoundedCard(root)
         pc.pack(fill="x", pady=(0, 6))
         pi = pc.inner
-        pi.config(padx=12, pady=6)
+        pi.config(padx=12, pady=5)
         self._lab(pi, "Project", font=FONT_B, fg="text").pack(anchor="w", pady=(0, 2))
         self._lab(pi, "Working folder").pack(anchor="w", pady=(0, 4))
         frow = tk.Frame(pi, bg=PAL["card"])
@@ -689,32 +826,30 @@ class App(tk.Tk):
         self.tfe_btn = None
         self._rebuild_target_row()
 
-        # ---- Repository mapping card (multi-repo projects only) ----
-        self.map_card = RoundedCard(root)
+        # ---- middle row: mapping (left) and model/behavior (right) ----
+        # Two half-width cards instead of two stacked full-width ones. The
+        # mapping card only exists for multi-repo projects, so when it is
+        # hidden the model card takes the whole row rather than leaving a gap.
+        self.midrow = tk.Frame(root, bg=PAL["page"])
+        self.midrow.pack(fill="x", pady=(0, 6))
+        REFRESH_PLAIN.append((self.midrow, {"bg": "page"}))
+        self.midrow.columnconfigure(0, weight=1, uniform="mid")
+        self.midrow.columnconfigure(1, weight=1, uniform="mid")
+
+        self.map_card = RoundedCard(self.midrow)
         mapi = self.map_card.inner
         mapi.config(padx=12, pady=6)
         self._lab(mapi, "Repository mapping", font=FONT_B, fg="text").pack(anchor="w")
-        self._lab(mapi, "Confirm which detected clone is backend / frontend.").pack(
-            anchor="w", pady=(0, 6))
-        maprow = tk.Frame(mapi, bg=PAL["card"])
-        maprow.pack(fill="x")
-        REFRESH_PLAIN.append((maprow, {"bg": "card"}))
+        self._lab(mapi, "Which clone is backend / frontend.").pack(anchor="w", pady=(0, 6))
 
         def _clone_row(label, title, empty_label, pady):
-            """One full-width labelled clone picker.
-
-            Backend and Frontend are stacked rather than placed side by side:
-            clone folder names are routinely long enough to overflow a
-            half-width field, and the repo name is the one thing the user has
-            to read in full to confirm the mapping is right.
-            """
-            col = tk.Frame(maprow, bg=PAL["card"])
+            col = tk.Frame(mapi, bg=PAL["card"])
             col.pack(fill="x", pady=pady)
             REFRESH_PLAIN.append((col, {"bg": "card"}))
-            lb = tk.Label(col, text=label, font=FONT_B, bg=PAL["card"],
-                          fg=PAL["text"], anchor="w")
+            lb = tk.Label(col, text=label, font=FONT_XS, bg=PAL["card"],
+                          fg=PAL["muted"], anchor="w")
             lb.pack(anchor="w", pady=(0, 2))
-            REFRESH_PLAIN.append((lb, {"bg": "card", "fg": "text"}))
+            REFRESH_PLAIN.append((lb, {"bg": "card", "fg": "muted"}))
             picker = Picker(col, title=title, empty_label=empty_label,
                             group_key=lambda m: "", empty_hint="No clones detected")
             picker.pack(fill="x")
@@ -723,27 +858,25 @@ class App(tk.Tk):
         self.be_picker = _clone_row("Backend", "SELECT BACKEND CLONE",
                                     "Select backend clone…", (0, 0))
         self.fe_picker = _clone_row("Frontend", "SELECT FRONTEND CLONE",
-                                    "Select frontend clone…", (8, 0))
+                                    "Select frontend clone…", (6, 0))
 
-        # ---- Model and behavior card ----
-        mc = RoundedCard(root)
+        mc = RoundedCard(self.midrow)
         self.model_card = mc
-        mc.pack(fill="x", pady=(0, 6))
         mi = mc.inner
         mi.config(padx=12, pady=6)
         mhead = tk.Frame(mi, bg=PAL["card"])
-        mhead.pack(fill="x", pady=(0, 2))
+        mhead.pack(fill="x")
         REFRESH_PLAIN.append((mhead, {"bg": "card"}))
         self._lab(mhead, "Model and behavior", font=FONT_B, fg="text").pack(side="left")
-        self.model_count = self._lab(mhead, "loading…", font=FONT_XS, fg="muted")
-        self.model_count.pack(side="right")
         self.model_refresh = RoundedButton(mhead, text="↻", command=self._load_models_async,
-                                           style="ghost", height=24, radius=12, font=FONT_S,
-                                           width=36)
-        self.model_refresh.pack(side="right", padx=(0, 6))
+                                           style="ghost", height=22, radius=11,
+                                           font=FONT_S, width=30)
+        self.model_refresh.pack(side="right")
+        self.model_count = self._lab(mhead, "loading…", font=FONT_XS, fg="muted")
+        self.model_count.pack(side="right", padx=(0, 8))
         self.model_picker = Picker(mi, title="SELECT MODEL", empty_label="Default model",
                                    group_key=None, empty_hint="Loading models…")
-        self.model_picker.pack(fill="x", pady=(0, 2))
+        self.model_picker.pack(fill="x", pady=(6, 4))
         self.upd_var = tk.BooleanVar(value=True)
         self.mrg_var = tk.BooleanVar(value=True)
         self.syn_var = tk.BooleanVar(value=True)
@@ -753,55 +886,80 @@ class App(tk.Tk):
                                 ("Sync with base branch when diverged", self.syn_var, False),
                                 ("Dry run — skip writes and merges", self.dry_var, True)):
             CheckRow(mi, txt, var, muted=muted).pack(anchor="w")
+        self._place_midrow()
 
-        # ---- segmented progress ----
-        self.seg = SegmentBar(root)
-        self.seg.pack(fill="x", pady=(0, 6))
+        # ---- action row: primary action, plus the kill switch ----
+        arow = tk.Frame(root, bg=PAL["page"])
+        arow.pack(fill="x")
+        REFRESH_PLAIN.append((arow, {"bg": "page"}))
+        self.run_btn = RoundedButton(arow, text="▶  Start Prisming", command=self._start,
+                                     style="primary", height=38, radius=10,
+                                     font=("Segoe UI", 11, "bold"))
+        self.run_btn.pack(side="left", fill="x", expand=True)
+        self.stop_btn = RoundedButton(arow, text="■  Stop", command=self._stop,
+                                      style="outline", height=38, radius=10,
+                                      font=FONT_B, width=130)
+        self.stop_btn.pack(side="left", padx=(8, 0))
+        self.stop_btn.set_enabled(False)
 
-        # ---- run ----
-        self.run_btn = RoundedButton(root, text="▶  Review and auto-merge",
-                                     command=self._start, style="primary",
-                                     height=38, radius=10, font=("Segoe UI", 11, "bold"))
-        self.run_btn.pack(fill="x", pady=(0, 6))
+        # ---- progress: below the action, because it reports on it ----
+        self.seg = ProgressBar(root)
+        self.seg.pack(fill="x", pady=(2, 4))
 
-        # ---- verdict / impact ----
-        vrow = tk.Frame(root, bg=PAL["page"])
-        vrow.pack(fill="x", pady=(0, 6))
-        REFRESH_PLAIN.append((vrow, {"bg": "page"}))
-        vrow.columnconfigure(0, weight=1, uniform="v")
-        vrow.columnconfigure(1, weight=1, uniform="v")
-        vc = RoundedCard(vrow)
-        vc.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
+        # ---- verdict + impact, one compact row ----
+        vc = RoundedCard(root)
+        vc.pack(fill="x", pady=(0, 6))
         vi = vc.inner
         vi.config(padx=14, pady=4)
-        self._lab(vi, "Verdict").pack(anchor="w")
+        vi.columnconfigure(0, weight=3, uniform="v")
+        vi.columnconfigure(1, weight=2, uniform="v")
+        self._lab(vi, "VERDICT").grid(row=0, column=0, sticky="w")
+        self._lab(vi, "IMPACT").grid(row=0, column=1, sticky="w")
         self.verdict_val = tk.Label(vi, text="Not run yet", font=("Segoe UI", 11, "bold"),
-                                    bg=PAL["card"], fg=PAL["text"], wraplength=380,
+                                    bg=PAL["card"], fg=PAL["text"], anchor="w",
                                     justify="left")
-        self.verdict_val.pack(anchor="w")
-        # fg is owned by _paint_verdict (colour-coded per verdict), so only the
-        # background is registered here — "verdict" is not a palette key.
+        self.verdict_val.grid(row=1, column=0, sticky="ew")
         REFRESH_PLAIN.append((self.verdict_val, {"bg": "card"}))
-        ic = RoundedCard(vrow)
-        ic.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
-        ii = ic.inner
-        ii.config(padx=14, pady=4)
-        self._lab(ii, "Impact").pack(anchor="w")
-        self.impact_val = tk.Label(ii, text="—", font=("Segoe UI", 11, "bold"),
-                                   bg=PAL["card"], fg=PAL["text"], wraplength=380,
+        self.impact_val = tk.Label(vi, text="—", font=("Segoe UI", 11, "bold"),
+                                   bg=PAL["card"], fg=PAL["text"], anchor="w",
                                    justify="left")
-        self.impact_val.pack(anchor="w")
+        self.impact_val.grid(row=1, column=1, sticky="ew")
         REFRESH_PLAIN.append((self.impact_val, {"bg": "card", "fg": "text"}))
+
+        # ---- agent conversation (packed only while a question is open) ----
+        self.agent_panel = AgentPanel(root, on_send=self._answer_agent,
+                                      on_skip=lambda: self._answer_agent(""))
 
         # ---- log console (expands; squeezes first on short windows) ----
         lc = RoundedCard(root, fill_key="log_bg", outline_key="border", stretch=True)
+        self._log_card = lc
         lc.pack(fill="both", expand=True)
         li = lc.inner
-        li.config(padx=12, pady=10)
+        li.config(padx=10, pady=8)
         REFRESH_PLAIN.append((li, {"bg": "log_bg"}))
-        self.log = tk.Text(li, height=3, font=_mono(), bg=PAL["log_bg"], fg=PAL["log_fg"],
-                           insertbackground=PAL["log_fg"], relief="flat", wrap="word")
-        scroll = tk.Scrollbar(li, command=self.log.yview)
+        lhead = tk.Frame(li, bg=PAL["log_bg"])
+        lhead.pack(fill="x")
+        REFRESH_PLAIN.append((lhead, {"bg": "log_bg"}))
+        lt = tk.Label(lhead, text="EXECUTION LOG", font=FONT_XS,
+                      bg=PAL["log_bg"], fg=PAL["muted"])
+        lt.pack(side="left")
+        REFRESH_PLAIN.append((lt, {"bg": "log_bg", "fg": "muted"}))
+        # Clearing belongs to the log, not to a full-width button competing
+        # with the primary action for attention.
+        self.clear_btn = tk.Label(lhead, text="Clear", font=FONT_XS, bg=PAL["log_bg"],
+                                  fg=PAL["muted"], cursor="hand2", padx=6)
+        self.clear_btn.pack(side="right")
+        self.clear_btn.bind("<Button-1>", lambda _e: self._clear_log())
+        self.clear_btn.bind("<Enter>", lambda e: e.widget.config(fg=PAL["accent"]))
+        self.clear_btn.bind("<Leave>", lambda e: e.widget.config(fg=PAL["muted"]))
+        REFRESH_PLAIN.append((self.clear_btn, {"bg": "log_bg", "fg": "muted"}))
+        lbody = tk.Frame(li, bg=PAL["log_bg"])
+        lbody.pack(fill="both", expand=True, pady=(4, 0))
+        REFRESH_PLAIN.append((lbody, {"bg": "log_bg"}))
+        self.log = tk.Text(lbody, height=4, font=_mono(), bg=PAL["log_bg"],
+                           fg=PAL["log_fg"], insertbackground=PAL["log_fg"],
+                           relief="flat", wrap="word")
+        scroll = tk.Scrollbar(lbody, command=self.log.yview)
         self.log.configure(yscrollcommand=scroll.set)
         self.log.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
@@ -822,6 +980,20 @@ class App(tk.Tk):
         self.proj_var.trace_add("write", self._on_proj_changed)
         self._reset_progress(silent=True)
         self._load_models_async()
+
+    def _place_midrow(self):
+        """Grid the mapping and model cards for the current mode.
+
+        Single-repo projects never map anything, so rather than leaving half
+        the row empty the model card spans it.
+        """
+        show_map = self.mode == "multi"
+        if show_map:
+            self.map_card.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
+            self.model_card.grid(row=0, column=1, columnspan=1, sticky="nsew", padx=(5, 0))
+        else:
+            self.map_card.grid_remove()
+            self.model_card.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=0)
 
     # ----- badge -----
     def _draw_badge(self):
@@ -908,7 +1080,7 @@ class App(tk.Tk):
             self.mode = "single"
             self.detected = []
             self.single_path = None
-            self.map_card.pack_forget()
+            self._place_midrow()
             self._rebuild_target_row()
             self._set_hint("Select your project folder to begin — "
                            "PRISM scans it for git clones.", "muted")
@@ -920,7 +1092,7 @@ class App(tk.Tk):
             self.mode = "single"
             self.detected = []
             self.single_path = None
-            self.map_card.pack_forget()
+            self._place_midrow()
             self._rebuild_target_row()
             self._set_hint("Select a valid root folder.", "bad")
             return
@@ -944,7 +1116,7 @@ class App(tk.Tk):
                 self.single_path = None
                 self._set_hint("No local clones detected — review will use the "
                                "CodeCommit API. Type the repo name manually.", "warn")
-            self.map_card.pack_forget()
+            self._place_midrow()
         else:
             self.mode = "multi"
             self.detected = subs
@@ -952,7 +1124,7 @@ class App(tk.Tk):
             self.be_picker.set_models(names)
             self.fe_picker.set_models(names)
             self._auto_guess(names)
-            self.map_card.pack(fill="x", pady=(0, 6), before=self.model_card)
+            self._place_midrow()
             self._set_hint(f"{len(subs)} clones detected — confirm backend / frontend "
                            f"mapping below.", "muted")
         self._rebuild_target_row()
@@ -981,10 +1153,12 @@ class App(tk.Tk):
             brow = tk.Frame(self.leftbox, bg=PAL["card"])
             brow.pack(anchor="w")
             REFRESH_PLAIN.append((brow, {"bg": "card"}))
-            self.tbe_btn = tk.Button(brow, text="Backend", width=12, relief="flat",
-                                     command=lambda: self._set_target("BE"), cursor="hand2")
-            self.tfe_btn = tk.Button(brow, text="Frontend", width=12, relief="flat",
-                                     command=lambda: self._set_target("FE"), cursor="hand2")
+            self.tbe_btn = RoundedButton(brow, text="Backend", height=30, width=108,
+                                         font=FONT_S,
+                                         command=lambda: self._set_target("BE"))
+            self.tfe_btn = RoundedButton(brow, text="Frontend", height=30, width=108,
+                                         font=FONT_S,
+                                         command=lambda: self._set_target("FE"))
             self.tbe_btn.pack(side="left", padx=(0, 6))
             self.tfe_btn.pack(side="left")
             self._set_target(self.target_var.get() or "BE")
@@ -994,11 +1168,9 @@ class App(tk.Tk):
 
     def _set_target(self, which):
         self.target_var.set(which)
-        on = {"bg": PAL["accent"], "fg": "white"}
-        off = {"bg": PAL["card"], "fg": PAL["muted"]}
         if self.tbe_btn is not None:
-            self.tbe_btn.config(**(on if which == "BE" else off))
-            self.tfe_btn.config(**(on if which == "FE" else off))
+            self.tbe_btn.set_selected(which == "BE")
+            self.tfe_btn.set_selected(which == "FE")
 
     def _mapping(self):
         """Return {BE: (name, path), FE: (name, path)} for mapped clones."""
@@ -1016,9 +1188,8 @@ class App(tk.Tk):
     # ----- progress -----
     def _reset_progress(self, silent=False):
         self.stage_state = {sid: "pending" for sid, _ in STAGE_DEFS}
-        self.stage_state[STAGE_SYNC] = "pending"  # tracked, borrows the Merge cell
-        for sid, _ in STAGE_DEFS:
-            self.seg.set_cell(sid, "pending")
+        self.stage_state[STAGE_SYNC] = "pending"  # tracked; shares the Merge caption
+        self.seg.reset()
         if not silent:
             self.pill.set("Running…", "accent")
             self._paint_verdict()
@@ -1030,20 +1201,20 @@ class App(tk.Tk):
         if stage == STAGE_SYNC:
             # Sync has no cell of its own — it borrows the Merge cell.
             if state == "active":
-                self.seg.set_cell(STAGE_MERGE, "active", "4. Syncing…")
+                self.seg.set_stage(STAGE_MERGE, "active", "Syncing…")
             elif state == "done":
-                self.seg.set_cell(STAGE_MERGE, "active", "4. Merge")
+                self.seg.set_stage(STAGE_MERGE, "active")
             elif state == "error":
-                self.seg.set_cell(STAGE_MERGE, "error", "4. Merge")
+                self.seg.set_stage(STAGE_MERGE, "error")
             return
         if stage == STAGE_MERGE and self.stage_state.get(STAGE_SYNC) in ("active", "error"):
             # Sync owns the cell while running, and keeps it after a failure —
             # a trailing "merge skipped" must not paint over the error state.
             return
         if stage == STAGE_MERGE:
-            self.seg.set_cell(stage, state, "4. Merge")
+            self.seg.set_stage(stage, state)
         else:
-            self.seg.set_cell(stage, state)
+            self.seg.set_stage(stage, state)
 
     def _set_status(self, txt, color):
         self.pill.set(txt, color)
@@ -1099,15 +1270,18 @@ class App(tk.Tk):
         self.impact_val.config(text="…")
         self._verdict_key = ""
         self._paint_verdict()
-        self.run_btn.set_text("⏳  Running…")
+        self.run_btn.set_text("⏳  Prisming…")
         self.run_btn.set_enabled(False)
+        self.stop_btn.set_enabled(True)
         self.running = True
+        self._control = RunControl()
+        self._hide_agent()
         model = self.model_picker.get() or None
         args = dict(project_dir=proj, repo_name=repo, pr_id=pr, local_repo=local_repo,
                     region=self.region_var.get().strip() or REGION_DEFAULT,
                     do_update_desc=self.upd_var.get(), do_merge=self.mrg_var.get(),
                     do_sync=self.syn_var.get(), dry_run=self.dry_var.get(),
-                    model=model)
+                    model=model, control=self._control, ask=self._ask.ask)
         threading.Thread(target=self._worker, kwargs=args, daemon=True).start()
 
     def _worker(self, **args):
@@ -1120,8 +1294,53 @@ class App(tk.Tk):
             # the truthy string "False" and every run would report "Merged ✓".
             self.log_q.put(("done", {k: v if isinstance(v, bool) else str(v)[:160]
                                      for k, v in summary.items() if k != "review"}))
+        except Cancelled:
+            self.log_q.put(("stopped", None))
         except Exception as e:  # noqa: BLE001
-            self.log_q.put(("error", str(e)[:3000]))
+            # A stop kills the child process, so the failure it provokes is
+            # the stop, not a real error — report it as such.
+            if self._control is not None and self._control.cancelled():
+                self.log_q.put(("stopped", None))
+            else:
+                self.log_q.put(("error", str(e)[:3000]))
+
+    def _stop(self):
+        """Kill switch: end the run and return the UI to idle."""
+        if not self.running or self._control is None:
+            return
+        self.stop_btn.set_enabled(False)
+        self._append("\n■ Stopping — terminating the current step…", "warn")
+        self._set_status("Stopping…", "warn")
+        self._control.cancel()      # also releases a parked agent question
+
+    def _finish_run(self):
+        self.running = False
+        self._control = None
+        self.run_btn.set_text("▶  Start Prisming")
+        self.run_btn.set_enabled(True)
+        self.stop_btn.set_enabled(False)
+        self._hide_agent()
+
+    # ----- agent conversation -----
+    def _show_agent(self, question):
+        self._asking = True
+        self.agent_panel.present(question)
+        if not self.agent_panel.winfo_manager():
+            self.agent_panel.pack(fill="x", pady=(0, 6), before=self._log_card)
+        self._set_status("Needs input", "warn")
+
+    def _hide_agent(self):
+        self._asking = False
+        if self.agent_panel.winfo_manager():
+            self.agent_panel.pack_forget()
+
+    def _answer_agent(self, message):
+        if not self._asking:
+            return
+        self._hide_agent()
+        if self.running:
+            self._set_status("Running…", "accent")
+        self._ask.resolve(message)
 
     def _drain_logs(self):
         try:
@@ -1129,7 +1348,23 @@ class App(tk.Tk):
         finally:
             # Always reschedule: one bad line must not kill the pump and leave
             # the UI frozen mid-run with no log and no progress.
-            self.after(80, self._drain_logs)
+            self._drain_job = self.after(80, self._drain_logs)
+
+    def _on_close(self):
+        """Stop the pump and any live run before the window goes away.
+
+        Without this the queued after() callback fires against a destroyed
+        interpreter and Tk prints 'invalid command name ..._drain_logs'.
+        """
+        if self._drain_job is not None:
+            try:
+                self.after_cancel(self._drain_job)
+            except Exception:  # noqa: BLE001
+                pass
+            self._drain_job = None
+        if self._control is not None:
+            self._control.cancel()
+        self.destroy()
 
     def _drain_once(self):
         try:
@@ -1164,10 +1399,17 @@ class App(tk.Tk):
                     except Exception:  # noqa: BLE001
                         continue
                     self._on_progress(stage, state)
+                elif kind == "ask":
+                    self._show_agent(payload)
+                elif kind == "stopped":
+                    self._finish_run()
+                    for sid, _ in STAGE_DEFS:
+                        if self.stage_state.get(sid) == "active":
+                            self._on_progress(sid, "error")
+                    self._set_status("Stopped", "warn")
+                    self._append("\n■ Run stopped. Back to idle.", "warn")
                 elif kind == "done":
-                    self.running = False
-                    self.run_btn.set_text("▶  Review and auto-merge")
-                    self.run_btn.set_enabled(True)
+                    self._finish_run()
                     stopped = str(payload.get("stopped") or "")
                     if payload.get("merged") is True:
                         self._set_status("Merged ✓", "good")
@@ -1180,9 +1422,7 @@ class App(tk.Tk):
                         self._set_status("Finished", "muted")
                     self._append(f"\n—— finished: {payload} ——", "ok")
                 elif kind == "error":
-                    self.running = False
-                    self.run_btn.set_text("▶  Review and auto-merge")
-                    self.run_btn.set_enabled(True)
+                    self._finish_run()
                     for sid in [s for s, _ in STAGE_DEFS]:
                         if self.stage_state.get(sid) == "active":
                             self._on_progress(sid, "error")
@@ -1195,9 +1435,6 @@ class App(tk.Tk):
         except queue.Empty:
             pass
 
-    def _copy(self):
-        self.clipboard_clear()
-        self.clipboard_append(self._verdict_cache or self.verdict_val.cget("text"))
 
 
 class _BadgeProxy:

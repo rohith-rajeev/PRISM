@@ -59,6 +59,86 @@ DESC_BLOCK_RE = re.compile(r"<!-- pr-reviewer:start -->.*?<!-- pr-reviewer:end -
 MERGEABLE_VERDICTS = ("approve", "approve with comments")
 
 
+class Cancelled(RuntimeError):
+    """Raised inside the pipeline when the user hits Stop."""
+
+
+class RunControl:
+    """Cancellation token shared between the UI thread and the worker.
+
+    The UI calls cancel() from Tk; the worker checks at stage boundaries. A
+    flag alone is not enough — an agent run can sit for minutes without
+    emitting anything — so the live child process is tracked and killed, which
+    unblocks the reader immediately.
+    """
+
+    def __init__(self):
+        self._event = threading.Event()
+        self._proc = None
+        self._lock = threading.Lock()
+
+    def cancel(self):
+        self._event.set()
+        with self._lock:
+            proc = self._proc
+        if proc is not None:
+            try:
+                proc.terminate()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def cancelled(self):
+        return self._event.is_set()
+
+    def check(self):
+        if self._event.is_set():
+            raise Cancelled("Run stopped.")
+
+    def attach(self, proc):
+        with self._lock:
+            self._proc = proc
+        # Cancel may have landed between spawning and attaching; don't strand it.
+        if self._event.is_set():
+            self.cancel()
+
+    def detach(self):
+        with self._lock:
+            self._proc = None
+
+
+# A trailing question means the agent stopped and is waiting on the user
+# (missing PR id, ambiguous branch, description-update approval, …).
+_ASKING_RE = re.compile(
+    r"(please provide|could you|can you|which of|should i|do you want|would you like|"
+    r"let me know|need (?:the|more|these)|waiting for|confirm whether|shall i)",
+    re.IGNORECASE)
+
+
+def extract_question(text):
+    """Return the agent's trailing question, or "" when it isn't asking.
+
+    Deliberately conservative. A finished report is not a question even though
+    findings routinely end in one ("should this be renamed?"), so any output
+    carrying a verdict is excluded outright, and only the closing block (plus
+    the couple before it, for context like a bullet list of what's missing) is
+    considered.
+    """
+    body = strip_ansi(text or "").strip()
+    if not body or VERDICT_RE.search(body):
+        return ""
+    blocks = [b.strip() for b in re.split(r"\n\s*\n", body) if b.strip()]
+    if not blocks:
+        return ""
+    tail = blocks[-3:]
+    first_hit = None
+    for i, block in enumerate(tail):
+        if block.endswith("?") or _ASKING_RE.search(block):
+            first_hit = i if first_hit is None else first_hit
+    if first_hit is None:
+        return ""
+    return "\n\n".join(tail[first_hit:]).strip()[:1200]
+
+
 @dataclass
 class ReviewResult:
     verdict_raw: str = ""
@@ -252,13 +332,17 @@ def _display_cmd(cmd):
     return " ".join(parts)
 
 
-def _run_stream(cmd, cwd, emit, timeout=1200):
+def _run_stream(cmd, cwd, emit, timeout=1200, control=None):
     """Run cmd, streaming stdout lines to emit. Returns (rc, full_output)."""
+    if control is not None:
+        control.check()
     emit(f"$ {_display_cmd(cmd)}")
     proc = subprocess.Popen(
         cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, bufsize=1,
     )
+    if control is not None:
+        control.attach(proc)
     out_lines = []
     timed_out = threading.Event()
 
@@ -290,6 +374,10 @@ def _run_stream(cmd, cwd, emit, timeout=1200):
         return 1, "".join(out_lines)
     finally:
         watchdog.cancel()
+        if control is not None:
+            control.detach()
+    if control is not None and control.cancelled():
+        raise Cancelled("Run stopped.")
     if timed_out.is_set():
         out_lines.append("\n[TIMEOUT after %ss]\n" % timeout)
         return 1, "".join(out_lines)
@@ -298,7 +386,8 @@ def _run_stream(cmd, cwd, emit, timeout=1200):
 
 
 def run_opencode_review(pr_id, repo_name, local_repo, project_dir,
-                        region=REGION_DEFAULT, emit=print, model=None):
+                        region=REGION_DEFAULT, emit=print, model=None,
+                        control=None):
     """Step 1: trigger the pr-reviewer agent. Returns raw agent output."""
     exe = require_engine()
     agent = ensure_bundled_agent(project_dir, emit=emit)
@@ -313,14 +402,31 @@ def run_opencode_review(pr_id, repo_name, local_repo, project_dir,
     if model:
         cmd += ["--model", model]
     cmd += [prompt]
-    rc, out = _run_stream(cmd, cwd=project_dir, emit=emit)
+    rc, out = _run_stream(cmd, cwd=project_dir, emit=emit, control=control)
     if rc != 0 and "Verdict" not in out:
         raise RuntimeError(f"Review run failed (exit {rc}). See log.")
     return out
 
 
+def run_opencode_reply(message, project_dir, emit=print, model=None, control=None):
+    """Send a free-text reply into the agent's existing session.
+
+    Each `opencode run` is one turn, so answering a question is simply another
+    turn continued onto the same session — which is what lets the UI hold a
+    real back-and-forth with the reviewer.
+    """
+    exe = require_engine()
+    cmd = [exe, "run", "--agent", AGENT_NAME, "--dir", project_dir, "--auto", "--continue"]
+    if model:
+        cmd += ["--model", model]
+    cmd += [message]
+    _rc, out = _run_stream(cmd, cwd=project_dir, emit=emit, control=control)
+    return out
+
+
 def run_opencode_approve_description(pr_id, project_dir, emit=print, model=None,
-                                     repo_name=None, region=REGION_DEFAULT):
+                                     repo_name=None, region=REGION_DEFAULT,
+                                     control=None):
     """Step 2: tell the agent 'yes' — append findings to the PR description.
 
     Uses a fresh non-interactive run that continues the last session when
@@ -341,7 +447,7 @@ def run_opencode_approve_description(pr_id, project_dir, emit=print, model=None,
         if model:
             cmd += ["--model", model]
         cmd += args + [prompt]
-        rc, out = _run_stream(cmd, cwd=project_dir, emit=emit)
+        rc, out = _run_stream(cmd, cwd=project_dir, emit=emit, control=control)
         if rc == 0:
             return out
     raise RuntimeError("Agent description-update runs failed (tried --continue and fresh).")
@@ -531,10 +637,14 @@ def sync_destination_into_source(local_repo, dest, src, pr_id, emit=print):
                 emit(f"⚠ Could not restore branch {original}; clone is left on {src}.")
 
 
+MAX_CLARIFY_ROUNDS = 4
+
+
 def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
                   region=REGION_DEFAULT,
                   do_update_desc=True, do_merge=True, do_sync=True,
-                  dry_run=False, model=None, progress=None, emit=print):
+                  dry_run=False, model=None, progress=None, emit=print,
+                  control=None, ask=None):
     """Run the whole review → describe → merge pipeline. Returns dict summary.
 
     Project-agnostic: works with any CodeCommit repo + local clone.
@@ -551,6 +661,10 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
             except Exception:  # noqa: BLE001
                 pass
 
+    def ck():
+        if control is not None:
+            control.check()
+
     emit(f"▸ Target: CodeCommit repo '{repo_name}'  |  PR #{pr_id}  |  region {region}"
          + (f"  |  model {model}" if model else "  |  model (default)"))
     repo_name, local_clone = resolve_repo(repo_name, project_dir, local_repo)
@@ -561,11 +675,36 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
         raise RuntimeError(f"Local clone path not found: {local_clone}")
 
     # ---- Step 1: review ----
+    ck()
     pg(STAGE_REVIEW, "active")
     emit("\n═══ STEP 1 — AI review ═══")
     raw = run_opencode_review(pr_id, repo_name, local_clone, project_dir,
-                              region=region, emit=emit, model=model)
+                              region=region, emit=emit, model=model, control=control)
     review = parse_review_output(raw)
+
+    # The agent stops and asks when something is missing or ambiguous. Rather
+    # than dead-ending on "no verdict", hand the question to the UI and feed
+    # the answer back into the same session.
+    rounds = 0
+    while ask is not None and rounds < MAX_CLARIFY_ROUNDS:
+        if review.verdict_key and review.verdict_key != "unknown":
+            break
+        question = extract_question(raw)
+        if not question:
+            break
+        ck()
+        emit("\n💬 The reviewer is asking a question — waiting for your reply …")
+        answer = ask(question)
+        ck()
+        if not answer:
+            emit("▸ No reply given; continuing without one.")
+            break
+        rounds += 1
+        emit(f"▸ You: {answer[:300]}")
+        raw = run_opencode_reply(answer, project_dir, emit=emit, model=model,
+                                 control=control)
+        review = parse_review_output(raw)
+
     emit(f"\n◆ Verdict: {review.verdict_raw or review.verdict_key}   "
          f"Impact: {review.impact_score or '?'}/10 {review.impact_reason}")
     pg(STAGE_REVIEW, "done")
@@ -577,6 +716,7 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
         return {"review": review, "merged": False, "stopped": "unparsed-verdict"}
 
     # ---- Step 2: description ----
+    ck()
     if do_update_desc:
         pg(STAGE_DESCRIBE, "active")
         emit("\n═══ STEP 2 — Update PR description ═══")
@@ -587,7 +727,7 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
             try:
                 run_opencode_approve_description(pr_id, project_dir, emit=emit,
                                                  model=model, repo_name=repo_name,
-                                                 region=region)
+                                                 region=region, control=control)
             except Exception as e:  # noqa: BLE001
                 emit(f"⚠ Reviewer update run failed ({e}).")
             # A zero exit code only means the engine ran, not that the agent
@@ -614,6 +754,7 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
         pg(STAGE_DESCRIBE, "skipped")
 
     # ---- Steps 3/4: merge ----
+    ck()
     if not do_merge:
         emit("\n═══ Merge skipped by option. Done. ═══")
         pg(STAGE_MERGE_CHECK, "skipped")
@@ -626,6 +767,7 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
         pg(STAGE_MERGE, "skipped")
         return {"review": review, "merged": False, "stopped": "verdict-blocks-merge"}
 
+    ck()
     pr = get_pr(pr_id, region=region)
     if pr["status"] != "OPEN":
         emit(f"\n⛔ PR status is {pr['status']} (not OPEN) — will not merge.")
@@ -675,6 +817,7 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
         pg(STAGE_MERGE, "error")
         raise RuntimeError(f"Merge still failed after syncing {dest} into {src}.\n{last}")
 
+    ck()
     pg(STAGE_MERGE, "active")
     emit("\n═══ STEP 4 — Merge ═══")
     if not mergeable:

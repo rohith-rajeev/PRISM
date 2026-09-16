@@ -26,12 +26,17 @@ no pip packages) that reviews AWS CodeCommit pull requests end-to-end for
    source** (`git fetch + merge origin/<dest> + push`) and retries the merge.
 6. 🔴 Request-changes / ⛔ Block verdicts are **never merged**.
 
-A segmented progress control (Review / Describe / Merge check / Merge)
-tracks the run: the active segment is the current task, checked segments are
-done, dimmed ones are pending or skipped. The plan is dynamic per PR —
-describe/merge stages show as skipped when disabled, blocked by verdict, or
-dry-run, and the Merge segment switches to "Syncing…" when a fast-forward
-needs a destination→source sync first.
+A progress bar under the **Start Prisming** button tracks the run: the fill
+stops on the stage in flight, with a marker and caption per stage. The plan is
+dynamic per PR — describe/merge stages show as skipped when disabled, blocked
+by verdict, or dry-run, and the Merge caption switches to "Syncing…" when a
+fast-forward needs a destination→source sync first.
+
+**Stop** cancels at any point — it terminates the running child process and
+returns to idle. If the reviewer asks a question (missing PR id, ambiguous
+source branch), a **Reviewer needs your input** panel appears with the
+question and a free-text box, and your reply goes straight back into the same
+agent session.
 
 ## Run
 
@@ -54,12 +59,13 @@ PyInstaller can't cross-compile, so each OS builds on its own machine — push t
 uploads them as artifacts. See [`desktop/README.md`](desktop/README.md).
 
 ## UI
-Header with status pill, Project card, Model & behavior card, segmented
-progress (Review / Describe / Merge check / Merge), full-width run button,
-Verdict + Impact cards, dark log console, and split Copy-verdict / Clear-log
-buttons. The shipped theme is dark only — there is no theme toggle. All
-custom widgets are hand-drawn stdlib Tkinter canvas — still zero
-dependencies.
+Header with status pill; Project card; a two-column row pairing Repository
+mapping with Model & behavior (the model card spans the row for single-repo
+projects); `Start Prisming` + `Stop`; a progress bar beneath them; a compact
+Verdict + Impact row; the conditional reviewer-question panel; and a dark log
+console with an inline Clear. The shipped theme is dark only — there is no
+theme toggle. All custom widgets are hand-drawn stdlib Tkinter canvas — still
+zero dependencies.
 
 ## Model selection
 The Model field is a custom dark-themed picker (no native widget styling

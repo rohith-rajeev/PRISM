@@ -13,7 +13,7 @@ agent that runs behind the scenes, so the user only:
 1. selects the project **root folder**,
 2. confirms backend/frontend mapping **only if the project is multi-repo**,
 3. enters (or confirms) the repo, PR id, and region,
-4. presses **Review and auto-merge**.
+4. presses **Start Prisming**.
 
 PRISM then orchestrates the full pipeline with no further input:
 **AI review → PR description update → fast-forward merge** (syncing the base
@@ -140,28 +140,56 @@ comments, PR status is OPEN, auto-merge toggle on, not dry-run.
 
 ### 4.5 Progress + status
 
-The segmented control mirrors the pipeline live: active segment = current
-task, ✓ = done, dimmed = pending, `–` = skipped, red = error. The Merge cell
-temporarily reads **“4. Syncing…”** during a sync. The header pill shows
-Idle / Running… / Merged ✓ / Held / Dry-run done / Finished / Error. The
-dark log console streams every step; Copy verdict copies the verdict line.
+A progress bar sits **below** the action button and mirrors the pipeline
+live: one continuous track whose fill stops on the stage in flight, with a
+marker and caption per stage (✓ done, `–` skipped, ✕ error). The Merge
+caption reads **“Syncing…”** during a sync. The header pill shows Idle /
+Running… / Needs input / Stopping… / Stopped / Merged ✓ / Held / Dry-run
+done / Finished / Error. The dark log console streams every step and is
+cleared from a **Clear** control in its own header.
+
+### 4.6 Stopping a run
+
+**Stop** is live for the whole run. It cancels the pipeline, terminates the
+child process currently executing (an agent turn can otherwise sit silent for
+minutes), releases an outstanding agent question, and returns the UI to idle
+with the pill on *Stopped*. Cancellation is checked at every stage boundary,
+so a stop never lands halfway through a merge decision — though an AWS call
+already in flight may still complete server-side.
+
+### 4.7 Answering the reviewer
+
+The agent stops and asks when an input is missing or ambiguous (no PR id, two
+plausible source branches, and so on). When that happens PRISM shows a
+**Reviewer needs your input** panel between the verdict and the log, carrying
+the question and a free-text box; the reply is sent into the same agent
+session, and the resulting output is re-parsed for a verdict. Up to four such
+rounds are allowed per run. **Skip** declines to answer and lets the run
+finish on whatever it has. The panel exists only while a question is
+outstanding and costs no space otherwise.
 
 ---
 
 ## 5. UI reference
 
-- **Header:** ◇ badge, `PRISM` + subtitle, status pill (right).
+- **Header:** ◇ badge, `PRISM` + subtitle, status pill (right). The window
+  title is just `PRISM`.
 - **Project card:** working folder + Browse; dynamic target row
   (repo textbox **or** Backend/Frontend toggle + PR id + Region); detection
-  hint line.
-- **Repository mapping card:** only in multi-repo mode; two clone dropdowns
-  with search.
-- **Model and behavior card:** full-width model picker (grouped by provider,
-  type-to-filter, live `N models · M providers` count) + four checkboxes.
-- **Segments → Run → Verdict/Impact → log → Copy/Clear.**
-- Window: dark only, default 960×900, minimum 860×600. The bottom button bar
-  is allocated layout space first, so resizing (or short screens) squeezes
-  the log console — the action buttons can never be pushed out of view.
+  hint line. The working folder starts **empty** — nothing is scanned until
+  the user picks a folder.
+- **Middle row, two half-width cards:** *Repository mapping* (multi-repo only;
+  Backend and Frontend stacked on their own lines so long clone names stay
+  readable) and *Model and behavior* (model picker + four checkboxes). When
+  the mapping card is absent the model card spans the full row.
+- **Action row:** `▶ Start Prisming` plus the `■ Stop` kill switch.
+- **Progress bar** directly beneath the action it reports on.
+- **Verdict + Impact** in one compact row.
+- **Reviewer needs your input** panel — conditional (see 4.7).
+- **Log console** with an inline `Clear` in its header; it is the only widget
+  that expands, so resizing or a short screen squeezes the log and never the
+  controls above it.
+- Window: dark only, default 1020×900, minimum 900×620.
 
 ---
 
@@ -177,6 +205,7 @@ dark log console streams every step; Copy verdict copies the verdict line.
 - The agent itself can never merge/approve/push — enforced by its bundled
   definition; all writes go through PRISM's orchestrator or the agent's
   gated description-update step.
+- Stop is available for the entire run and always returns the UI to idle.
 
 ---
 
