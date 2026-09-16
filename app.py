@@ -19,10 +19,10 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).parent))
 from orchestrator import (  # noqa: E402
-    full_pipeline, list_available_models, detect_local_repos, normalise_verdict,
-    Cancelled, RunControl, REGION_DEFAULT,
+    list_available_models, detect_local_repos, normalise_verdict, REGION_DEFAULT,
     STAGE_REVIEW, STAGE_DESCRIBE, STAGE_MERGE_CHECK, STAGE_SYNC, STAGE_MERGE,
 )
+import jobs as J  # noqa: E402
 
 # ---------- palette (dark only) ----------
 PAL = {
@@ -486,34 +486,115 @@ class AgentPanel(RoundedCard):
         self._on_skip()
 
 
-class AskBridge:
-    """Blocking ask() for the worker thread, answered on the Tk thread.
+class ScrollFrame(tk.Frame):
+    """Scrollable container in pure Tk (canvas + inner frame + scrollbar).
 
-    The pipeline runs off-thread and Tk is not thread-safe, so the question
-    goes through the same queue as log lines and the worker parks on an Event
-    until the UI resolves it. The wait is polled rather than indefinite so a
-    Stop while a question is on screen releases the worker instead of leaking
-    a parked thread.
+    Extracted from Picker.open(), which has used this shape for its popup all
+    along. One difference: a popup binds the wheel to its transient Toplevel,
+    whereas an embedded list must bind to its own canvas or it would steal
+    wheel events from the whole window.
     """
 
-    def __init__(self, app):
-        self.app = app
-        self._event = threading.Event()
-        self._answer = None
+    def __init__(self, parent, bg_key="page"):
+        super().__init__(parent, bg=PAL[bg_key])
+        self._bg = bg_key
+        self.canvas = tk.Canvas(self, bg=PAL[bg_key], highlightthickness=0, bd=0)
+        self.scroll = tk.Scrollbar(self, command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.scroll.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.inner = tk.Frame(self.canvas, bg=PAL[bg_key])
+        self._win = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.canvas.bind("<Configure>",
+                         lambda e: self.canvas.itemconfig(self._win, width=e.width))
+        self.inner.bind("<Configure>", self._resized)
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            for w in (self.canvas, self.inner):
+                w.bind(seq, self._wheel)
 
-    def ask(self, question):
-        self._event.clear()
-        self._answer = None
-        self.app.log_q.put(("ask", question))
-        while not self._event.wait(0.2):
-            control = self.app._control
-            if control is None or control.cancelled():
-                return None
-        return self._answer
+    def _resized(self, _e):
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        # Only show the scrollbar when there is something to scroll.
+        need = self.inner.winfo_reqheight() > self.canvas.winfo_height()
+        if need and not self.scroll.winfo_manager():
+            self.scroll.pack(side="right", fill="y")
+        elif not need and self.scroll.winfo_manager():
+            self.scroll.pack_forget()
 
-    def resolve(self, answer):
-        self._answer = answer
-        self._event.set()
+    def _wheel(self, e):
+        step = -1 if (getattr(e, "delta", 0) > 0 or e.num == 4) else 1
+        self.canvas.yview_scroll(step, "units")
+
+
+class JobRow(RoundedCard):
+    """One line in the jobs list: status, target, verdict, impact, actions."""
+
+    def __init__(self, parent, job, on_open, on_stop, on_remove):
+        super().__init__(parent)
+        self.job = job
+        inner = self.inner
+        inner.config(padx=12, pady=7)
+        inner.columnconfigure(1, weight=1)
+
+        self.dot = tk.Canvas(inner, width=14, height=14, highlightthickness=0,
+                             bd=0, bg=PAL["card"])
+        self.dot.grid(row=0, column=0, rowspan=2, padx=(0, 10))
+
+        self.title = tk.Label(inner, text=job.label, font=FONT_B, bg=PAL["card"],
+                              fg=PAL["text"], anchor="w", cursor="hand2")
+        self.title.grid(row=0, column=1, sticky="w")
+        self.sub = tk.Label(inner, text="", font=FONT_XS, bg=PAL["card"],
+                            fg=PAL["muted"], anchor="w", cursor="hand2")
+        self.sub.grid(row=1, column=1, sticky="w")
+
+        self.verdict = tk.Label(inner, text="—", font=FONT_S, bg=PAL["card"],
+                                fg=PAL["muted"], anchor="w", width=24)
+        self.verdict.grid(row=0, column=2, rowspan=2, sticky="w", padx=(10, 6))
+        self.impact = tk.Label(inner, text="", font=FONT_S, bg=PAL["card"],
+                               fg=PAL["muted"], anchor="w", width=9)
+        self.impact.grid(row=0, column=3, rowspan=2, sticky="w", padx=(0, 8))
+
+        self.stop_btn = RoundedButton(inner, text="Stop", style="outline",
+                                      height=26, width=66, font=FONT_XS,
+                                      command=lambda: on_stop(job.id))
+        self.stop_btn.grid(row=0, column=4, rowspan=2, padx=(0, 6))
+        self.del_btn = RoundedButton(inner, text="✕", style="ghost", height=26,
+                                     width=30, font=FONT_XS,
+                                     command=lambda: on_remove(job.id))
+        self.del_btn.grid(row=0, column=5, rowspan=2)
+
+        for w in (inner, self.title, self.sub):
+            w.bind("<Button-1>", lambda _e: on_open(job.id))
+        self.refresh()
+
+    def refresh(self):
+        job = self.job
+        colour = {J.RUNNING: "accent", J.NEEDS_INPUT: "warn", J.QUEUED: "muted",
+                  J.STOPPING: "warn", J.STOPPED: "muted", J.ERROR: "bad",
+                  J.DONE: "good"}.get(job.status, "muted")
+        self.dot.delete("all")
+        self.dot.config(bg=PAL["card"])
+        self.dot.create_oval(3, 3, 12, 12, fill=PAL[colour], outline="")
+        label = {J.NEEDS_INPUT: "Needs input", J.QUEUED: "Queued",
+                 J.RUNNING: "Running…", J.STOPPING: "Stopping…",
+                 J.STOPPED: "Stopped", J.ERROR: "Error",
+                 J.DONE: "Finished"}.get(job.status, job.status)
+        if job.status == J.DONE and (job.result or {}).get("merged") is True:
+            label = "Merged ✓"
+        self.sub.config(text=f"{label}  ·  {job.spec.summary_bits()}")
+        if job.verdict_raw:
+            self.verdict.config(text=job.verdict_raw[:26],
+                                fg=PAL[_verdict_colour(job.verdict_key)])
+        # Same treatment as the detail card: score plus a severity icon. The
+        # agent's reason is a free-text clause and would be truncated to noise.
+        m = _IMPACT_RE.search(job.impact or "")
+        if m:
+            icon, colour = _impact_style(m.group(1), m.group(2))
+            self.impact.config(text=f"{icon} {m.group(1)}/{m.group(2)}".strip(),
+                               fg=PAL[colour])
+        else:
+            self.impact.config(text="", fg=PAL["muted"])
+        self.stop_btn.set_enabled(job.is_active)
+        self.del_btn.set_enabled(True)
 
 
 class Picker(tk.Frame):
@@ -694,22 +775,26 @@ class Picker(tk.Frame):
 
 
 class App(tk.Tk):
+    """Controller. Owns the jobs, the queue pump, and three sibling screens.
+
+    Only one set of run-output widgets exists: the detail screen renders
+    whichever job is selected rather than there being one screen per job.
+    """
+
     def __init__(self):
-        # className sets the X11 WM_CLASS. Without it Tk reports a generic
-        # "Tk", so desktop shells can't tell PRISM from any other Tk app and
-        # a launched window won't group under its own dock/taskbar icon.
         super().__init__(className="prism")
         self.title("PRISM")
         self.geometry("1020x900")
         self.minsize(900, 620)
         self.configure(bg=PAL["page"])
         self.log_q = queue.Queue()
-        self.running = False
-        self.stage_state = {}
+        self.manager = J.JobManager(self.log_q)
+        self.selected_job_id = None
+        self.last_spec = None        # seeds the next new-job form
+        self.rows = {}               # job id -> JobRow
+        self.screen = None
+        self.stage_state = {}        # mirrors the displayed job, for the bar
         self._verdict_key = ""
-        self._control = None          # orchestrator.RunControl for the live run
-        self._ask = AskBridge(self)
-        self._asking = False
         self._drain_job = None
         self._build()
         self._drain_job = self.after(80, self._drain_logs)
@@ -738,12 +823,11 @@ class App(tk.Tk):
         root = tk.Frame(self, bg=PAL["page"])
         root.pack(fill="both", expand=True, padx=14, pady=8)
 
-        # header: badge + titles … status pill
+        # ---- header: identity, live job tally, and the back affordance ----
         h = tk.Frame(root, bg=PAL["page"])
-        h.pack(fill="x", pady=(0, 4))
+        h.pack(fill="x", pady=(0, 6))
         self._badge = tk.Canvas(h, width=32, height=32, highlightthickness=0, bd=0)
         self._badge.pack(side="left")
-        self._badge_proxy = _BadgeProxy(self)
         titles = tk.Frame(h, bg=PAL["page"])
         titles.pack(side="left", padx=(12, 0))
         self._title_lb = tk.Label(titles, text="PRISM", font=TITLE_F,
@@ -755,7 +839,49 @@ class App(tk.Tk):
         self.pill = StatusPill(h)
         self.pill.pack(side="right")
         self.pill.set("Idle", "muted")
+        self.back_btn = RoundedButton(h, text="←  Jobs", style="outline", height=30,
+                                      width=100, font=FONT_S, command=self.show_jobs)
+        # packed/unpacked by the router
 
+        # ---- one container, three sibling screens, one mapped at a time ----
+        self.container = tk.Frame(root, bg=PAL["page"])
+        self.container.pack(fill="both", expand=True)
+
+        self.jobs_screen = tk.Frame(self.container, bg=PAL["page"])
+        self.new_screen = tk.Frame(self.container, bg=PAL["page"])
+        self.detail_screen = tk.Frame(self.container, bg=PAL["page"])
+
+        self._build_jobs_screen(self.jobs_screen)
+        self._build_new_screen(self.new_screen)
+        self._build_detail_screen(self.detail_screen)
+
+        self._draw_badge()
+        self._refresh_detection()
+        self._detect_job = None
+        self.proj_var.trace_add("write", self._on_proj_changed)
+        self._load_models_async()
+        self.show_jobs()
+
+    # ---------------- screen 1: the jobs list ----------------
+    def _build_jobs_screen(self, parent):
+        head = tk.Frame(parent, bg=PAL["page"])
+        head.pack(fill="x", pady=(0, 8))
+        tk.Label(head, text="JOBS", font=FONT_XS, bg=PAL["page"],
+                 fg=PAL["muted"]).pack(side="left")
+        RoundedButton(head, text="+  New job", command=self.show_new,
+                      style="primary", height=32, width=130,
+                      font=FONT_B).pack(side="right")
+        self.jobs_list = ScrollFrame(parent)
+        self.jobs_list.pack(fill="both", expand=True)
+        self.jobs_empty = tk.Label(
+            self.jobs_list.inner,
+            text="No jobs yet.\n\nStart one with “New job” — each pull request "
+                 "runs as its own job,\nand several can run at the same time.",
+            font=FONT_S, bg=PAL["page"], fg=PAL["muted"], justify="center")
+
+    # ---------------- screen 2: set up a new job ----------------
+    def _build_new_screen(self, parent):
+        root = parent
         # ---- Project card ----
         pc = RoundedCard(root)
         pc.pack(fill="x", pady=(0, 6))
@@ -858,19 +984,32 @@ class App(tk.Tk):
             CheckRow(mi, txt, var, muted=muted).pack(anchor="w")
         self._place_midrow()
 
-        # ---- action row: primary action, plus the kill switch ----
+
         arow = tk.Frame(root, bg=PAL["page"])
-        arow.pack(fill="x")
+        arow.pack(fill="x", pady=(2, 0))
         self.run_btn = RoundedButton(arow, text="▶  Start Prisming", command=self._start,
                                      style="primary", height=38, radius=10,
                                      font=("Segoe UI", 11, "bold"))
         self.run_btn.pack(side="left", fill="x", expand=True)
-        self.stop_btn = RoundedButton(arow, text="■  Stop", command=self._stop,
-                                      style="outline", height=38, radius=10,
-                                      font=FONT_B, width=130)
-        self.stop_btn.pack(side="left", padx=(8, 0))
-        self.stop_btn.set_enabled(False)
+        RoundedButton(arow, text="Cancel", command=self.show_jobs, style="outline",
+                      height=38, radius=10, font=FONT_B,
+                      width=120).pack(side="left", padx=(8, 0))
 
+    # ---------------- screen 3: one job in detail ----------------
+    def _build_detail_screen(self, parent):
+        root = parent
+        top = RoundedCard(root)
+        top.pack(fill="x", pady=(0, 6))
+        ti = top.inner
+        ti.config(padx=12, pady=7)
+        self.detail_title = tk.Label(ti, text="", font=FONT_B, bg=PAL["card"],
+                                     fg=PAL["text"], anchor="w")
+        self.detail_title.pack(side="left")
+        self.stop_btn = RoundedButton(ti, text="■  Stop", command=self._stop,
+                                      style="outline", height=30, width=110,
+                                      font=FONT_S)
+        self.stop_btn.pack(side="right")
+        self.stop_btn.set_enabled(False)
         # ---- progress: below the action, because it reports on it ----
         self.seg = ProgressBar(root)
         self.seg.pack(fill="x", pady=(2, 4))
@@ -989,7 +1128,9 @@ class App(tk.Tk):
         self.model_count.config(text="loading…")
         def work():
             models = list_available_models()
-            self.log_q.put(("models", models))
+            # App-level message, not a job's: the drain unpacks three
+            # fields, so carry a null job id rather than a short tuple.
+            self.log_q.put((None, "models", models))
         threading.Thread(target=work, daemon=True).start()
 
     def _apply_models(self, models):
@@ -1191,27 +1332,103 @@ class App(tk.Tk):
         self.impact_val.config(text=label, fg=PAL[colour])
 
     def _paint_verdict(self):
-        key = self._verdict_key
-        color = {"approve": "good", "approve-with-comments": "warn",
-                 "request-changes": "bad", "block": "bad"}.get(key, "text")
         try:
-            self.verdict_val.config(fg=PAL[color])
+            self.verdict_val.config(fg=PAL[_verdict_colour(self._verdict_key)])
         except Exception:  # noqa: BLE001
             pass
 
     # ----- run -----
-    def _start(self):
-        if self.running:
-            return
+    # ---------------- navigation ----------------
+    def _show_screen(self, screen):
+        for s in (self.jobs_screen, self.new_screen, self.detail_screen):
+            if s is not screen and s.winfo_manager():
+                s.pack_forget()
+        if not screen.winfo_manager():
+            screen.pack(fill="both", expand=True)
+        self.screen = screen
+        if screen is self.jobs_screen:
+            if self.back_btn.winfo_manager():
+                self.back_btn.pack_forget()
+        elif not self.back_btn.winfo_manager():
+            self.back_btn.pack(side="right", padx=(0, 10))
+
+    def show_jobs(self):
+        # Popups are position-anchored Toplevels; left open they would float
+        # over a screen that no longer exists.
+        self._close_pickers()
+        self.selected_job_id = None
+        self._show_screen(self.jobs_screen)
+        self._refresh_jobs_list()
+        self._refresh_pill()
+
+    def show_new(self):
+        if self.last_spec is not None:
+            self._populate_form(self.last_spec)
+        self._show_screen(self.new_screen)
+
+    def show_detail(self, job_id):
+        job = self.manager.jobs.get(job_id)
+        if job is None:
+            return self.show_jobs()
+        self._close_pickers()
+        self.selected_job_id = job_id
+        self._show_screen(self.detail_screen)
+        self._render_job(job)
+
+    def _close_pickers(self):
+        for picker in (getattr(self, "be_picker", None),
+                       getattr(self, "fe_picker", None),
+                       getattr(self, "model_picker", None)):
+            if picker is not None:
+                picker.close()
+
+    # ---------------- jobs list ----------------
+    def _refresh_jobs_list(self):
+        inner = self.jobs_list.inner
+        for job_id, row in list(self.rows.items()):
+            if job_id not in self.manager.jobs:
+                row.destroy()
+                del self.rows[job_id]
+        for job in self.manager.jobs.values():
+            row = self.rows.get(job.id)
+            if row is None:
+                row = JobRow(inner, job, on_open=self.show_detail,
+                             on_stop=self._stop_job, on_remove=self._remove_job)
+                self.rows[job.id] = row
+            if not row.winfo_manager():
+                row.pack(fill="x", pady=(0, 6))
+            row.refresh()
+        if self.manager.jobs:
+            if self.jobs_empty.winfo_manager():
+                self.jobs_empty.pack_forget()
+        elif not self.jobs_empty.winfo_manager():
+            self.jobs_empty.pack(pady=40)
+
+    def _refresh_pill(self):
+        """Header tally — app-level, since no single job owns the header."""
+        jobs = self.manager.jobs.values()
+        asking = sum(1 for j in jobs if j.status == J.NEEDS_INPUT)
+        running = sum(1 for j in jobs if j.status in (J.RUNNING, J.STOPPING))
+        queued = sum(1 for j in jobs if j.status == J.QUEUED)
+        if asking:
+            self.pill.set(f"{asking} need input", "warn")
+        elif running or queued:
+            txt = f"{running} running" + (f" · {queued} queued" if queued else "")
+            self.pill.set(txt, "accent")
+        else:
+            self.pill.set("Idle", "muted")
+
+    # ---------------- creating a job ----------------
+    def _build_spec(self):
+        """Validate the form and snapshot it, or return None after warning."""
         pr = _entry_value(self.pr_entry).strip()
         proj = self.proj_var.get().strip()
         if not pr.isdigit():
             messagebox.showwarning("PR id", "Enter a numeric CodeCommit PR id.")
-            return
+            return None
         if not Path(proj).is_dir():
             messagebox.showwarning("Project folder", "Pick a valid root folder first.")
-            return
-        # Resolve repo + clone from the current mode.
+            return None
         if self.mode == "multi":
             mapping = self._mapping()
             target = self.target_var.get() or "BE"
@@ -1221,97 +1438,160 @@ class App(tk.Tk):
                     "Mapping",
                     f"Select the {'Backend' if target == 'BE' else 'Frontend'} clone "
                     f"in Repository mapping first.")
-                return
+                return None
             other = mapping.get("FE" if target == "BE" else "BE")
             if other and other[1] == picked[1]:
                 messagebox.showwarning("Mapping", "Backend and Frontend point to the same clone.")
-                return
+                return None
             repo, local_repo = Path(picked[1]).name, picked[1]
         else:
             repo = self.repo_var.get().strip()
             if not repo:
                 messagebox.showwarning("Repository", "Enter the CodeCommit repository name.")
-                return
+                return None
             local_repo = self.single_path
-        self.log.delete("1.0", "end")
-        self._log_placeholder = False
-        self._reset_progress()
-        self.verdict_val.config(text="Running…")
-        self.impact_val.config(text="…", fg=PAL["text"])
-        self._verdict_key = ""
-        self._paint_verdict()
-        self.run_btn.set_text("⏳  Prisming…")
-        self.run_btn.set_enabled(False)
-        self.stop_btn.set_enabled(True)
-        self.running = True
-        self._control = RunControl()
-        self._hide_agent()
-        model = self.model_picker.get() or None
-        args = dict(project_dir=proj, repo_name=repo, pr_id=pr, local_repo=local_repo,
-                    region=self.region_var.get().strip() or REGION_DEFAULT,
-                    do_update_desc=self.upd_var.get(), do_merge=self.mrg_var.get(),
-                    do_sync=self.syn_var.get(), dry_run=self.dry_var.get(),
-                    model=model, control=self._control, ask=self._ask.ask)
-        threading.Thread(target=self._worker, kwargs=args, daemon=True).start()
+        return J.JobSpec(
+            project_dir=proj, repo_name=repo, pr_id=pr, local_repo=local_repo,
+            region=self.region_var.get().strip() or REGION_DEFAULT,
+            model=self.model_picker.get() or None,
+            do_update_desc=self.upd_var.get(), do_merge=self.mrg_var.get(),
+            do_sync=self.syn_var.get(), dry_run=self.dry_var.get())
 
-    def _worker(self, **args):
+    def _populate_form(self, spec):
+        """Seed the form from a previous job — usually only the PR id changes."""
+        self.proj_var.set(spec.project_dir)
+        self.region_var.set(spec.region)
+        self.upd_var.set(spec.do_update_desc)
+        self.mrg_var.set(spec.do_merge)
+        self.syn_var.set(spec.do_sync)
+        self.dry_var.set(spec.dry_run)
+        self._refresh_detection()
+        if self.mode != "multi":
+            self.repo_var.set(spec.repo_name)
+        self.pr_entry.delete(0, "end")
+        _restore_placeholder(self.pr_entry)
+
+    def _start(self):
+        spec = self._build_spec()
+        if spec is None:
+            return
+        sharer = self.manager.shares_clone_with(spec)
+        if sharer is not None and not messagebox.askyesno(
+                "Same clone",
+                f"{sharer.spec.label} is already using this clone.\n\n"
+                f"Both jobs can run — git operations on a shared checkout are "
+                f"serialised — but one may wait for the other. Start anyway?"):
+            return
         try:
-            summary = full_pipeline(
-                emit=lambda m: self.log_q.put(("log", m)),
-                progress=lambda stage, state: self.log_q.put(("progress", (stage, state))),
-                **args)
-            # Keep booleans as booleans — str()-ing `merged` turns False into
-            # the truthy string "False" and every run would report "Merged ✓".
-            self.log_q.put(("done", {k: v if isinstance(v, bool) else str(v)[:160]
-                                     for k, v in summary.items() if k != "review"}))
-        except Cancelled:
-            self.log_q.put(("stopped", None))
-        except Exception as e:  # noqa: BLE001
-            # A stop kills the child process, so the failure it provokes is
-            # the stop, not a real error — report it as such.
-            if self._control is not None and self._control.cancelled():
-                self.log_q.put(("stopped", None))
-            else:
-                self.log_q.put(("error", str(e)[:3000]))
+            job = self.manager.create(spec)
+        except J.DuplicateJob as e:
+            messagebox.showwarning("Already running", str(e))
+            return
+        self.last_spec = spec
+        self.manager.pump()
+        self._refresh_jobs_list()
+        self.show_detail(job.id)
+
+    # ---------------- per-job control ----------------
+    def _stop_job(self, job_id):
+        job = self.manager.stop(job_id)
+        if job is None:
+            return
+        if job.status == J.STOPPED:      # was queued, never started
+            job.append_log("■ Removed from the queue before it started.", "warn")
+        else:
+            job.append_log("\n■ Stopping — terminating the current step…", "warn")
+        if job_id == self.selected_job_id:
+            self._render_job(job)
+        self._refresh_jobs_list()
+        self._refresh_pill()
 
     def _stop(self):
-        """Kill switch: end the run and return the UI to idle."""
-        if not self.running or self._control is None:
+        if self.selected_job_id is not None:
+            self._stop_job(self.selected_job_id)
+
+    def _remove_job(self, job_id):
+        job = self.manager.jobs.get(job_id)
+        if job is not None and job.is_active and not messagebox.askyesno(
+                "Stop and remove", f"{job.label} is still running. Stop and remove it?"):
             return
-        self.stop_btn.set_enabled(False)
-        self._append("\n■ Stopping — terminating the current step…", "warn")
-        self._set_status("Stopping…", "warn")
-        self._control.cancel()      # also releases a parked agent question
+        self.manager.remove(job_id)
+        if self.selected_job_id == job_id:
+            self.show_jobs()
+        else:
+            self._refresh_jobs_list()
+        self.manager.pump()
+        self._refresh_pill()
 
-    def _finish_run(self):
-        self.running = False
-        self._control = None
+    # ---------------- rendering a job onto the detail widgets ----------------
+    def _render_job(self, job):
+        """Full repaint of the detail screen from the model.
+
+        Everything here reads the Job rather than replaying events, so a job
+        that ran entirely while another was on screen shows up correctly.
+        """
+        self.detail_title.config(text=job.summary_line())
+        self.stage_state = dict(job.stages)
+        self.seg.reset()
+        for sid, state in job.stages.items():
+            if sid == STAGE_SYNC:
+                continue
+            self.seg.set_stage(sid, state)
+        if job.stages.get(STAGE_SYNC) == "active":
+            self.seg.set_stage(STAGE_MERGE, "active", "Syncing…")
+        self.verdict_val.config(text=job.verdict_raw or "Not run yet")
+        self._verdict_key = job.verdict_key
+        self._paint_verdict()
+        self._paint_impact(job.impact)
         self.run_btn.set_text("▶  Start Prisming")
-        self.run_btn.set_enabled(True)
-        self.stop_btn.set_enabled(False)
-        self._hide_agent()
+        self.stop_btn.set_enabled(job.is_active)
+        self._render_log(job)
+        if job.pending_question:
+            # The ask event already fired while this job was unselected, so the
+            # panel has to be driven from stored state, not from the event.
+            self.agent_panel.present(job.pending_question)
+            if not self.agent_panel.winfo_manager():
+                self.agent_panel.pack(fill="x", pady=(0, 6), before=self._log_card)
+        else:
+            self._hide_agent()
 
-    # ----- agent conversation -----
-    def _show_agent(self, question):
-        self._asking = True
-        self.agent_panel.present(question)
-        if not self.agent_panel.winfo_manager():
-            self.agent_panel.pack(fill="x", pady=(0, 6), before=self._log_card)
-        self._set_status("Needs input", "warn")
+    def _render_log(self, job):
+        self.log.delete("1.0", "end")
+        if not job.log:
+            self._show_placeholder()
+            return
+        self._log_placeholder = False
+        # Group consecutive same-tag lines so a full buffer is a few hundred
+        # inserts rather than thousands.
+        run, run_tag = [], object()
+        for text, tag in job.log:
+            if tag != run_tag and run:
+                self.log.insert("end", "\n".join(run) + "\n", run_tag or ())
+                run = []
+            run_tag = tag
+            run.append(text)
+        if run:
+            self.log.insert("end", "\n".join(run) + "\n", run_tag or ())
+        self.log.see("end")
 
+    # ---------------- agent conversation ----------------
     def _hide_agent(self):
-        self._asking = False
         if self.agent_panel.winfo_manager():
             self.agent_panel.pack_forget()
 
     def _answer_agent(self, message):
-        if not self._asking:
+        job = self.manager.jobs.get(self.selected_job_id)
+        if job is None or not job.pending_question:
             return
+        job.pending_question = None
+        if job.status == J.NEEDS_INPUT:
+            job.status = J.RUNNING
         self._hide_agent()
-        if self.running:
-            self._set_status("Running…", "accent")
-        self._ask.resolve(message)
+        job.ask.resolve(message)
+        self._refresh_jobs_list()
+        self._refresh_pill()
 
+    # ---------------- the pump ----------------
     def _drain_logs(self):
         try:
             self._drain_once()
@@ -1321,90 +1601,122 @@ class App(tk.Tk):
             self._drain_job = self.after(80, self._drain_logs)
 
     def _on_close(self):
-        """Stop the pump and any live run before the window goes away.
+        """Stop the pump and every live job before the window goes away.
 
-        Without this the queued after() callback fires against a destroyed
-        interpreter and Tk prints 'invalid command name ..._drain_logs'.
+        daemon=True protects only the Python threads, not the opencode/git
+        children they spawned, so without cancelling each job those processes
+        would outlive the window.
         """
+        active = self.manager.active_jobs()
+        if active and not messagebox.askyesno(
+                "Quit PRISM",
+                f"{len(active)} job(s) are still running. Stop them and quit?"):
+            return
         if self._drain_job is not None:
             try:
                 self.after_cancel(self._drain_job)
             except Exception:  # noqa: BLE001
                 pass
             self._drain_job = None
-        if self._control is not None:
-            self._control.cancel()
+        self.manager.stop_all()
         self.destroy()
 
     def _drain_once(self):
+        touched = False
+        processed = 0
         try:
-            while True:
-                kind, payload = self.log_q.get_nowait()
-                if kind == "log":
-                    # Emitted lines are often prefixed with a blank line for
-                    # spacing; classify and match on the text, not the padding.
-                    text = payload.strip()
-                    low = text.lower()
-                    tag = None
-                    if text.startswith("◆") or text.startswith("✅"):
-                        tag = "ok"
-                    elif text.startswith("⚠") or "warning" in low:
-                        tag = "warn"
-                    elif text.startswith("⛔") or "fail" in low or "error" in low:
-                        tag = "err"
-                    self._append(payload, tag)
-                    if text.startswith("◆ Verdict:"):
-                        # One line: "◆ Verdict: <v>   Impact: <i>"
-                        m = re.match(r"◆ Verdict:\s*(.*?)\s{2,}Impact:\s*(.*)", text)
-                        verdict = m.group(1).strip() if m else text.replace("◆ ", "").strip()
-                        impact = m.group(2).strip() if m else ""
-                        self._verdict_cache = text.replace("◆ ", "").strip()
-                        self._verdict_key = _verdict_key_of(verdict)
-                        self.verdict_val.config(text=verdict)
-                        self._paint_impact(impact)
-                        self._paint_verdict()
-                elif kind == "progress":
-                    try:
-                        stage, state = payload
-                    except Exception:  # noqa: BLE001
-                        continue
-                    self._on_progress(stage, state)
-                elif kind == "ask":
-                    self._show_agent(payload)
-                elif kind == "stopped":
-                    self._finish_run()
-                    for sid, _ in STAGE_DEFS:
-                        if self.stage_state.get(sid) == "active":
-                            self._on_progress(sid, "error")
-                    self._set_status("Stopped", "warn")
-                    self._append("\n■ Run stopped. Back to idle.", "warn")
-                elif kind == "done":
-                    self._finish_run()
-                    stopped = str(payload.get("stopped") or "")
-                    if payload.get("merged") is True:
-                        self._set_status("Merged ✓", "good")
-                    elif stopped == "dry-run":
-                        self._set_status("Dry-run done", "accent")
-                    elif stopped in ("verdict-blocks-merge", "unparsed-verdict",
-                                     "not-fast-forwardable") or stopped.startswith("status-"):
-                        self._set_status("Held", "warn")
-                    else:
-                        self._set_status("Finished", "muted")
-                    self._append(f"\n—— finished: {payload} ——", "ok")
-                elif kind == "error":
-                    self._finish_run()
-                    for sid in [s for s, _ in STAGE_DEFS]:
-                        if self.stage_state.get(sid) == "active":
-                            self._on_progress(sid, "error")
-                    if self.stage_state.get(STAGE_SYNC) == "active":
-                        self._on_progress(STAGE_SYNC, "error")
-                    self._set_status("Error", "bad")
-                    self._append(f"\n⛔ ERROR: {payload}", "err")
-                elif kind == "models":
+            # Bounded per tick: a job flooding output must not keep the pump
+            # inside one tick and freeze the UI.
+            while processed < 500:
+                job_id, kind, payload = self.log_q.get_nowait()
+                processed += 1
+                if kind == "models":
                     self._apply_models(payload)
+                    continue
+                job = self.manager.jobs.get(job_id)
+                if job is None:
+                    continue          # dismissed while its worker was in flight
+                try:
+                    if self._handle(job, kind, payload):
+                        touched = True
+                except Exception:  # noqa: BLE001
+                    # One job's bad payload must not mask the others this tick.
+                    continue
         except queue.Empty:
             pass
+        if touched:
+            self._refresh_pill()
+            if self.screen is self.jobs_screen:
+                self._refresh_jobs_list()
 
+    def _handle(self, job, kind, payload):
+        """Apply one message to the model, then to the screen if it is showing.
+
+        Returns True when the jobs list / header need a repaint.
+        """
+        shown = job.id == self.selected_job_id and self.screen is self.detail_screen
+        if kind == "log":
+            text = payload.strip()
+            low = text.lower()
+            tag = None
+            if text.startswith("◆") or text.startswith("✅"):
+                tag = "ok"
+            elif text.startswith("⚠") or "warning" in low:
+                tag = "warn"
+            elif text.startswith("⛔") or "fail" in low or "error" in low:
+                tag = "err"
+            job.append_log(payload, tag)
+            if shown:
+                self._append(payload, tag)
+            if text.startswith("◆ Verdict:"):
+                m = re.match(r"◆ Verdict:\s*(.*?)\s{2,}Impact:\s*(.*)", text)
+                job.verdict_raw = (m.group(1).strip() if m
+                                   else text.replace("◆ ", "").strip())
+                job.impact = m.group(2).strip() if m else ""
+                job.verdict_key = _verdict_key_of(job.verdict_raw)
+                if shown:
+                    self.verdict_val.config(text=job.verdict_raw)
+                    self._verdict_key = job.verdict_key
+                    self._paint_verdict()
+                    self._paint_impact(job.impact)
+                return True
+            return False
+        if kind == "progress":
+            stage, state = payload
+            job.stages[stage] = state
+            if shown:
+                self.stage_state = job.stages
+                self._on_progress(stage, state)
+            return False
+        if kind == "ask":
+            job.pending_question = payload
+            job.status = J.NEEDS_INPUT
+            if shown:
+                self.agent_panel.present(payload)
+                if not self.agent_panel.winfo_manager():
+                    self.agent_panel.pack(fill="x", pady=(0, 6), before=self._log_card)
+            return True
+        if kind in ("done", "stopped", "error"):
+            if kind == "done":
+                job.status = J.DONE
+                job.result = payload
+                job.append_log(f"\n—— finished: {payload} ——", "ok")
+            elif kind == "stopped":
+                job.status = J.STOPPED
+                job.append_log("\n■ Run stopped.", "warn")
+            else:
+                job.status = J.ERROR
+                job.error = payload
+                job.append_log(f"\n⛔ ERROR: {payload}", "err")
+            for sid in [s for s, _ in STAGE_DEFS]:
+                if job.stages.get(sid) == "active":
+                    job.stages[sid] = "error"
+            job.pending_question = None
+            if shown:
+                self._render_job(job)
+            self.manager.pump()     # a slot just freed
+            return True
+        return False
 
 
 class _BadgeProxy:
@@ -1435,6 +1747,7 @@ def _default_project_dir():
 
 
 def _add_placeholder(entry, text):
+    entry._ph_text = text  # noqa: SLF001 - so it can be restored later
     entry.insert(0, text)
     entry._has_ph = True  # noqa: SLF001
     entry.config(fg=PAL["muted"])
@@ -1450,6 +1763,21 @@ def _add_placeholder(entry, text):
             entry.config(fg=PAL["muted"])
     entry.bind("<FocusIn>", on_in)
     entry.bind("<FocusOut>", on_out)
+
+
+def _restore_placeholder(entry):
+    """Put a cleared field back into its placeholder state.
+
+    Used when the new-job form is re-seeded from the previous job: everything
+    else carries over, but the PR id must always be typed fresh.
+    """
+    text = getattr(entry, "_ph_text", None)
+    if text is None:
+        return
+    entry.delete(0, "end")
+    entry.insert(0, text)
+    entry._has_ph = True  # noqa: SLF001
+    entry.config(fg=PAL["muted"])
 
 
 def _entry_value(entry):
@@ -1481,6 +1809,13 @@ def _impact_style(score, out_of=10):
     if ratio <= 0.8:
         return "🔴", "bad"         # 7-8  high
     return "⛔", "bad"             # 9-10 critical
+
+
+def _verdict_colour(key):
+    """Palette key for a verdict. Shared by the card and the jobs-list row so
+    the two can never disagree about how severe a verdict looks."""
+    return {"approve": "good", "approve-with-comments": "warn",
+            "request-changes": "bad", "block": "bad"}.get(key, "text")
 
 
 def _verdict_key_of(line):

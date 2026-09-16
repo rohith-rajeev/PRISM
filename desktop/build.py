@@ -135,6 +135,7 @@ def main():
         "--paths", str(ROOT),
         "--add-data", f"{agent_src}{os.pathsep}agents",
         "--hidden-import", "orchestrator",
+        "--hidden-import", "jobs",
         # Tkinter is the whole UI; everything else the stdlib drags in is dead
         # weight in a GUI binary.
         "--exclude-module", "test",

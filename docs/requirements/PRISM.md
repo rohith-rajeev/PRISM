@@ -152,7 +152,33 @@ done / Finished / Error. The dark log console streams every step and is
 cleared from a **Clear** control in its own header, which is labelled
 **CONVERSATION**.
 
-### 4.6 Stopping a run
+### 4.6 Jobs and parallelism
+
+Each pull request is an independent **job**. PRISM opens on a jobs list; a job
+is created from the New job screen and opens into a detail view. Up to three
+jobs run at once (`MAX_PARALLEL_JOBS` in `jobs.py`) and further jobs queue,
+starting automatically as slots free.
+
+Jobs are in-memory only — the stateless property in §9 is unchanged. Each job
+snapshots its settings at creation, so editing the form afterwards cannot reach
+a running job; the form is pre-filled from the previous job.
+
+Two admission rules protect shared resources:
+
+- A second job for the **same repository and PR id** is refused. Both would
+  read-modify-write that PR's description, and CodeCommit offers no revision
+  token on that call, so one set of findings would be lost silently.
+- A second job on the **same local clone** is allowed but confirmed first: git
+  operations serialise on the clone path, so the later job is safe but may wait.
+
+Parallelism is only safe because each job's agent conversation is pinned to its
+own engine session. `--continue` resolves to the newest session in a directory,
+so concurrent jobs in one folder could otherwise continue each other's
+conversation. The first turn captures a session id and later turns address it
+explicitly; where an id cannot be captured the turn falls back to `--continue`
+under a per-directory lock instead of racing.
+
+### 4.7 Stopping a run
 
 **Stop** is live for the whole run. It cancels the pipeline, terminates the
 child process currently executing (an agent turn can otherwise sit silent for
@@ -161,7 +187,7 @@ with the pill on *Stopped*. Cancellation is checked at every stage boundary,
 so a stop never lands halfway through a merge decision — though an AWS call
 already in flight may still complete server-side.
 
-### 4.7 Answering the reviewer
+### 4.8 Answering the reviewer
 
 The agent stops and asks when an input is missing or ambiguous (no PR id, two
 plausible source branches, and so on). When that happens PRISM shows a

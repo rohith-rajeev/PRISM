@@ -48,8 +48,13 @@ jobs:
 
       - name: Sanity-check the sources before packaging
         run: |
-          python -m compileall -q app.py orchestrator.py desktop/
-          python -c "import ast; [ast.parse(open(f, encoding='utf-8').read()) for f in ('app.py','orchestrator.py')]"
+          python -m compileall -q app.py orchestrator.py jobs.py desktop/
+          python -c "import ast; [ast.parse(open(f, encoding='utf-8').read()) for f in ('app.py','orchestrator.py','jobs.py')]"
+
+      - name: Unit tests
+        # Model, scheduler and engine-protocol tests. No Tk and no network, so
+        # they run on every platform's runner before anything is packaged.
+        run: python -m unittest discover -s tests -v
 
       - name: Build
         run: python desktop/build.py

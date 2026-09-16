@@ -4,6 +4,18 @@ Lightweight, project-agnostic desktop UI (Python **stdlib only** — Tkinter,
 no pip packages) that reviews AWS CodeCommit pull requests end-to-end for
 **any** repository.
 
+## Jobs
+Each pull request runs as its own **job**, and several run at once. PRISM opens
+on a jobs list showing every job's status, verdict and impact; clicking one
+opens the detailed view (progress, conversation, agent questions, Stop). Three
+jobs run concurrently by default and the rest queue, starting automatically as
+slots free.
+
+Jobs are in-memory only — PRISM stays stateless, so closing the window stops
+everything. Each job snapshots its settings when created, so setting up the
+next one never disturbs a job already running, and the new-job form is
+pre-filled from the last job (usually only the PR id changes).
+
 ## What it does
 1. You pick the project **root folder** — that's the only required input.
    PRISM scans it for `.git` clones:
@@ -59,11 +71,15 @@ PyInstaller can't cross-compile, so each OS builds on its own machine — push t
 uploads them as artifacts. See [`desktop/README.md`](desktop/README.md).
 
 ## UI
-Header with status pill; Project card; a two-column row pairing Repository
-mapping with Model & behavior (the model card spans the row for single-repo
-projects); `Start Prisming` + `Stop`; a progress bar beneath them; a compact
-Verdict + Impact row; the conditional reviewer-question panel; and a dark log
-console with an inline Clear. The shipped theme is dark only — there is no
+Three screens behind one header (badge, live job tally, back to the list):
+
+- **Jobs** — one row per job: status, target, verdict, impact, Stop, dismiss.
+- **New job** — Project card plus a two-column row pairing Repository mapping
+  with Model & behavior (the model card spans the row for single-repo
+  projects), then `Start Prisming`.
+- **Job detail** — a one-line target header with `Stop`, a progress bar, a
+  compact Verdict + Impact row, the conditional reviewer-question panel, and
+  the conversation console with an inline Clear. The shipped theme is dark only — there is no
 theme toggle. All custom widgets are hand-drawn stdlib Tkinter canvas — still
 zero dependencies.
 
@@ -91,8 +107,10 @@ on any other skill, agent, or checkout outside this folder.
 - `aws` CLI (CodeCommit access) + `git`
 
 ## Files
-- `app.py` — PRISM UI (threaded, live log, dynamic progress bar, dry-run toggle)
+- `app.py` — PRISM UI (three screens, threaded, live log, dry-run toggle)
+- `jobs.py` — job model and scheduler (no Tkinter, unit-tested)
 - `orchestrator.py` — backend: reviewer runs, verdict parsing, CodeCommit merge/sync
+- `tests/` — `python3 -m unittest discover -s tests`
 - `agents/pr-reviewer.md` — bundled project-agnostic reviewer agent
 - `desktop/` — packaging into a standalone executable (build-time only)
 - `docs/requirements/PRISM.md` — full tool documentation
@@ -112,3 +130,7 @@ on any other skill, agent, or checkout outside this folder.
 - The PR description write is verified against the live PR, not the engine's
   exit code; if the reviewer didn't write the marker block, the direct AWS-CLI
   fallback does.
+- Each job's agent conversation is pinned to its own engine session, so two
+  jobs in one project folder can never continue each other's conversation.
+- Git operations on a shared clone are serialised, and two jobs for the same
+  pull request are refused outright.
