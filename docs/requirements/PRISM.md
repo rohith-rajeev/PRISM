@@ -121,6 +121,9 @@ Review ──► Describe ──► Merge check ──► [Sync] ──► Merge
    `**Verdict:** ✅ Approve | ⚠️ Approve with comments | 🔴 Request changes | ⛔ Block`
    plus an **impact score 1–10** (blast radius, not line count).
    The verdict + impact populate the Verdict / Impact cards (color-coded).
+   The Impact card shows only `N/10`, prefixed by an icon scaled to the
+   score — ✅ ≤3, ⚠️ ≤6, 🔴 ≤8, ⛔ above. The agent's one-line reason is
+   often a full clause, so it stays in the log rather than stretching the row.
    An unparseable verdict stops the run before any write.
 2. **Describe.** The reviewer is asked to append its findings to the PR
    description (same `<!-- pr-reviewer:start --> … <!-- pr-reviewer:end -->`
@@ -146,7 +149,8 @@ marker and caption per stage (✓ done, `–` skipped, ✕ error). The Merge
 caption reads **“Syncing…”** during a sync. The header pill shows Idle /
 Running… / Needs input / Stopping… / Stopped / Merged ✓ / Held / Dry-run
 done / Finished / Error. The dark log console streams every step and is
-cleared from a **Clear** control in its own header.
+cleared from a **Clear** control in its own header, which is labelled
+**CONVERSATION**.
 
 ### 4.6 Stopping a run
 

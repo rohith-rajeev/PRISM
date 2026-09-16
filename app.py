@@ -940,7 +940,7 @@ class App(tk.Tk):
         lhead = tk.Frame(li, bg=PAL["log_bg"])
         lhead.pack(fill="x")
         REFRESH_PLAIN.append((lhead, {"bg": "log_bg"}))
-        lt = tk.Label(lhead, text="EXECUTION LOG", font=FONT_XS,
+        lt = tk.Label(lhead, text="CONVERSATION", font=FONT_XS,
                       bg=PAL["log_bg"], fg=PAL["muted"])
         lt.pack(side="left")
         REFRESH_PLAIN.append((lt, {"bg": "log_bg", "fg": "muted"}))
@@ -1220,6 +1220,17 @@ class App(tk.Tk):
         self.pill.set(txt, color)
 
     # ----- verdict / impact -----
+    def _paint_impact(self, raw):
+        """Show just `N/10`, prefixed by an icon scaled to the score."""
+        m = _IMPACT_RE.search(raw or "")
+        if not m:
+            self.impact_val.config(text="—", fg=PAL["text"])
+            return
+        score, out_of = m.group(1), m.group(2)
+        icon, colour = _impact_style(score, out_of)
+        label = f"{icon}  {score}/{out_of}".strip()
+        self.impact_val.config(text=label, fg=PAL[colour])
+
     def _paint_verdict(self):
         key = self._verdict_key
         color = {"approve": "good", "approve-with-comments": "warn",
@@ -1267,7 +1278,7 @@ class App(tk.Tk):
         self._log_placeholder = False
         self._reset_progress()
         self.verdict_val.config(text="Running…")
-        self.impact_val.config(text="…")
+        self.impact_val.config(text="…", fg=PAL["text"])
         self._verdict_key = ""
         self._paint_verdict()
         self.run_btn.set_text("⏳  Prisming…")
@@ -1387,11 +1398,11 @@ class App(tk.Tk):
                         # One line: "◆ Verdict: <v>   Impact: <i>"
                         m = re.match(r"◆ Verdict:\s*(.*?)\s{2,}Impact:\s*(.*)", text)
                         verdict = m.group(1).strip() if m else text.replace("◆ ", "").strip()
-                        impact = m.group(2).strip() if m else "—"
+                        impact = m.group(2).strip() if m else ""
                         self._verdict_cache = text.replace("◆ ", "").strip()
                         self._verdict_key = _verdict_key_of(verdict)
                         self.verdict_val.config(text=verdict)
-                        self.impact_val.config(text=impact)
+                        self._paint_impact(impact)
                         self._paint_verdict()
                 elif kind == "progress":
                     try:
@@ -1489,6 +1500,31 @@ def _entry_value(entry):
     if getattr(entry, "_has_ph", False):
         return ""
     return entry.get()
+
+
+# Impact is a 1-10 blast-radius score. Only the score belongs on the card: the
+# agent's one-line reason is often a full clause, and rendering it here stretched
+# the row. The reason is still written to the log, so nothing is lost.
+_IMPACT_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
+
+
+def _impact_style(score, out_of=10):
+    """Icon + palette key for a score, by its share of the scale.
+
+    Same glyph family as the verdict so the two cards read as one language,
+    and these four are already proven to render in this Tk build.
+    """
+    try:
+        ratio = float(score) / float(out_of or 10)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return "", "text"
+    if ratio <= 0.3:
+        return "✅", "good"        # 1-3  isolated
+    if ratio <= 0.6:
+        return "⚠️", "warn"        # 4-6  moderate
+    if ratio <= 0.8:
+        return "🔴", "bad"         # 7-8  high
+    return "⛔", "bad"             # 9-10 critical
 
 
 def _verdict_key_of(line):
