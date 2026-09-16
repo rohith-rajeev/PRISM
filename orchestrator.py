@@ -59,6 +59,60 @@ DESC_BLOCK_RE = re.compile(r"<!-- pr-reviewer:start -->.*?<!-- pr-reviewer:end -
 MERGEABLE_VERDICTS = ("approve", "approve with comments")
 
 
+# ---------------------------------------------------------------- locking --
+# Jobs run concurrently, and several of them commonly share one project folder
+# or one local clone. These locks serialise the few operations that mutate
+# shared state on disk.
+#
+# INVARIANT: no code path in this module may hold two of these locks at once.
+# It holds structurally today — the fallback directory lock is taken only in
+# the agent-turn helpers (pipeline steps 1-2) and the clone lock only inside
+# sync_destination_into_source (step 4) — and full_pipeline is straight-line,
+# so one is always released before the other is requested. That makes
+# lock-order inversion impossible. No lock is ever held across a human wait.
+_PATH_LOCKS = {}
+_PATH_LOCKS_GUARD = threading.Lock()
+
+
+def _lock_for(path):
+    """Process-wide mutex keyed on a resolved absolute path.
+
+    One table for both the clone lock and the project-directory lock on
+    purpose: resolve_repo() legitimately returns local_clone == project_dir
+    for the common "the project folder *is* the repo" layout, and two separate
+    tables would hand out two different locks for the same real directory.
+    """
+    try:
+        key = str(Path(path).expanduser().resolve())
+    except Exception:  # noqa: BLE001
+        key = str(path)
+    with _PATH_LOCKS_GUARD:
+        return _PATH_LOCKS.setdefault(key, threading.Lock())
+
+
+_JSON_SUPPORT = None
+_JSON_SUPPORT_GUARD = threading.Lock()
+
+
+def engine_supports_json(exe):
+    """Does this engine build understand `run --format json`?
+
+    Probed once and cached. An engine too old to know the flag fails the run
+    outright with no usable output, which is worse than the session race the
+    flag exists to fix — so when it is absent we simply never ask for it.
+    """
+    global _JSON_SUPPORT
+    with _JSON_SUPPORT_GUARD:
+        if _JSON_SUPPORT is None:
+            try:
+                proc = subprocess.run([exe, "run", "--help"], capture_output=True,
+                                      text=True, timeout=20)
+                _JSON_SUPPORT = "--format" in ((proc.stdout or "") + (proc.stderr or ""))
+            except Exception:  # noqa: BLE001
+                _JSON_SUPPORT = False
+        return _JSON_SUPPORT
+
+
 class Cancelled(RuntimeError):
     """Raised inside the pipeline when the user hits Stop."""
 
@@ -332,8 +386,43 @@ def _display_cmd(cmd):
     return " ".join(parts)
 
 
-def _run_stream(cmd, cwd, emit, timeout=1200, control=None):
-    """Run cmd, streaming stdout lines to emit. Returns (rc, full_output)."""
+def _event_session_id(evt):
+    """Session id carried by an engine event, if any."""
+    sid = evt.get("sessionID")
+    if sid:
+        return sid
+    part = evt.get("part")
+    if isinstance(part, dict):
+        return part.get("sessionID")
+    return None
+
+
+def _event_text(evt):
+    """Assistant-visible text an event carries, or None if it carries none.
+
+    Verified against a live `opencode run --format json`: text sits at
+    part.text, not at the top level — the top-level `type` only labels the
+    event. Tool calls and step markers carry no prose and return None.
+    """
+    part = evt.get("part")
+    if isinstance(part, dict) and part.get("type") == "text":
+        return part.get("text") or ""
+    if evt.get("type") == "text" and isinstance(evt.get("text"), str):
+        return evt["text"]
+    return None
+
+
+def _run_stream(cmd, cwd, emit, timeout=1200, control=None, json_mode=False):
+    """Run cmd, streaming output to emit.
+
+    Returns (rc, text, session_id). In json_mode the engine speaks a stream of
+    JSON events instead of rendered markdown: prose is reassembled from the
+    text events for the verdict parser and the log, and the session id is
+    captured so later turns can be pinned to this exact conversation with
+    --session rather than racing on --continue. session_id is None whenever
+    anything about the stream was unexpected, which tells the caller not to
+    trust continuation.
+    """
     if control is not None:
         control.check()
     emit(f"$ {_display_cmd(cmd)}")
@@ -360,10 +449,45 @@ def _run_stream(cmd, cwd, emit, timeout=1200, control=None):
     watchdog = threading.Timer(timeout, _kill_on_timeout)
     watchdog.daemon = True
     watchdog.start()
+    session_id = None
+    text_parts = []
+    flushed = 0
+    malformed = False
     try:
         for line in proc.stdout:
             out_lines.append(line)
-            emit(line.rstrip())
+            if not json_mode:
+                emit(line.rstrip())
+                continue
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                evt = json.loads(stripped)
+            except ValueError:
+                malformed = True
+                continue
+            if not isinstance(evt, dict):
+                malformed = True
+                continue
+            if session_id is None:
+                session_id = _event_session_id(evt)
+            piece = _event_text(evt)
+            if piece is None:
+                if str(evt.get("type", "")).endswith("error"):
+                    emit(f"⚠ {evt.get('message') or stripped[:200]}")
+                continue
+            # Events carry token-level deltas. Emitting one log line per event
+            # would shred the transcript into fragments, so buffer and release
+            # only completed lines — matching the one-line-per-emit behaviour
+            # of the plain-text path.
+            text_parts.append(piece)
+            joined = "".join(text_parts)
+            nl = joined.rfind("\n")
+            if nl >= flushed:
+                for done_line in joined[flushed:nl].split("\n"):
+                    emit(done_line)
+                flushed = nl + 1
         proc.wait(timeout=60)
     except Exception as e:  # noqa: BLE001
         try:
@@ -371,18 +495,35 @@ def _run_stream(cmd, cwd, emit, timeout=1200, control=None):
         except Exception:  # noqa: BLE001
             pass
         out_lines.append(f"\n[process error: {e}]\n")
-        return 1, "".join(out_lines)
+        return 1, "".join(out_lines), None
     finally:
         watchdog.cancel()
+        # Close the pipe explicitly: with many jobs in flight, relying on GC to
+        # reclaim these leaks file descriptors (and trips ResourceWarning).
+        try:
+            proc.stdout.close()
+        except Exception:  # noqa: BLE001
+            pass
         if control is not None:
             control.detach()
     if control is not None and control.cancelled():
         raise Cancelled("Run stopped.")
+    if json_mode:
+        text = "".join(text_parts)
+        tail = text[flushed:]
+        if tail.strip():
+            emit(tail.rstrip("\n"))
+        if malformed:
+            # Any surprise in the stream means the id may not belong to this
+            # conversation; refuse it rather than pin the wrong session.
+            session_id = None
+    else:
+        text = "".join(out_lines)
     if timed_out.is_set():
         out_lines.append("\n[TIMEOUT after %ss]\n" % timeout)
-        return 1, "".join(out_lines)
+        return 1, text + "\n[TIMEOUT after %ss]\n" % timeout, session_id
     rc = proc.returncode
-    return (1 if rc is None else rc), "".join(out_lines)
+    return (1 if rc is None else rc), text, session_id
 
 
 def run_opencode_review(pr_id, repo_name, local_repo, project_dir,
@@ -398,40 +539,75 @@ def run_opencode_review(pr_id, repo_name, local_repo, project_dir,
         f"Follow your pr-reviewer workflow and report the verdict in chat, "
         f"then stop and ask about updating the PR description."
     )
+    # No --session/--continue: a plain run always creates a fresh session, and
+    # --format json is what lets us capture its id for the follow-up turns.
+    json_mode = engine_supports_json(exe)
     cmd = [exe, "run", "--agent", agent, "--dir", project_dir, "--auto"]
+    if json_mode:
+        cmd += ["--format", "json"]
     if model:
         cmd += ["--model", model]
     cmd += [prompt]
-    rc, out = _run_stream(cmd, cwd=project_dir, emit=emit, control=control)
+    rc, out, session_id = _run_stream(cmd, cwd=project_dir, emit=emit,
+                                      control=control, json_mode=json_mode)
     if rc != 0 and "Verdict" not in out:
         raise RuntimeError(f"Review run failed (exit {rc}). See log.")
-    return out
+    return out, session_id
 
 
-def run_opencode_reply(message, project_dir, emit=print, model=None, control=None):
+def run_opencode_reply(message, project_dir, session_id=None, emit=print,
+                       model=None, control=None):
     """Send a free-text reply into the agent's existing session.
 
-    Each `opencode run` is one turn, so answering a question is simply another
-    turn continued onto the same session — which is what lets the UI hold a
-    real back-and-forth with the reviewer.
+    Each `opencode run` is one turn, so answering a question is another turn
+    continued onto the same session — which is what lets the UI hold a real
+    back-and-forth with the reviewer. Returns (output, session_id).
+    """
+    return _continue_turn(message, project_dir, session_id, emit, model, control,
+                          what="reply")
+
+
+def _continue_turn(prompt, project_dir, session_id, emit, model, control, what):
+    """One follow-up agent turn, pinned to a session where possible.
+
+    `--session <id>` addresses one specific conversation and cannot be hijacked
+    by a concurrent `--continue` elsewhere. When no id was captured we fall
+    back to `--continue`, which resolves to "the newest top-level session in
+    this directory" and therefore *can* pick up another job's conversation —
+    so that path is serialised on the project directory.
     """
     exe = require_engine()
-    cmd = [exe, "run", "--agent", AGENT_NAME, "--dir", project_dir, "--auto", "--continue"]
+    json_mode = engine_supports_json(exe)
+    cmd = [exe, "run", "--agent", AGENT_NAME, "--dir", project_dir, "--auto"]
+    if json_mode:
+        cmd += ["--format", "json"]
     if model:
         cmd += ["--model", model]
-    cmd += [message]
-    _rc, out = _run_stream(cmd, cwd=project_dir, emit=emit, control=control)
-    return out
+    if session_id:
+        cmd += ["--session", session_id]
+        cmd += [prompt]
+        rc, out, sid = _run_stream(cmd, cwd=project_dir, emit=emit,
+                                   control=control, json_mode=json_mode)
+        return rc, out, (sid or session_id)
+    emit(f"⚠ No session id was captured — running this {what} with --continue "
+         f"and holding a lock on {project_dir} so a concurrent job here cannot "
+         f"take over the wrong conversation.")
+    cmd += ["--continue", prompt]
+    with _lock_for(project_dir):
+        rc, out, sid = _run_stream(cmd, cwd=project_dir, emit=emit,
+                                   control=control, json_mode=json_mode)
+    # If this turn did yield a clean id, later turns pin properly again.
+    return rc, out, sid
 
 
-def run_opencode_approve_description(pr_id, project_dir, emit=print, model=None,
+def run_opencode_approve_description(pr_id, project_dir, session_id=None,
+                                     emit=print, model=None,
                                      repo_name=None, region=REGION_DEFAULT,
                                      control=None):
     """Step 2: tell the agent 'yes' — append findings to the PR description.
 
-    Uses a fresh non-interactive run that continues the last session when
-    possible, falling back to a new session. The agent already knows the
-    exact marker format (<!-- pr-reviewer:start --> ... ).
+    Continues the review's own session so the agent still has the findings it
+    just produced. Returns (output, session_id).
     """
     prompt = (
         f"Yes — append your findings as bullet points to the description of "
@@ -439,18 +615,11 @@ def run_opencode_approve_description(pr_id, project_dir, emit=print, model=None,
         + (f" (CodeCommit repository '{repo_name}', AWS region {region})" if repo_name else "")
         + " now (I approve this specific update)."
     )
-    exe = require_engine()
-    # Try continuing the previous review session first.
-    for args in (["--continue"], []):
-        cmd = [exe, "run", "--agent", AGENT_NAME,
-               "--dir", project_dir, "--auto"]
-        if model:
-            cmd += ["--model", model]
-        cmd += args + [prompt]
-        rc, out = _run_stream(cmd, cwd=project_dir, emit=emit, control=control)
-        if rc == 0:
-            return out
-    raise RuntimeError("Agent description-update runs failed (tried --continue and fresh).")
+    rc, out, sid = _continue_turn(prompt, project_dir, session_id, emit, model,
+                                  control, what="description update")
+    if rc != 0:
+        raise RuntimeError(f"Agent description-update run failed (exit {rc}).")
+    return out, sid
 
 
 def aws_cli(*args, region=REGION_DEFAULT):
@@ -561,7 +730,19 @@ def sync_destination_into_source(local_repo, dest, src, pr_id, emit=print):
 
     Equivalent of: git fetch, checkout source, merge origin/destination, push.
     Raises on merge conflicts (aborts the merge first).
+
+    Serialised on the clone: this is the one place that mutates the working
+    tree, and two jobs reviewing different PRs out of the same checkout would
+    otherwise interleave each other's `git checkout`. Reviews deliberately run
+    outside this lock — they read remote refs (origin/<dest>...origin/<src>),
+    which a concurrent checkout does not disturb, and holding the lock across a
+    multi-minute agent turn would serialise the whole tool.
     """
+    with _lock_for(local_repo):
+        return _sync_locked(local_repo, dest, src, pr_id, emit)
+
+
+def _sync_locked(local_repo, dest, src, pr_id, emit):
     def git(*args, quiet=False):
         cmd = ["git"] + list(args)
         if not quiet:
@@ -678,8 +859,9 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
     ck()
     pg(STAGE_REVIEW, "active")
     emit("\n═══ STEP 1 — AI review ═══")
-    raw = run_opencode_review(pr_id, repo_name, local_clone, project_dir,
-                              region=region, emit=emit, model=model, control=control)
+    raw, session_id = run_opencode_review(pr_id, repo_name, local_clone, project_dir,
+                                          region=region, emit=emit, model=model,
+                                          control=control)
     review = parse_review_output(raw)
 
     # The agent stops and asks when something is missing or ambiguous. Rather
@@ -701,8 +883,8 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
             break
         rounds += 1
         emit(f"▸ You: {answer[:300]}")
-        raw = run_opencode_reply(answer, project_dir, emit=emit, model=model,
-                                 control=control)
+        _rc, raw, session_id = _continue_turn(answer, project_dir, session_id,
+                                              emit, model, control, what="reply")
         review = parse_review_output(raw)
 
     emit(f"\n◆ Verdict: {review.verdict_raw or review.verdict_key}   "
@@ -725,9 +907,9 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
             pg(STAGE_DESCRIBE, "skipped")
         else:
             try:
-                run_opencode_approve_description(pr_id, project_dir, emit=emit,
-                                                 model=model, repo_name=repo_name,
-                                                 region=region, control=control)
+                _out, session_id = run_opencode_approve_description(
+                    pr_id, project_dir, session_id, emit=emit, model=model,
+                    repo_name=repo_name, region=region, control=control)
             except Exception as e:  # noqa: BLE001
                 emit(f"⚠ Reviewer update run failed ({e}).")
             # A zero exit code only means the engine ran, not that the agent

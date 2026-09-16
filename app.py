@@ -37,7 +37,6 @@ PAL = {
     "good_bg": "#123B2F", "bad_bg": "#3B1218",
     "badge_bg": "#1E3A5F", "badge_fg": "#7FB0FF",
 }
-REFRESH = []  # widgets with refresh_theme()
 
 
 def _mono():
@@ -103,7 +102,6 @@ class RoundedCard(tk.Frame):
         self._win = self.canvas.create_window(radius, radius, window=self.inner, anchor="nw")
         self.canvas.bind("<Configure>", self._cv_cfg)
         self.inner.bind("<Configure>", self._in_cfg)
-        REFRESH.append(self)
 
     def refresh_theme(self):
         self.config(bg=PAL["page"])
@@ -167,7 +165,6 @@ class RoundedButton(tk.Canvas):
         self.bind("<Enter>", lambda _e: (setattr(self, "_hover", True), self._draw()))
         self.bind("<Leave>", lambda _e: (setattr(self, "_hover", False), self._draw()))
         self.bind("<Button-1>", self._click)
-        REFRESH.append(self)
 
     def set_text(self, text):
         self._text = text
@@ -275,7 +272,6 @@ class ProgressBar(tk.Canvas):
         super().__init__(parent, height=height, highlightthickness=0, bd=0)
         self.reset()
         self.bind("<Configure>", lambda _e: self._draw())
-        REFRESH.append(self)
 
     def reset(self):
         self.states = {sid: "pending" for sid, _ in STAGE_DEFS}
@@ -360,7 +356,6 @@ class StatusPill(tk.Canvas):
         self._text = "Idle"
         self._color = PAL["muted"]
         self.bind("<Configure>", lambda _e: self._draw())
-        REFRESH.append(self)
 
     def set(self, text, color_key="muted"):
         self._text = text
@@ -397,7 +392,6 @@ class CheckRow(tk.Frame):
         self.label.pack(side="left", padx=(8, 0))
         self.box.bind("<Button-1>", lambda _e: self.toggle())
         self.label.bind("<Button-1>", lambda _e: self.toggle())
-        REFRESH.append(self)
         self.refresh_theme()
 
     def toggle(self):
@@ -441,11 +435,9 @@ class AgentPanel(RoundedCard):
         # keeps them at a fixed, always-visible position and saves the height.
         head = tk.Frame(inner, bg=PAL["card"])
         head.pack(fill="x")
-        REFRESH_PLAIN.append((head, {"bg": "card"}))
         lb = tk.Label(head, text="💬  Reviewer needs your input", font=FONT_B,
                       bg=PAL["card"], fg=PAL["accent_text"])
         lb.pack(side="left")
-        REFRESH_PLAIN.append((lb, {"bg": "card", "fg": "accent_text"}))
         RoundedButton(head, text="Send  ▸", command=self._send, style="primary",
                       height=26, width=104, font=FONT_S).pack(side="right")
         RoundedButton(head, text="Skip", command=self._skip, style="outline",
@@ -456,7 +448,6 @@ class AgentPanel(RoundedCard):
                                 highlightthickness=0, cursor="arrow")
         self.question.pack(fill="x", pady=(5, 5))
         self.question.config(state="disabled")
-        REFRESH_PLAIN.append((self.question, {"bg": "card", "fg": "text"}))
 
         self.entry = tk.Text(inner, height=2, font=FONT, bg=PAL["field"],
                              fg=PAL["text"], insertbackground=PAL["text"],
@@ -464,16 +455,11 @@ class AgentPanel(RoundedCard):
                              highlightbackground=PAL["border"],
                              highlightcolor=PAL["accent"])
         self.entry.pack(fill="x")
-        REFRESH_PLAIN.append((self.entry, {"bg": "field", "fg": "text",
-                                           "insertbackground": "text",
-                                           "highlightbackground": "border",
-                                           "highlightcolor": "accent"}))
         self.entry.bind("<Return>", self._enter)
         self.entry.bind("<Shift-Return>", lambda _e: None)
         hint = tk.Label(inner, text="Enter to send · Shift+Enter for a new line",
                         font=FONT_XS, bg=PAL["card"], fg=PAL["muted"], anchor="w")
         hint.pack(fill="x", pady=(3, 0))
-        REFRESH_PLAIN.append((hint, {"bg": "card", "fg": "muted"}))
 
     def present(self, question):
         self.question.config(state="normal")
@@ -556,7 +542,6 @@ class Picker(tk.Frame):
                                    font=FONT, anchor="w",
                                    width=field_width or field_chars * 8)
         self.field.pack(fill="x", expand=True)
-        REFRESH.append(self)
 
     def refresh_theme(self):
         self.config(bg=PAL["card"])
@@ -734,7 +719,6 @@ class App(tk.Tk):
     def _lab(self, parent, text, font=FONT_XS, fg="muted", bg="card"):
         lb = tk.Label(parent, text=text, font=font, bg=PAL[bg], fg=PAL[fg])
         lb._roles = {"bg": bg, "fg": fg}  # noqa: SLF001
-        REFRESH_PLAIN.append((lb, lb._roles))  # noqa: SLF001
         return lb
 
     def _entry(self, parent, var=None, font=FONT, width=None, mono=False):
@@ -747,14 +731,12 @@ class App(tk.Tk):
         e._roles = {"bg": "field", "fg": "text",  # noqa: SLF001
                     "insertbackground": "text",
                     "highlightbackground": "border", "highlightcolor": "accent"}
-        REFRESH_PLAIN.append((e, e._roles))  # noqa: SLF001
         return e
 
     # ----- layout -----
     def _build(self):
         root = tk.Frame(self, bg=PAL["page"])
         root.pack(fill="both", expand=True, padx=14, pady=8)
-        REFRESH_PLAIN.append((root, {"bg": "page"}))
 
         # header: badge + titles … status pill
         h = tk.Frame(root, bg=PAL["page"])
@@ -762,17 +744,14 @@ class App(tk.Tk):
         self._badge = tk.Canvas(h, width=32, height=32, highlightthickness=0, bd=0)
         self._badge.pack(side="left")
         self._badge_proxy = _BadgeProxy(self)
-        REFRESH.append(self._badge_proxy)
         titles = tk.Frame(h, bg=PAL["page"])
         titles.pack(side="left", padx=(12, 0))
         self._title_lb = tk.Label(titles, text="PRISM", font=TITLE_F,
                                   bg=PAL["page"], fg=PAL["text"])
         self._title_lb.pack(anchor="w")
-        REFRESH_PLAIN.append((self._title_lb, {"bg": "page", "fg": "text"}))
         self._sub_lb = tk.Label(titles, text="Pull request inspection and safety manager",
                                 font=FONT_S, bg=PAL["page"], fg=PAL["muted"])
         self._sub_lb.pack(anchor="w")
-        REFRESH_PLAIN.append((self._sub_lb, {"bg": "page", "fg": "muted"}))
         self.pill = StatusPill(h)
         self.pill.pack(side="right")
         self.pill.set("Idle", "muted")
@@ -786,7 +765,6 @@ class App(tk.Tk):
         self._lab(pi, "Working folder").pack(anchor="w", pady=(0, 4))
         frow = tk.Frame(pi, bg=PAL["card"])
         frow.pack(fill="x", pady=(0, 6))
-        REFRESH_PLAIN.append((frow, {"bg": "card"}))
         self.proj_var = tk.StringVar(value=_default_project_dir())
         self._entry(frow, self.proj_var, mono=True).pack(side="left", fill="x",
                                                          expand=True, ipady=3, padx=(0, 10))
@@ -794,15 +772,12 @@ class App(tk.Tk):
                       height=32, width=110).pack(side="left")
         trow = tk.Frame(pi, bg=PAL["card"])
         trow.pack(fill="x")
-        REFRESH_PLAIN.append((trow, {"bg": "card"}))
         # Left cell is rebuilt per mode: single-repo → CodeCommit repo textbox;
         # multi-repo → Backend/Frontend target toggle. PR id + Region stay put.
         self.leftbox = tk.Frame(trow, bg=PAL["card"])
         self.leftbox.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        REFRESH_PLAIN.append((self.leftbox, {"bg": "card"}))
         c2 = tk.Frame(trow, bg=PAL["card"])
         c2.pack(side="left", padx=(0, 10))
-        REFRESH_PLAIN.append((c2, {"bg": "card"}))
         self._lab(c2, "PR id").pack(anchor="w", pady=(0, 4))
         self.pr_var = tk.StringVar()
         self.pr_entry = self._entry(c2, self.pr_var, width=12)
@@ -810,7 +785,6 @@ class App(tk.Tk):
         _add_placeholder(self.pr_entry, "e.g. 214")
         c3 = tk.Frame(trow, bg=PAL["card"])
         c3.pack(side="left")
-        REFRESH_PLAIN.append((c3, {"bg": "card"}))
         self._lab(c3, "Region").pack(anchor="w", pady=(0, 4))
         self.region_var = tk.StringVar(value=REGION_DEFAULT)
         self._entry(c3, self.region_var, width=14).pack(ipady=3)
@@ -832,7 +806,6 @@ class App(tk.Tk):
         # hidden the model card takes the whole row rather than leaving a gap.
         self.midrow = tk.Frame(root, bg=PAL["page"])
         self.midrow.pack(fill="x", pady=(0, 6))
-        REFRESH_PLAIN.append((self.midrow, {"bg": "page"}))
         self.midrow.columnconfigure(0, weight=1, uniform="mid")
         self.midrow.columnconfigure(1, weight=1, uniform="mid")
 
@@ -845,11 +818,9 @@ class App(tk.Tk):
         def _clone_row(label, title, empty_label, pady):
             col = tk.Frame(mapi, bg=PAL["card"])
             col.pack(fill="x", pady=pady)
-            REFRESH_PLAIN.append((col, {"bg": "card"}))
             lb = tk.Label(col, text=label, font=FONT_XS, bg=PAL["card"],
                           fg=PAL["muted"], anchor="w")
             lb.pack(anchor="w", pady=(0, 2))
-            REFRESH_PLAIN.append((lb, {"bg": "card", "fg": "muted"}))
             picker = Picker(col, title=title, empty_label=empty_label,
                             group_key=lambda m: "", empty_hint="No clones detected")
             picker.pack(fill="x")
@@ -866,7 +837,6 @@ class App(tk.Tk):
         mi.config(padx=12, pady=6)
         mhead = tk.Frame(mi, bg=PAL["card"])
         mhead.pack(fill="x")
-        REFRESH_PLAIN.append((mhead, {"bg": "card"}))
         self._lab(mhead, "Model and behavior", font=FONT_B, fg="text").pack(side="left")
         self.model_refresh = RoundedButton(mhead, text="↻", command=self._load_models_async,
                                            style="ghost", height=22, radius=11,
@@ -891,7 +861,6 @@ class App(tk.Tk):
         # ---- action row: primary action, plus the kill switch ----
         arow = tk.Frame(root, bg=PAL["page"])
         arow.pack(fill="x")
-        REFRESH_PLAIN.append((arow, {"bg": "page"}))
         self.run_btn = RoundedButton(arow, text="▶  Start Prisming", command=self._start,
                                      style="primary", height=38, radius=10,
                                      font=("Segoe UI", 11, "bold"))
@@ -919,12 +888,10 @@ class App(tk.Tk):
                                     bg=PAL["card"], fg=PAL["text"], anchor="w",
                                     justify="left")
         self.verdict_val.grid(row=1, column=0, sticky="ew")
-        REFRESH_PLAIN.append((self.verdict_val, {"bg": "card"}))
         self.impact_val = tk.Label(vi, text="—", font=("Segoe UI", 11, "bold"),
                                    bg=PAL["card"], fg=PAL["text"], anchor="w",
                                    justify="left")
         self.impact_val.grid(row=1, column=1, sticky="ew")
-        REFRESH_PLAIN.append((self.impact_val, {"bg": "card", "fg": "text"}))
 
         # ---- agent conversation (packed only while a question is open) ----
         self.agent_panel = AgentPanel(root, on_send=self._answer_agent,
@@ -936,14 +903,11 @@ class App(tk.Tk):
         lc.pack(fill="both", expand=True)
         li = lc.inner
         li.config(padx=10, pady=8)
-        REFRESH_PLAIN.append((li, {"bg": "log_bg"}))
         lhead = tk.Frame(li, bg=PAL["log_bg"])
         lhead.pack(fill="x")
-        REFRESH_PLAIN.append((lhead, {"bg": "log_bg"}))
         lt = tk.Label(lhead, text="CONVERSATION", font=FONT_XS,
                       bg=PAL["log_bg"], fg=PAL["muted"])
         lt.pack(side="left")
-        REFRESH_PLAIN.append((lt, {"bg": "log_bg", "fg": "muted"}))
         # Clearing belongs to the log, not to a full-width button competing
         # with the primary action for attention.
         self.clear_btn = tk.Label(lhead, text="Clear", font=FONT_XS, bg=PAL["log_bg"],
@@ -952,10 +916,8 @@ class App(tk.Tk):
         self.clear_btn.bind("<Button-1>", lambda _e: self._clear_log())
         self.clear_btn.bind("<Enter>", lambda e: e.widget.config(fg=PAL["accent"]))
         self.clear_btn.bind("<Leave>", lambda e: e.widget.config(fg=PAL["muted"]))
-        REFRESH_PLAIN.append((self.clear_btn, {"bg": "log_bg", "fg": "muted"}))
         lbody = tk.Frame(li, bg=PAL["log_bg"])
         lbody.pack(fill="both", expand=True, pady=(4, 0))
-        REFRESH_PLAIN.append((lbody, {"bg": "log_bg"}))
         self.log = tk.Text(lbody, height=4, font=_mono(), bg=PAL["log_bg"],
                            fg=PAL["log_fg"], insertbackground=PAL["log_fg"],
                            relief="flat", wrap="word")
@@ -963,8 +925,6 @@ class App(tk.Tk):
         self.log.configure(yscrollcommand=scroll.set)
         self.log.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
-        REFRESH_PLAIN.append((self.log, {"bg": "log_bg", "fg": "log_fg",
-                                         "insertbackground": "log_fg"}))
         self.log.tag_config("ok", foreground=PAL["good"])
         self.log.tag_config("warn", foreground=PAL["warn"])
         self.log.tag_config("err", foreground=PAL["bad"])
@@ -1152,7 +1112,6 @@ class App(tk.Tk):
             self._lab(self.leftbox, "Review target").pack(anchor="w", pady=(0, 4))
             brow = tk.Frame(self.leftbox, bg=PAL["card"])
             brow.pack(anchor="w")
-            REFRESH_PLAIN.append((brow, {"bg": "card"}))
             self.tbe_btn = RoundedButton(brow, text="Backend", height=30, width=108,
                                          font=FONT_S,
                                          command=lambda: self._set_target("BE"))
@@ -1459,9 +1418,6 @@ class _BadgeProxy:
             self.app._draw_badge()
         except Exception:  # noqa: BLE001
             pass
-
-
-REFRESH_PLAIN: list = []
 
 
 def _default_project_dir():
