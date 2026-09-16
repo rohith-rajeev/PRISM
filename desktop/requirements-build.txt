@@ -1,0 +1,3 @@
+# Build-time only. PRISM itself has zero runtime dependencies (stdlib + Tkinter).
+# Install with:  python3 -m pip install -r desktop/requirements-build.txt
+pyinstaller>=5.13,<8

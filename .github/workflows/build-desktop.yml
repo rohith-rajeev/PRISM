@@ -1,0 +1,113 @@
+name: Build desktop executables
+
+# PyInstaller cannot cross-compile, so each OS is built on its own runner.
+on:
+  push:
+    branches: [main, develop]
+    tags: ['v*']
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: Linux
+            artifact: PRISM-linux-x86_64
+          - os: macos-latest
+            label: macOS (Apple silicon)
+            artifact: PRISM-macos-arm64
+          - os: windows-latest
+            label: Windows
+            artifact: PRISM-windows-x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Tkinter (Linux runners ship Python without it)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y python3-tk
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r desktop/requirements-build.txt
+
+      - name: Sanity-check the sources before packaging
+        run: |
+          python -m compileall -q app.py orchestrator.py desktop/
+          python -c "import ast; [ast.parse(open(f, encoding='utf-8').read()) for f in ('app.py','orchestrator.py')]"
+
+      - name: Build
+        run: python desktop/build.py
+
+      - name: Verify the bundle contains the reviewer agent
+        shell: bash
+        run: |
+          set -e
+          # The agent is the one data file the app cannot work without.
+          if [ "$RUNNER_OS" = "Windows" ]; then TARGET=dist/PRISM.exe; else TARGET=dist/PRISM; fi
+          python - "$TARGET" <<'PY'
+          import sys, pathlib
+          target = pathlib.Path(sys.argv[1])
+          assert target.exists(), f"no executable at {target}"
+          blob = target.read_bytes()
+          assert b"pr-reviewer" in blob, "bundled agent missing from the executable"
+          print(f"{target} ok ({target.stat().st_size / 1048576:.1f} MiB)")
+          PY
+
+      - name: Package
+        shell: bash
+        run: |
+          set -e
+          mkdir -p out
+          cp README.md out/
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            # ditto preserves the bundle's symlinks and permission bits; zip does not.
+            ditto -c -k --keepParent dist/PRISM.app "out/${{ matrix.artifact }}.zip"
+          elif [ "$RUNNER_OS" = "Windows" ]; then
+            cp dist/PRISM.exe out/
+          else
+            cp dist/PRISM dist/PRISM.desktop dist/PRISM.png out/
+          fi
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: out/
+          if-no-files-found: error
+
+  release:
+    name: Attach builds to the release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Flatten artifact tree
+        run: |
+          mkdir -p release
+          find artifacts -type f ! -name README.md -exec cp {} release/ \;
+          ls -la release
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true

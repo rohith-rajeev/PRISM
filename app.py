@@ -1,0 +1,1231 @@
+#!/usr/bin/env python3
+"""PRISM — Pull Request Inspection & Safety Manager.
+
+Lightweight desktop UI (stdlib only) that reviews AWS CodeCommit pull
+requests with a bundled reviewer agent, updates the PR description, and
+auto-merges on approval. Project-agnostic: works with any CodeCommit
+repository + local clone.
+
+Run:  python3 app.py   (or ./run.sh, or the packaged desktop build)
+"""
+import queue
+import re
+import threading
+import tkinter as tk
+import tkinter.font as tkfont
+from tkinter import filedialog, messagebox
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).parent))
+from orchestrator import (  # noqa: E402
+    full_pipeline, list_available_models, detect_local_repos, normalise_verdict,
+    REGION_DEFAULT,
+    STAGE_REVIEW, STAGE_DESCRIBE, STAGE_MERGE_CHECK, STAGE_SYNC, STAGE_MERGE,
+)
+
+# ---------- palette (dark only) ----------
+PAL = {
+    "page": "#1B1D22", "card": "#23262C", "border": "#373B43",
+    "text": "#F0F1F3", "muted": "#9BA0A8",
+    "field": "#1C1F24", "accent": "#5B9CFF",
+    "accent_tint": "#1E3A5F", "accent_text": "#7FB0FF",
+    "run_bg": "#F4F4F5", "run_fg": "#141414",
+    "disabled_bg": "#3A3D44", "disabled_fg": "#9BA0A8",
+    "log_bg": "#0F1214", "log_fg": "#C7D0D9", "log_ph": "#6E8B74",
+    "good": "#34C98E", "warn": "#E5A13D", "bad": "#E5606E",
+    "good_bg": "#123B2F", "bad_bg": "#3B1218",
+    "badge_bg": "#1E3A5F", "badge_fg": "#7FB0FF",
+}
+REFRESH = []  # widgets with refresh_theme()
+
+
+def _mono():
+    fams = set(tkfont.families())
+    for name in ("Consolas", "Menlo", "DejaVu Sans Mono"):
+        if name in fams:
+            return (name, 10)
+    return ("TkFixedFont", 10)
+
+
+FONT = ("Segoe UI", 10)
+FONT_B = ("Segoe UI", 10, "bold")
+FONT_S = ("Segoe UI", 9)
+FONT_XS = ("Segoe UI", 8)
+TITLE_F = ("Segoe UI", 16, "bold")
+
+STAGE_DEFS = [
+    (STAGE_REVIEW, "Review"),
+    (STAGE_DESCRIBE, "Describe"),
+    (STAGE_MERGE_CHECK, "Merge check"),
+    (STAGE_MERGE, "Merge"),
+]
+STAGE_LABEL = dict(STAGE_DEFS)
+
+
+def _rr(canvas, x1, y1, x2, y2, r, fill, outline, tags="rr"):
+    """Rounded rectangle from arcs + rects (Tk has no native primitive)."""
+    r = max(1, min(r, (x2 - x1) / 2, (y2 - y1) / 2))
+    canvas.create_arc(x1, y1, x1 + 2 * r, y1 + 2 * r, start=90, extent=90,
+                      style=tk.PIESLICE, fill=fill, outline="", tags=tags)
+    canvas.create_arc(x2 - 2 * r, y1, x2, y1 + 2 * r, start=0, extent=90,
+                      style=tk.PIESLICE, fill=fill, outline="", tags=tags)
+    canvas.create_arc(x1, y2 - 2 * r, x1 + 2 * r, y2, start=180, extent=90,
+                      style=tk.PIESLICE, fill=fill, outline="", tags=tags)
+    canvas.create_arc(x2 - 2 * r, y2 - 2 * r, x2, y2, start=270, extent=90,
+                      style=tk.PIESLICE, fill=fill, outline="", tags=tags)
+    canvas.create_rectangle(x1 + r, y1, x2 - r, y2, fill=fill, outline="", tags=tags)
+    canvas.create_rectangle(x1, y1 + r, x2, y2 - r, fill=fill, outline="", tags=tags)
+    if outline:
+        for a in [(x1, y1, 90), (x2 - 2 * r, y1, 0), (x1, y2 - 2 * r, 180), (x2 - 2 * r, y2 - 2 * r, 270)]:
+            canvas.create_arc(a[0], a[1], a[0] + 2 * r, a[1] + 2 * r, start=a[2],
+                              extent=90, style=tk.ARC, outline=outline, tags=tags)
+        canvas.create_line(x1 + r, y1, x2 - r, y1, fill=outline, tags=tags)
+        canvas.create_line(x1 + r, y2, x2 - r, y2, fill=outline, tags=tags)
+        canvas.create_line(x1, y1 + r, x1, y2 - r, fill=outline, tags=tags)
+        canvas.create_line(x2, y1 + r, x2, y2 - r, fill=outline, tags=tags)
+
+
+class RoundedCard(tk.Frame):
+    """Card with rounded fill + outline. Set stretch=True when the inner
+    content must expand to fill leftover space (log console)."""
+
+    def __init__(self, parent, radius=10, fill_key="card", outline_key="border",
+                 stretch=False, **kw):
+        super().__init__(parent, bg=PAL["page"], **kw)
+        self._r = radius
+        self._fill_key = fill_key
+        self._outline_key = outline_key
+        self._stretch = stretch
+        self.canvas = tk.Canvas(self, bg=PAL["page"], highlightthickness=0, bd=0)
+        self.canvas.pack(fill="both", expand=True)
+        self.inner = tk.Frame(self.canvas, bg=PAL[fill_key])
+        self._win = self.canvas.create_window(radius, radius, window=self.inner, anchor="nw")
+        self.canvas.bind("<Configure>", self._cv_cfg)
+        self.inner.bind("<Configure>", self._in_cfg)
+        REFRESH.append(self)
+
+    def refresh_theme(self):
+        self.config(bg=PAL["page"])
+        self.canvas.config(bg=PAL["page"])
+        self.inner.config(bg=PAL[self._fill_key])
+        self._draw()
+
+    def _in_cfg(self, _e):
+        rw = self.inner.winfo_reqwidth()
+        rh = self.inner.winfo_reqheight()
+        self.canvas.config(width=rw + 2 * self._r, height=rh + 2 * self._r,
+                           scrollregion=(0, 0, rw + 2 * self._r, rh + 2 * self._r))
+        self._draw()
+
+    def _cv_cfg(self, e):
+        try:
+            cur_w = int(float(self.canvas.itemcget(self._win, "width") or 0))
+        except (TypeError, ValueError):
+            cur_w = 0
+        want_w = max(int(e.width) - 2 * self._r, 1)
+        if abs(cur_w - want_w) > 2:
+            self.canvas.itemconfig(self._win, width=want_w)
+        if self._stretch:
+            try:
+                cur_h = int(float(self.canvas.itemcget(self._win, "height") or 0))
+            except (TypeError, ValueError):
+                cur_h = 0
+            want_h = max(int(e.height) - 2 * self._r, 1)
+            if abs(cur_h - want_h) > 2:
+                self.canvas.itemconfig(self._win, height=want_h)
+        self._draw()
+
+    def _draw(self):
+        self.canvas.delete("rr")
+        w = self.canvas.winfo_width()
+        h = self.canvas.winfo_height()
+        if w <= 4 or h <= 4:
+            return
+        _rr(self.canvas, 1, 1, w - 1, h - 1, self._r,
+            PAL[self._fill_key], PAL[self._outline_key])
+
+
+class RoundedButton(tk.Canvas):
+    """Rounded clickable button. Styles: primary | outline | ghost | field."""
+
+    def __init__(self, parent, text="", command=None, style="outline", height=36,
+                 radius=10, font=FONT_B, anchor="center", width=160):
+        super().__init__(parent, height=height, width=width,
+                         highlightthickness=0, bd=0)
+        self._text = text
+        self._command = command
+        self._style = style
+        self._radius = radius
+        self._font = font
+        self._anchor = anchor
+        self._hover = False
+        self._enabled = True
+        self.bind("<Configure>", lambda _e: self._draw())
+        self.bind("<Enter>", lambda _e: (setattr(self, "_hover", True), self._draw()))
+        self.bind("<Leave>", lambda _e: (setattr(self, "_hover", False), self._draw()))
+        self.bind("<Button-1>", self._click)
+        REFRESH.append(self)
+
+    def set_text(self, text):
+        self._text = text
+        self._draw()
+
+    def set_enabled(self, enabled):
+        self._enabled = enabled
+        self._draw()
+
+    def refresh_theme(self):
+        self.config(bg=self.master.cget("bg") if self._style == "field" else PAL["page"])
+        self._draw()
+
+    def _click(self, _e):
+        if self._enabled and self._command:
+            self._command()
+
+    def _colors(self):
+        s = self._style
+        if not self._enabled:
+            return PAL["disabled_bg"], "", PAL["disabled_fg"]
+        if s == "primary":
+            fill = PAL["run_bg"]
+            if self._hover:
+                fill = PAL["accent"] if PAL["run_bg"].lower().startswith("#f") else "#2E2E2E"
+            return fill, "", PAL["run_fg"]
+        if s == "ghost":
+            return PAL["card"], "", (PAL["accent"] if self._hover else PAL["muted"])
+        if s == "field":
+            return PAL["field"], PAL["border"], PAL["text"]
+        # outline
+        if self._hover:
+            return PAL["accent_tint"], PAL["accent"], PAL["text"]
+        return PAL["card"], PAL["border"], PAL["text"]
+
+    def _draw(self):
+        self.delete("all")
+        w = self.winfo_width()
+        h = self.winfo_height()
+        if w <= 4 or h <= 4:
+            return
+        fill, outline, fg = self._colors()
+        page = self.master.cget("bg")
+        self.config(bg=page)
+        _rr(self, 1, 1, w - 1, h - 1, min(self._radius, h // 2 - 1), fill, outline or None)
+        x = 14 if self._anchor == "w" else w // 2
+        self.create_text(x, h // 2, text=self._text, fill=fg, font=self._font,
+                         anchor="w" if self._anchor == "w" else "center")
+
+
+class SegmentBar(tk.Canvas):
+    """Four-cell segmented progress control (Review/Describe/Merge check/Merge)."""
+
+    def __init__(self, parent, height=34):
+        super().__init__(parent, height=height, highlightthickness=0, bd=0)
+        self.cells = {sid: {"state": "pending", "text": f"{i + 1}. {label}"}
+                      for i, (sid, label) in enumerate(STAGE_DEFS)}
+        self.bind("<Configure>", lambda _e: self._draw())
+        REFRESH.append(self)
+
+    def set_cell(self, sid, state, text=None):
+        cell = self.cells[sid]
+        cell["state"] = state
+        if text is not None:
+            cell["text"] = text
+        elif sid == STAGE_MERGE:
+            n = [s for s, _ in STAGE_DEFS].index(sid) + 1
+            cell["text"] = f"{n}. {STAGE_LABEL[sid]}"
+        self._draw()
+
+    def refresh_theme(self):
+        self.config(bg=PAL["page"])
+        self._draw()
+
+    def _draw(self):
+        self.delete("all")
+        w = self.winfo_width()
+        h = self.winfo_height()
+        if w <= 10 or h <= 10:
+            return
+        self.config(bg=PAL["page"])
+        _rr(self, 1, 1, w - 1, h - 1, 12, PAL["card"], PAL["border"])
+        n = len(STAGE_DEFS)
+        for i in range(1, n):
+            x = w * i / n
+            self.create_line(x, 10, x, h - 10, fill=PAL["border"])
+        order = [sid for sid, _ in STAGE_DEFS]
+        for i, sid in enumerate(order):
+            cell = self.cells[sid]
+            st = cell["state"]
+            x0, x1 = w * i / n, w * (i + 1) / n
+            if st == "active":
+                _rr(self, x0 + 3, 4, x1 - 3, h - 4, 8, PAL["accent_tint"], None)
+                fg, font = PAL["accent_text"], FONT_B
+            elif st == "done":
+                fg, font = PAL["good"], FONT
+                cell_text = "✓ " + cell["text"]
+                self.create_text((x0 + x1) / 2, h / 2, text=cell_text, fill=fg, font=font)
+                continue
+            elif st == "skipped":
+                fg, font = PAL["muted"], FONT_S
+            elif st == "error":
+                _rr(self, x0 + 3, 4, x1 - 3, h - 4, 8, PAL["bad_bg"], None)
+                fg, font = PAL["bad"], FONT_B
+            else:
+                fg, font = PAL["muted"], FONT_S
+            if st == "skipped":
+                text = "– " + cell["text"]
+            elif st == "error":
+                text = "✕ " + cell["text"]
+            else:
+                text = cell["text"]
+            self.create_text((x0 + x1) / 2, h / 2, text=text, fill=fg, font=font)
+
+
+class StatusPill(tk.Canvas):
+    """Outlined status pill (Idle / Running / Merged / …)."""
+
+    def __init__(self, parent, width=150, height=28):
+        super().__init__(parent, width=width, height=height, highlightthickness=0, bd=0)
+        self._text = "Idle"
+        self._color = PAL["muted"]
+        self.bind("<Configure>", lambda _e: self._draw())
+        REFRESH.append(self)
+
+    def set(self, text, color_key="muted"):
+        self._text = text
+        self._color_key = color_key
+        self._color = PAL[color_key]
+        self._draw()
+
+    def refresh_theme(self):
+        self.config(bg=PAL["page"])
+        self._color = PAL.get(getattr(self, "_color_key", "muted"), PAL["muted"])
+        self._draw()
+
+    def _draw(self):
+        self.delete("all")
+        w = self.winfo_width() or 150
+        h = self.winfo_height() or 28
+        self.config(bg=PAL["page"])
+        _rr(self, 1, 1, w - 1, h - 1, (h - 2) // 2, PAL["card"], PAL["border"])
+        self.create_oval(14, h / 2 - 4, 22, h / 2 + 4, fill=self._color, outline="")
+        self.create_text(30, h / 2, text=self._text, fill=PAL["text"], font=FONT_S, anchor="w")
+
+
+class CheckRow(tk.Frame):
+    """Rounded-square custom checkbox + label."""
+
+    def __init__(self, parent, text, var, muted=False):
+        super().__init__(parent, bg=PAL["card"])
+        self.var = var
+        self._muted = muted
+        self.box = tk.Canvas(self, width=20, height=20, highlightthickness=0, bd=0)
+        self.box.pack(side="left")
+        self.label = tk.Label(self, text=text, font=FONT_S,
+                              bg=PAL["card"], fg=PAL["muted"] if muted else PAL["text"])
+        self.label.pack(side="left", padx=(8, 0))
+        self.box.bind("<Button-1>", lambda _e: self.toggle())
+        self.label.bind("<Button-1>", lambda _e: self.toggle())
+        REFRESH.append(self)
+        self.refresh_theme()
+
+    def toggle(self):
+        self.var.set(not self.var.get())
+        self._draw()
+
+    def refresh_theme(self):
+        self.config(bg=PAL["card"])
+        self.label.config(bg=PAL["card"],
+                          fg=PAL["muted"] if self._muted else PAL["text"])
+        self.box.config(bg=PAL["card"])
+        self._draw()
+
+    def _draw(self):
+        self.box.delete("all")
+        on = bool(self.var.get())
+        fill = PAL["accent"] if on else PAL["card"]
+        _rr(self.box, 2, 2, 18, 18, 5, fill, PAL["accent"] if on else PAL["muted"])
+        if on:
+            self.box.create_text(10, 10, text="✓", fill="white", font=("Segoe UI", 9, "bold"))
+
+
+class Picker(tk.Frame):
+    """Fixed-style selector: rounded field + searchable popup.
+
+    Items can be grouped under headers via `group_key`; a falsy key renders
+    a flat list. Stdlib tkinter only.
+    """
+
+    def __init__(self, parent, title="SELECT", empty_label="Select…",
+                 field_chars=28, group_key=None, display_fn=None, empty_hint="",
+                 field_height=30, field_width=None, on_change=None):
+        super().__init__(parent, bg=PAL["card"])
+        self._title = title
+        self._empty_label = empty_label
+        self._empty_hint = empty_hint
+        self._display_fn = display_fn or (lambda v: v)
+        self._on_change = on_change
+        self._group_key = group_key or (lambda m: (m.partition("/")[0] or "other").upper())
+        self._models: list = []
+        self._value = ""
+        self._popup = None
+        self._outside_funcid = None
+        self.field = RoundedButton(self, text=empty_label + "  ▾", command=self.toggle,
+                                   style="field", height=field_height,
+                                   font=FONT, anchor="w",
+                                   width=field_width or field_chars * 8)
+        self.field.pack(fill="x", expand=True)
+        REFRESH.append(self)
+
+    def refresh_theme(self):
+        self.config(bg=PAL["card"])
+        self._refresh_field()
+
+    def get(self):
+        return self._value
+
+    def set_models(self, models):
+        self._models = sorted(set(models or []))
+        if self._value and self._value not in self._models:
+            self._value = ""
+        self._refresh_field()
+
+    def set_custom(self, value):
+        """Set a value that isn't in the list (e.g. a browsed folder path)."""
+        self._value = value or ""
+        self._refresh_field()
+
+    def _refresh_field(self):
+        label = self._display_fn(self._value) if self._value else self._empty_label
+        self.field.set_text(f"{label}  ▾")
+
+    # ----- popup -----
+    def toggle(self):
+        if self._popup is not None:
+            self.close()
+        else:
+            self.open()
+
+    def open(self):
+        top = tk.Toplevel(self)
+        top.overrideredirect(True)
+        top.configure(bg=PAL["border"])
+        x = self.field.winfo_rootx()
+        y = self.field.winfo_rooty() + self.field.winfo_height() + 4
+        w = max(self.field.winfo_width(), 340)
+        top.geometry(f"{w}x340+{x}+{y}")
+        top.attributes("-topmost", True)
+
+        head = tk.Frame(top, bg=PAL["border"])
+        head.pack(fill="x")
+        tk.Label(head, text=f"  {self._title}", font=("Segoe UI", 8, "bold"),
+                 bg=PAL["border"], fg=PAL["muted"]).pack(side="left", pady=4)
+        tk.Button(head, text="✕", command=self.close, bg=PAL["border"], fg=PAL["muted"],
+                  activebackground=PAL["bad"], activeforeground="white", relief="flat",
+                  font=FONT_S, cursor="hand2").pack(side="right", padx=2)
+
+        self._search_var = tk.StringVar()
+        search = tk.Entry(top, textvariable=self._search_var, font=FONT_S,
+                          bg=PAL["card"], fg=PAL["text"], insertbackground=PAL["text"],
+                          relief="flat")
+        search.pack(fill="x", padx=6, pady=6, ipady=5)
+
+        body = tk.Frame(top, bg=PAL["card"])
+        body.pack(fill="both", expand=True, padx=1, pady=(0, 1))
+        canvas = tk.Canvas(body, bg=PAL["card"], highlightthickness=0)
+        scroll = tk.Scrollbar(body, command=canvas.yview)
+        canvas.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        inner = tk.Frame(canvas, bg=PAL["card"])
+        win = canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(win, width=e.width))
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            top.bind(seq, lambda e, s=seq: canvas.yview_scroll(
+                -1 if (s == "<MouseWheel>" and e.delta > 0) or s == "<Button-4>" else 1, "units"))
+
+        self._popup = top
+        self._inner = inner
+        self._search_var.trace_add("write", lambda *_a: self._render())
+        top.bind("<Escape>", lambda _e: self.close())
+        search.bind("<Escape>", lambda _e: self.close())
+        self._render()
+        search.focus_set()
+        root = self.winfo_toplevel()
+        self._outside_funcid = root.bind("<Button-1>", self._outside_click, add="+")
+
+    def _render(self):
+        if self._popup is None:
+            return
+        for w in self._inner.winfo_children():
+            w.destroy()
+        if not self._models and self._empty_hint and not self._search_var.get().strip():
+            tk.Label(self._inner, text=self._empty_hint, font=FONT_S,
+                     bg=PAL["card"], fg=PAL["muted"]).pack(anchor="w", padx=12, pady=12)
+            return
+        filt = self._search_var.get().strip().lower()
+        groups: dict = {}
+        for m in self._models:
+            if filt and filt not in m.lower():
+                continue
+            key = self._group_key(m) or ""
+            if key and "/" in m:
+                short = m.split("/", 1)[1]
+            else:
+                short = m
+            groups.setdefault(key, []).append((short, m))
+        if not groups:
+            tk.Label(self._inner, text="No matches", font=FONT_S,
+                     bg=PAL["card"], fg=PAL["muted"]).pack(anchor="w", padx=12, pady=12)
+            return
+        for key in sorted(groups):
+            if key:
+                tk.Label(self._inner, text=f"  {key}", font=("Segoe UI", 8, "bold"),
+                         bg=PAL["card"], fg=PAL["muted"]).pack(anchor="w", padx=4, pady=(8, 0))
+            for name, full in sorted(groups[key]):
+                sel = full == self._value
+                b = tk.Label(self._inner, text=f"{'● ' if sel else '○ '}{name}",
+                             font=FONT_S, bg=PAL["accent_tint"] if sel else PAL["card"],
+                             fg=PAL["accent_text"] if sel else PAL["text"], anchor="w",
+                             padx=18, pady=3, cursor="hand2")
+                b.pack(fill="x")
+                b.bind("<Button-1>", lambda _e, f=full: self.select(f))
+                b.bind("<Enter>", lambda e: e.widget.config(bg=PAL["accent_tint"]))
+                b.bind("<Leave>", lambda e, f=full: e.widget.config(
+                    bg=PAL["accent_tint"] if f == self._value else PAL["card"]))
+
+    def select(self, full):
+        self._value = full
+        self._refresh_field()
+        self.close()
+        if self._on_change:
+            try:
+                self._on_change(full)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _outside_click(self, event):
+        if self._popup is None:
+            return
+        if event.widget is self.field:
+            return  # toggle() already handled the field click (widget bindings run first)
+        self.close()
+
+    def close(self):
+        if self._outside_funcid is not None:
+            try:
+                self.winfo_toplevel().unbind("<Button-1>", self._outside_funcid)
+            except Exception:  # noqa: BLE001
+                pass
+            self._outside_funcid = None
+        if self._popup is not None:
+            try:
+                self._popup.destroy()
+            except Exception:  # noqa: BLE001
+                pass
+            self._popup = None
+
+
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("PRISM — Pull Request Inspection & Safety Manager")
+        self.geometry("960x900")
+        self.minsize(860, 600)
+        self.configure(bg=PAL["page"])
+        self.log_q = queue.Queue()
+        self.running = False
+        self.stage_state = {}
+        self._verdict_key = ""
+        self._build()
+        self.after(80, self._drain_logs)
+
+    # ----- themed primitives -----
+    def _lab(self, parent, text, font=FONT_XS, fg="muted", bg="card"):
+        lb = tk.Label(parent, text=text, font=font, bg=PAL[bg], fg=PAL[fg])
+        lb._roles = {"bg": bg, "fg": fg}  # noqa: SLF001
+        REFRESH_PLAIN.append((lb, lb._roles))  # noqa: SLF001
+        return lb
+
+    def _entry(self, parent, var=None, font=FONT, width=None, mono=False):
+        e = tk.Entry(parent, textvariable=var, font=_mono() if mono else font,
+                     bg=PAL["field"], fg=PAL["text"], insertbackground=PAL["text"],
+                     relief="flat", highlightthickness=1,
+                     highlightbackground=PAL["border"], highlightcolor=PAL["accent"])
+        if width:
+            e.config(width=width)
+        e._roles = {"bg": "field", "fg": "text",  # noqa: SLF001
+                    "insertbackground": "text",
+                    "highlightbackground": "border", "highlightcolor": "accent"}
+        REFRESH_PLAIN.append((e, e._roles))  # noqa: SLF001
+        return e
+
+    # ----- layout -----
+    def _build(self):
+        root = tk.Frame(self, bg=PAL["page"])
+        root.pack(fill="both", expand=True, padx=16, pady=10)
+        REFRESH_PLAIN.append((root, {"bg": "page"}))
+
+        # ---- bottom buttons FIRST in pack order so they always get space,
+        # even when the window is shorter than the content (log squeezes).
+        brow = tk.Frame(root, bg=PAL["page"])
+        brow.pack(side="bottom", fill="x", pady=(4, 0))
+        REFRESH_PLAIN.append((brow, {"bg": "page"}))
+        brow.columnconfigure(0, weight=1, uniform="b")
+        brow.columnconfigure(1, weight=1, uniform="b")
+        self.copy_btn = RoundedButton(brow, text="Copy verdict", command=self._copy,
+                                      style="outline", height=32)
+        self.copy_btn.grid(row=0, column=0, sticky="ew", padx=(0, 5))
+        self.clear_btn = RoundedButton(brow, text="Clear log", command=self._clear_log,
+                                       style="outline", height=32)
+        self.clear_btn.grid(row=0, column=1, sticky="ew", padx=(5, 0))
+
+        # header: badge + titles … status pill
+        h = tk.Frame(root, bg=PAL["page"])
+        h.pack(fill="x", pady=(0, 4))
+        self._badge = tk.Canvas(h, width=32, height=32, highlightthickness=0, bd=0)
+        self._badge.pack(side="left")
+        self._badge_proxy = _BadgeProxy(self)
+        REFRESH.append(self._badge_proxy)
+        titles = tk.Frame(h, bg=PAL["page"])
+        titles.pack(side="left", padx=(12, 0))
+        self._title_lb = tk.Label(titles, text="PRISM", font=TITLE_F,
+                                  bg=PAL["page"], fg=PAL["text"])
+        self._title_lb.pack(anchor="w")
+        REFRESH_PLAIN.append((self._title_lb, {"bg": "page", "fg": "text"}))
+        self._sub_lb = tk.Label(titles, text="Pull request inspection and safety manager",
+                                font=FONT_S, bg=PAL["page"], fg=PAL["muted"])
+        self._sub_lb.pack(anchor="w")
+        REFRESH_PLAIN.append((self._sub_lb, {"bg": "page", "fg": "muted"}))
+        self.pill = StatusPill(h)
+        self.pill.pack(side="right")
+        self.pill.set("Idle", "muted")
+
+        # ---- Project card ----
+        pc = RoundedCard(root)
+        pc.pack(fill="x", pady=(0, 6))
+        pi = pc.inner
+        pi.config(padx=12, pady=6)
+        self._lab(pi, "Project", font=FONT_B, fg="text").pack(anchor="w", pady=(0, 2))
+        self._lab(pi, "Working folder").pack(anchor="w", pady=(0, 4))
+        frow = tk.Frame(pi, bg=PAL["card"])
+        frow.pack(fill="x", pady=(0, 6))
+        REFRESH_PLAIN.append((frow, {"bg": "card"}))
+        self.proj_var = tk.StringVar(value=_default_project_dir())
+        self._entry(frow, self.proj_var, mono=True).pack(side="left", fill="x",
+                                                         expand=True, ipady=3, padx=(0, 10))
+        RoundedButton(frow, text="Browse", command=self._browse, style="outline",
+                      height=32, width=110).pack(side="left")
+        trow = tk.Frame(pi, bg=PAL["card"])
+        trow.pack(fill="x")
+        REFRESH_PLAIN.append((trow, {"bg": "card"}))
+        # Left cell is rebuilt per mode: single-repo → CodeCommit repo textbox;
+        # multi-repo → Backend/Frontend target toggle. PR id + Region stay put.
+        self.leftbox = tk.Frame(trow, bg=PAL["card"])
+        self.leftbox.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        REFRESH_PLAIN.append((self.leftbox, {"bg": "card"}))
+        c2 = tk.Frame(trow, bg=PAL["card"])
+        c2.pack(side="left", padx=(0, 10))
+        REFRESH_PLAIN.append((c2, {"bg": "card"}))
+        self._lab(c2, "PR id").pack(anchor="w", pady=(0, 4))
+        self.pr_var = tk.StringVar()
+        self.pr_entry = self._entry(c2, self.pr_var, width=12)
+        self.pr_entry.pack(ipady=3)
+        _add_placeholder(self.pr_entry, "e.g. 214")
+        c3 = tk.Frame(trow, bg=PAL["card"])
+        c3.pack(side="left")
+        REFRESH_PLAIN.append((c3, {"bg": "card"}))
+        self._lab(c3, "Region").pack(anchor="w", pady=(0, 4))
+        self.region_var = tk.StringVar(value=REGION_DEFAULT)
+        self._entry(c3, self.region_var, width=14).pack(ipady=3)
+        self.clone_hint = self._lab(pi, "", font=FONT_XS, fg="muted")
+        self.clone_hint.pack(anchor="w", pady=(4, 0))
+        # detection state — filled by _refresh_detection()
+        self.repo_var = tk.StringVar()
+        self.target_var = tk.StringVar(value="BE")
+        self.mode = "single"
+        self.detected = []      # [(name, path)] — subdir clones, never hardcoded
+        self.single_path = None  # resolved single clone path (None → API mode)
+        self.tbe_btn = None
+        self.tfe_btn = None
+        self._rebuild_target_row()
+
+        # ---- Repository mapping card (multi-repo projects only) ----
+        self.map_card = RoundedCard(root)
+        mapi = self.map_card.inner
+        mapi.config(padx=12, pady=6)
+        self._lab(mapi, "Repository mapping", font=FONT_B, fg="text").pack(anchor="w")
+        self._lab(mapi, "Confirm which detected clone is backend / frontend.").pack(
+            anchor="w", pady=(0, 6))
+        maprow = tk.Frame(mapi, bg=PAL["card"])
+        maprow.pack(fill="x")
+        REFRESH_PLAIN.append((maprow, {"bg": "card"}))
+        becol = tk.Frame(maprow, bg=PAL["card"])
+        becol.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        REFRESH_PLAIN.append((becol, {"bg": "card"}))
+        tk.Label(becol, text="Backend", font=FONT_B, bg=PAL["card"], fg=PAL["text"],
+                 anchor="w").pack(anchor="w", pady=(0, 2))
+        REFRESH_PLAIN.append((becol.winfo_children()[0], {"bg": "card", "fg": "text"}))
+        self.be_picker = Picker(becol, title="SELECT BACKEND CLONE",
+                                empty_label="Select backend clone…",
+                                group_key=lambda m: "", field_width=200,
+                                empty_hint="No clones detected")
+        self.be_picker.pack(anchor="w")
+        fecol = tk.Frame(maprow, bg=PAL["card"])
+        fecol.pack(side="left", fill="x", expand=True)
+        REFRESH_PLAIN.append((fecol, {"bg": "card"}))
+        tk.Label(fecol, text="Frontend", font=FONT_B, bg=PAL["card"], fg=PAL["text"],
+                 anchor="w").pack(anchor="w", pady=(0, 2))
+        REFRESH_PLAIN.append((fecol.winfo_children()[0], {"bg": "card", "fg": "text"}))
+        self.fe_picker = Picker(fecol, title="SELECT FRONTEND CLONE",
+                                empty_label="Select frontend clone…",
+                                group_key=lambda m: "", field_width=200,
+                                empty_hint="No clones detected")
+        self.fe_picker.pack(anchor="w")
+
+        # ---- Model and behavior card ----
+        mc = RoundedCard(root)
+        self.model_card = mc
+        mc.pack(fill="x", pady=(0, 6))
+        mi = mc.inner
+        mi.config(padx=12, pady=6)
+        mhead = tk.Frame(mi, bg=PAL["card"])
+        mhead.pack(fill="x", pady=(0, 2))
+        REFRESH_PLAIN.append((mhead, {"bg": "card"}))
+        self._lab(mhead, "Model and behavior", font=FONT_B, fg="text").pack(side="left")
+        self.model_count = self._lab(mhead, "loading…", font=FONT_XS, fg="muted")
+        self.model_count.pack(side="right")
+        self.model_refresh = RoundedButton(mhead, text="↻", command=self._load_models_async,
+                                           style="ghost", height=24, radius=12, font=FONT_S,
+                                           width=36)
+        self.model_refresh.pack(side="right", padx=(0, 6))
+        self.model_picker = Picker(mi, title="SELECT MODEL", empty_label="Default model",
+                                   group_key=None, empty_hint="Loading models…")
+        self.model_picker.pack(fill="x", pady=(0, 2))
+        self.upd_var = tk.BooleanVar(value=True)
+        self.mrg_var = tk.BooleanVar(value=True)
+        self.syn_var = tk.BooleanVar(value=True)
+        self.dry_var = tk.BooleanVar(value=False)
+        for txt, var, muted in (("Update PR description after review", self.upd_var, False),
+                                ("Auto-merge once approved", self.mrg_var, False),
+                                ("Sync with base branch when diverged", self.syn_var, False),
+                                ("Dry run — skip writes and merges", self.dry_var, True)):
+            CheckRow(mi, txt, var, muted=muted).pack(anchor="w")
+
+        # ---- segmented progress ----
+        self.seg = SegmentBar(root)
+        self.seg.pack(fill="x", pady=(0, 6))
+
+        # ---- run ----
+        self.run_btn = RoundedButton(root, text="▶  Review and auto-merge",
+                                     command=self._start, style="primary",
+                                     height=38, radius=10, font=("Segoe UI", 11, "bold"))
+        self.run_btn.pack(fill="x", pady=(0, 6))
+
+        # ---- verdict / impact ----
+        vrow = tk.Frame(root, bg=PAL["page"])
+        vrow.pack(fill="x", pady=(0, 6))
+        REFRESH_PLAIN.append((vrow, {"bg": "page"}))
+        vrow.columnconfigure(0, weight=1, uniform="v")
+        vrow.columnconfigure(1, weight=1, uniform="v")
+        vc = RoundedCard(vrow)
+        vc.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
+        vi = vc.inner
+        vi.config(padx=14, pady=4)
+        self._lab(vi, "Verdict").pack(anchor="w")
+        self.verdict_val = tk.Label(vi, text="Not run yet", font=("Segoe UI", 11, "bold"),
+                                    bg=PAL["card"], fg=PAL["text"], wraplength=380,
+                                    justify="left")
+        self.verdict_val.pack(anchor="w")
+        # fg is owned by _paint_verdict (colour-coded per verdict), so only the
+        # background is registered here — "verdict" is not a palette key.
+        REFRESH_PLAIN.append((self.verdict_val, {"bg": "card"}))
+        ic = RoundedCard(vrow)
+        ic.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
+        ii = ic.inner
+        ii.config(padx=14, pady=4)
+        self._lab(ii, "Impact").pack(anchor="w")
+        self.impact_val = tk.Label(ii, text="—", font=("Segoe UI", 11, "bold"),
+                                   bg=PAL["card"], fg=PAL["text"], wraplength=380,
+                                   justify="left")
+        self.impact_val.pack(anchor="w")
+        REFRESH_PLAIN.append((self.impact_val, {"bg": "card", "fg": "text"}))
+
+        # ---- log console (expands; squeezes first on short windows) ----
+        lc = RoundedCard(root, fill_key="log_bg", outline_key="border", stretch=True)
+        lc.pack(fill="both", expand=True)
+        li = lc.inner
+        li.config(padx=12, pady=10)
+        REFRESH_PLAIN.append((li, {"bg": "log_bg"}))
+        self.log = tk.Text(li, height=3, font=_mono(), bg=PAL["log_bg"], fg=PAL["log_fg"],
+                           insertbackground=PAL["log_fg"], relief="flat", wrap="word")
+        scroll = tk.Scrollbar(li, command=self.log.yview)
+        self.log.configure(yscrollcommand=scroll.set)
+        self.log.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        REFRESH_PLAIN.append((self.log, {"bg": "log_bg", "fg": "log_fg",
+                                         "insertbackground": "log_fg"}))
+        self.log.tag_config("ok", foreground=PAL["good"])
+        self.log.tag_config("warn", foreground=PAL["warn"])
+        self.log.tag_config("err", foreground=PAL["bad"])
+        self.log.tag_config("ph", foreground=PAL["log_ph"])
+        self._verdict_cache = ""
+        self._log_placeholder = True
+        self._show_placeholder()
+        self._draw_badge()
+        self._refresh_detection()
+        # Re-scan whenever the folder changes, typed as well as browsed —
+        # otherwise a hand-edited path runs against the previous folder's mode.
+        self._detect_job = None
+        self.proj_var.trace_add("write", self._on_proj_changed)
+        self._reset_progress(silent=True)
+        self._load_models_async()
+
+    # ----- badge -----
+    def _draw_badge(self):
+        c = self._badge
+        c.delete("all")
+        c.config(bg=PAL["page"])
+        _rr(c, 2, 2, 30, 30, 8, PAL["badge_bg"], None)
+        c.create_text(16, 16, text="◇", fill=PAL["badge_fg"], font=("Segoe UI", 13, "bold"))
+
+    # ----- log -----
+    def _show_placeholder(self):
+        self.log.delete("1.0", "end")
+        self.log.insert("end", "Waiting to start…", "ph")
+        self._log_placeholder = True
+
+    def _clear_log(self):
+        self._show_placeholder()
+
+    def _append(self, line, tag=None):
+        if self._log_placeholder:
+            self.log.delete("1.0", "end")
+            self._log_placeholder = False
+        self.log.insert("end", line + "\n", tag or ())
+        self.log.see("end")
+
+    # ----- models -----
+    def _load_models_async(self):
+        """Feed the picker from the engine's model list without freezing the UI.
+
+        The worker thread never touches Tk (not thread-safe) — it posts the
+        list to the main-thread queue consumed by _drain_logs.
+        """
+        self.model_count.config(text="loading…")
+        def work():
+            models = list_available_models()
+            self.log_q.put(("models", models))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply_models(self, models):
+        self.model_picker.set_models(models)
+        n_prov = len({m.partition("/")[0] for m in models}) if models else 0
+        self.model_count.config(
+            text=f"{len(models)} models · {n_prov} providers"
+            if models else "could not list models")
+
+    # ----- repos: scan root, single mode or BE/FE mapping -----
+    def _browse(self):
+        d = filedialog.askdirectory(title="Select project root folder")
+        if d:
+            self.repo_var.set("")
+            self.proj_var.set(d)  # the trace re-runs detection
+            self._refresh_detection()
+
+    def _on_proj_changed(self, *_a):
+        """Debounced re-scan — typing a path fires one write per keystroke."""
+        if getattr(self, "_detect_job", None) is not None:
+            try:
+                self.after_cancel(self._detect_job)
+            except Exception:  # noqa: BLE001
+                pass
+        self._detect_job = self.after(400, self._detect_now)
+
+    def _detect_now(self):
+        self._detect_job = None
+        try:
+            self._refresh_detection()
+        except Exception as e:  # noqa: BLE001
+            self._set_hint(f"Could not scan folder: {e}", "bad")
+
+    def _refresh_detection(self):
+        """Scan the root folder for git clones and pick single vs multi mode.
+
+        - Root folder itself is a repo → single mode, mapping skipped.
+        - 0–1 subdir clones → single mode (0 = API mode, repo name typed in).
+        - 2+ subdir clones → multi mode: user confirms BE/FE mapping.
+        Nothing is hardcoded — everything comes from `.git` discovery plus
+        generic backend/frontend name heuristics.
+        """
+        base = Path(self.proj_var.get().strip() or ".")
+        if not base.is_dir():
+            # Reset to the safest mode so a stale multi-repo mapping from a
+            # previous folder can never be used for the next run.
+            self.mode = "single"
+            self.detected = []
+            self.single_path = None
+            self.map_card.pack_forget()
+            self._rebuild_target_row()
+            self._set_hint("Select a valid root folder.", "bad")
+            return
+        root_is_repo = (base / ".git").exists()
+        subs = [(n, p) for n, p in detect_local_repos(str(base))
+                if Path(p) != base]
+        if root_is_repo or len(subs) <= 1:
+            self.mode = "single"
+            self.detected = subs
+            if root_is_repo:
+                self.single_path = str(base)
+                if not self.repo_var.get().strip():
+                    self.repo_var.set(base.name)
+                self._set_hint(f"Single repository: {base.name} — mapping skipped.", "muted")
+            elif len(subs) == 1:
+                self.single_path = subs[0][1]
+                if not self.repo_var.get().strip():
+                    self.repo_var.set(subs[0][0])
+                self._set_hint(f"Single repository detected: {subs[0][0]}.", "muted")
+            else:
+                self.single_path = None
+                self._set_hint("No local clones detected — review will use the "
+                               "CodeCommit API. Type the repo name manually.", "warn")
+            self.map_card.pack_forget()
+        else:
+            self.mode = "multi"
+            self.detected = subs
+            names = [n for n, _ in subs]
+            self.be_picker.set_models(names)
+            self.fe_picker.set_models(names)
+            self._auto_guess(names)
+            self.map_card.pack(fill="x", pady=(0, 6), before=self.model_card)
+            self._set_hint(f"{len(subs)} clones detected — confirm backend / frontend "
+                           f"mapping below.", "muted")
+        self._rebuild_target_row()
+
+    def _auto_guess(self, names):
+        """Pre-fill BE/FE mapping from generic folder-name conventions."""
+        be_hit = next((n for n in names if _guess_role(n) == "BE"), "")
+        fe_hit = next((n for n in names if _guess_role(n) == "FE"), "")
+        if be_hit and not fe_hit and len(names) == 2:
+            fe_hit = next(n for n in names if n != be_hit)
+        if fe_hit and not be_hit and len(names) == 2:
+            be_hit = next(n for n in names if n != fe_hit)
+        if be_hit:
+            self.be_picker.set_custom(be_hit)
+        if fe_hit:
+            self.fe_picker.set_custom(fe_hit)
+
+    def _rebuild_target_row(self):
+        """Left cell of the target row: repo textbox (single) or BE/FE toggle (multi)."""
+        for w in self.leftbox.winfo_children():
+            w.destroy()
+        self.tbe_btn = None
+        self.tfe_btn = None
+        if self.mode == "multi":
+            self._lab(self.leftbox, "Review target").pack(anchor="w", pady=(0, 4))
+            brow = tk.Frame(self.leftbox, bg=PAL["card"])
+            brow.pack(anchor="w")
+            REFRESH_PLAIN.append((brow, {"bg": "card"}))
+            self.tbe_btn = tk.Button(brow, text="Backend", width=12, relief="flat",
+                                     command=lambda: self._set_target("BE"), cursor="hand2")
+            self.tfe_btn = tk.Button(brow, text="Frontend", width=12, relief="flat",
+                                     command=lambda: self._set_target("FE"), cursor="hand2")
+            self.tbe_btn.pack(side="left", padx=(0, 6))
+            self.tfe_btn.pack(side="left")
+            self._set_target(self.target_var.get() or "BE")
+        else:
+            self._lab(self.leftbox, "CodeCommit repo").pack(anchor="w", pady=(0, 4))
+            self._entry(self.leftbox, self.repo_var).pack(fill="x", ipady=3)
+
+    def _set_target(self, which):
+        self.target_var.set(which)
+        on = {"bg": PAL["accent"], "fg": "white"}
+        off = {"bg": PAL["card"], "fg": PAL["muted"]}
+        if self.tbe_btn is not None:
+            self.tbe_btn.config(**(on if which == "BE" else off))
+            self.tfe_btn.config(**(on if which == "FE" else off))
+
+    def _mapping(self):
+        """Return {BE: (name, path), FE: (name, path)} for mapped clones."""
+        by_name = dict(self.detected)
+        out = {}
+        for role, picker in (("BE", self.be_picker), ("FE", self.fe_picker)):
+            name = picker.get().strip()
+            if name and name in by_name:
+                out[role] = (name, by_name[name])
+        return out
+
+    def _set_hint(self, text, color):
+        self.clone_hint.config(text=text, fg=PAL[color])
+
+    # ----- progress -----
+    def _reset_progress(self, silent=False):
+        self.stage_state = {sid: "pending" for sid, _ in STAGE_DEFS}
+        self.stage_state[STAGE_SYNC] = "pending"  # tracked, borrows the Merge cell
+        for sid, _ in STAGE_DEFS:
+            self.seg.set_cell(sid, "pending")
+        if not silent:
+            self.pill.set("Running…", "accent")
+            self._paint_verdict()
+
+    def _on_progress(self, stage, state):
+        if stage not in self.stage_state:
+            return
+        self.stage_state[stage] = state
+        if stage == STAGE_SYNC:
+            # Sync has no cell of its own — it borrows the Merge cell.
+            if state == "active":
+                self.seg.set_cell(STAGE_MERGE, "active", "4. Syncing…")
+            elif state == "done":
+                self.seg.set_cell(STAGE_MERGE, "active", "4. Merge")
+            elif state == "error":
+                self.seg.set_cell(STAGE_MERGE, "error", "4. Merge")
+            return
+        if stage == STAGE_MERGE and self.stage_state.get(STAGE_SYNC) in ("active", "error"):
+            # Sync owns the cell while running, and keeps it after a failure —
+            # a trailing "merge skipped" must not paint over the error state.
+            return
+        if stage == STAGE_MERGE:
+            self.seg.set_cell(stage, state, "4. Merge")
+        else:
+            self.seg.set_cell(stage, state)
+
+    def _set_status(self, txt, color):
+        self.pill.set(txt, color)
+
+    # ----- verdict / impact -----
+    def _paint_verdict(self):
+        key = self._verdict_key
+        color = {"approve": "good", "approve-with-comments": "warn",
+                 "request-changes": "bad", "block": "bad"}.get(key, "text")
+        try:
+            self.verdict_val.config(fg=PAL[color])
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ----- run -----
+    def _start(self):
+        if self.running:
+            return
+        pr = _entry_value(self.pr_entry).strip()
+        proj = self.proj_var.get().strip()
+        if not pr.isdigit():
+            messagebox.showwarning("PR id", "Enter a numeric CodeCommit PR id.")
+            return
+        if not Path(proj).is_dir():
+            messagebox.showwarning("Project folder", "Pick a valid root folder first.")
+            return
+        # Resolve repo + clone from the current mode.
+        if self.mode == "multi":
+            mapping = self._mapping()
+            target = self.target_var.get() or "BE"
+            picked = mapping.get(target)
+            if not picked:
+                messagebox.showwarning(
+                    "Mapping",
+                    f"Select the {'Backend' if target == 'BE' else 'Frontend'} clone "
+                    f"in Repository mapping first.")
+                return
+            other = mapping.get("FE" if target == "BE" else "BE")
+            if other and other[1] == picked[1]:
+                messagebox.showwarning("Mapping", "Backend and Frontend point to the same clone.")
+                return
+            repo, local_repo = Path(picked[1]).name, picked[1]
+        else:
+            repo = self.repo_var.get().strip()
+            if not repo:
+                messagebox.showwarning("Repository", "Enter the CodeCommit repository name.")
+                return
+            local_repo = self.single_path
+        self.log.delete("1.0", "end")
+        self._log_placeholder = False
+        self._reset_progress()
+        self.verdict_val.config(text="Running…")
+        self.impact_val.config(text="…")
+        self._verdict_key = ""
+        self._paint_verdict()
+        self.run_btn.set_text("⏳  Running…")
+        self.run_btn.set_enabled(False)
+        self.running = True
+        model = self.model_picker.get() or None
+        args = dict(project_dir=proj, repo_name=repo, pr_id=pr, local_repo=local_repo,
+                    region=self.region_var.get().strip() or REGION_DEFAULT,
+                    do_update_desc=self.upd_var.get(), do_merge=self.mrg_var.get(),
+                    do_sync=self.syn_var.get(), dry_run=self.dry_var.get(),
+                    model=model)
+        threading.Thread(target=self._worker, kwargs=args, daemon=True).start()
+
+    def _worker(self, **args):
+        try:
+            summary = full_pipeline(
+                emit=lambda m: self.log_q.put(("log", m)),
+                progress=lambda stage, state: self.log_q.put(("progress", (stage, state))),
+                **args)
+            # Keep booleans as booleans — str()-ing `merged` turns False into
+            # the truthy string "False" and every run would report "Merged ✓".
+            self.log_q.put(("done", {k: v if isinstance(v, bool) else str(v)[:160]
+                                     for k, v in summary.items() if k != "review"}))
+        except Exception as e:  # noqa: BLE001
+            self.log_q.put(("error", str(e)[:3000]))
+
+    def _drain_logs(self):
+        try:
+            self._drain_once()
+        finally:
+            # Always reschedule: one bad line must not kill the pump and leave
+            # the UI frozen mid-run with no log and no progress.
+            self.after(80, self._drain_logs)
+
+    def _drain_once(self):
+        try:
+            while True:
+                kind, payload = self.log_q.get_nowait()
+                if kind == "log":
+                    # Emitted lines are often prefixed with a blank line for
+                    # spacing; classify and match on the text, not the padding.
+                    text = payload.strip()
+                    low = text.lower()
+                    tag = None
+                    if text.startswith("◆") or text.startswith("✅"):
+                        tag = "ok"
+                    elif text.startswith("⚠") or "warning" in low:
+                        tag = "warn"
+                    elif text.startswith("⛔") or "fail" in low or "error" in low:
+                        tag = "err"
+                    self._append(payload, tag)
+                    if text.startswith("◆ Verdict:"):
+                        # One line: "◆ Verdict: <v>   Impact: <i>"
+                        m = re.match(r"◆ Verdict:\s*(.*?)\s{2,}Impact:\s*(.*)", text)
+                        verdict = m.group(1).strip() if m else text.replace("◆ ", "").strip()
+                        impact = m.group(2).strip() if m else "—"
+                        self._verdict_cache = text.replace("◆ ", "").strip()
+                        self._verdict_key = _verdict_key_of(verdict)
+                        self.verdict_val.config(text=verdict)
+                        self.impact_val.config(text=impact)
+                        self._paint_verdict()
+                elif kind == "progress":
+                    try:
+                        stage, state = payload
+                    except Exception:  # noqa: BLE001
+                        continue
+                    self._on_progress(stage, state)
+                elif kind == "done":
+                    self.running = False
+                    self.run_btn.set_text("▶  Review and auto-merge")
+                    self.run_btn.set_enabled(True)
+                    stopped = str(payload.get("stopped") or "")
+                    if payload.get("merged") is True:
+                        self._set_status("Merged ✓", "good")
+                    elif stopped == "dry-run":
+                        self._set_status("Dry-run done", "accent")
+                    elif stopped in ("verdict-blocks-merge", "unparsed-verdict",
+                                     "not-fast-forwardable") or stopped.startswith("status-"):
+                        self._set_status("Held", "warn")
+                    else:
+                        self._set_status("Finished", "muted")
+                    self._append(f"\n—— finished: {payload} ——", "ok")
+                elif kind == "error":
+                    self.running = False
+                    self.run_btn.set_text("▶  Review and auto-merge")
+                    self.run_btn.set_enabled(True)
+                    for sid in [s for s, _ in STAGE_DEFS]:
+                        if self.stage_state.get(sid) == "active":
+                            self._on_progress(sid, "error")
+                    if self.stage_state.get(STAGE_SYNC) == "active":
+                        self._on_progress(STAGE_SYNC, "error")
+                    self._set_status("Error", "bad")
+                    self._append(f"\n⛔ ERROR: {payload}", "err")
+                elif kind == "models":
+                    self._apply_models(payload)
+        except queue.Empty:
+            pass
+        self.after(80, self._drain_logs)
+
+    def _copy(self):
+        self.clipboard_clear()
+        self.clipboard_append(self._verdict_cache or self.verdict_val.cget("text"))
+
+
+class _BadgeProxy:
+    """Gives the static logo canvas a refresh_theme() hook."""
+
+    def __init__(self, app):
+        self.app = app
+
+    def refresh_theme(self):
+        try:
+            self.app._draw_badge()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+REFRESH_PLAIN: list = []
+
+
+def _default_project_dir():
+    """Folder the working-folder box starts on.
+
+    From a source checkout the parent of the PRISM folder is the natural guess
+    (projects usually sit beside it). A packaged build lives in a temporary
+    extraction directory or an install path that says nothing about the user's
+    code, so fall back to the current directory, then home.
+    """
+    if getattr(sys, "frozen", False):
+        for cand in (Path.cwd(), Path.home()):
+            if cand.is_dir():
+                return str(cand)
+        return str(Path.home())
+    return str(Path(__file__).resolve().parent.parent)
+
+
+def _add_placeholder(entry, text):
+    entry.insert(0, text)
+    entry._has_ph = True  # noqa: SLF001
+    entry.config(fg=PAL["muted"])
+    def on_in(_e):
+        if getattr(entry, "_has_ph", False):
+            entry.delete(0, "end")
+            entry._has_ph = False
+            entry.config(fg=PAL["text"])
+    def on_out(_e):
+        if not entry.get():
+            entry.insert(0, text)
+            entry._has_ph = True
+            entry.config(fg=PAL["muted"])
+    entry.bind("<FocusIn>", on_in)
+    entry.bind("<FocusOut>", on_out)
+
+
+def _entry_value(entry):
+    if getattr(entry, "_has_ph", False):
+        return ""
+    return entry.get()
+
+
+def _verdict_key_of(line):
+    """Verdict key for colour-coding. Shares the orchestrator's classifier so
+    the card can never disagree with the merge decision."""
+    key = normalise_verdict(line or "")
+    return "" if key == "unknown" else key
+
+
+_BE_RE = re.compile(r"(^|[-_.])be([-_.]|$)|backend", re.IGNORECASE)
+_FE_RE = re.compile(r"(^|[-_.])fe([-_.]|$)|frontend", re.IGNORECASE)
+
+
+def _guess_role(folder_name):
+    """Guess 'BE' / 'FE' from a clone folder name using generic conventions
+    (a -be/-fe suffix or a backend/frontend word). Returns '' when unsure —
+    the user then confirms manually. No project names are hardcoded."""
+    be = bool(_BE_RE.search(folder_name or ""))
+    fe = bool(_FE_RE.search(folder_name or ""))
+    if be and not fe:
+        return "BE"
+    if fe and not be:
+        return "FE"
+    return ""
+
+
+if __name__ == "__main__":
+    App().mainloop()

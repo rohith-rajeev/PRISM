@@ -1,0 +1,28 @@
+# --- desktop build output (PyInstaller) ---
+build/
+dist/
+*.spec
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# --- graphify knowledge-graph cache ---
+# Local analysis output. Regenerate with graphify; never committed, because the
+# cache embeds absolute paths from the machine it was generated on.
+graphify-out/
+
+# --- editors / OS ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# --- agent runtime scratch ---
+# PRISM installs its bundled reviewer here inside whatever project it reviews.
+.opencode/
