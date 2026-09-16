@@ -529,7 +529,10 @@ class Picker(tk.Frame):
 
 class App(tk.Tk):
     def __init__(self):
-        super().__init__()
+        # className sets the X11 WM_CLASS. Without it Tk reports a generic
+        # "Tk", so desktop shells can't tell PRISM from any other Tk app and
+        # a launched window won't group under its own dock/taskbar icon.
+        super().__init__(className="prism")
         self.title("PRISM — Pull Request Inspection & Safety Manager")
         self.geometry("960x900")
         self.minsize(860, 600)

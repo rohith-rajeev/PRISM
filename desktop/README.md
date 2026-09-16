@@ -53,14 +53,26 @@ tools it drives. The machine still needs, on `PATH`:
 
 ## Installing the Linux desktop entry
 
-`Exec=`/`Icon=` are bare names, so point them at wherever you put the binary:
+Copy the binary somewhere stable first — a launcher pointing into a source
+checkout breaks the moment the repo moves:
 
 ```bash
-install -Dm755 dist/PRISM               ~/.local/bin/PRISM
-install -Dm644 dist/PRISM.png           ~/.local/share/icons/hicolor/256x256/apps/PRISM.png
-install -Dm644 dist/PRISM.desktop       ~/.local/share/applications/PRISM.desktop
+install -Dm755 dist/PRISM     ~/.local/opt/prism/PRISM
+ln -sfn ~/.local/opt/prism/PRISM ~/.local/bin/prism
+install -Dm644 dist/PRISM.png ~/.local/share/icons/hicolor/256x256/apps/prism.png
+
+sed -e "s|^Exec=.*|Exec=$HOME/.local/opt/prism/PRISM|" \
+    -e "s|^Icon=.*|Icon=prism|" \
+    dist/PRISM.desktop > ~/.local/share/applications/prism.desktop
+
 update-desktop-database ~/.local/share/applications 2>/dev/null || true
+gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor 2>/dev/null || true
 ```
+
+For a system-wide install use `/opt/prism` and `/usr/share/...` instead (needs
+root). The generated entry sets `StartupWMClass=Prism`, which matches the
+`WM_CLASS` the app sets via Tk's `className` — that is what makes a running
+window group under its own dock icon instead of a generic "Tk" one.
 
 ## Code signing
 

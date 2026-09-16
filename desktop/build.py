@@ -88,10 +88,14 @@ def write_linux_desktop_entry(dist, icon):
         "GenericName=Pull Request Reviewer\n"
         "Comment=Review and safely merge AWS CodeCommit pull requests\n"
         "Exec=PRISM\n"
-        "Icon=PRISM\n"
+        "Icon=prism\n"
         "Terminal=false\n"
         "Categories=Development;RevisionControl;\n"
-        "Keywords=code review;pull request;codecommit;aws;git;\n"
+        "Keywords=code review;pull request;codecommit;aws;git;merge;\n"
+        "StartupNotify=true\n"
+        # Must match the WM_CLASS App sets via Tk's className, or the shell
+        # shows a second, generic icon for the running window.
+        "StartupWMClass=Prism\n"
     )
     (dist / "PRISM.desktop").write_text(entry)
 
