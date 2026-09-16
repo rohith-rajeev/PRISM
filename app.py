@@ -839,6 +839,8 @@ class App(tk.Tk):
 
     def _on_proj_changed(self, *_a):
         """Debounced re-scan — typing a path fires one write per keystroke."""
+        # The repo name is derived from the folder, so it must not outlive it.
+        self.repo_var.set("")
         if getattr(self, "_detect_job", None) is not None:
             try:
                 self.after_cancel(self._detect_job)
@@ -862,7 +864,18 @@ class App(tk.Tk):
         Nothing is hardcoded — everything comes from `.git` discovery plus
         generic backend/frontend name heuristics.
         """
-        base = Path(self.proj_var.get().strip() or ".")
+        raw = self.proj_var.get().strip()
+        if not raw:
+            # Nothing chosen yet: stay inert rather than scanning some default.
+            self.mode = "single"
+            self.detected = []
+            self.single_path = None
+            self.map_card.pack_forget()
+            self._rebuild_target_row()
+            self._set_hint("Select your project folder to begin — "
+                           "PRISM scans it for git clones.", "muted")
+            return
+        base = Path(raw)
         if not base.is_dir():
             # Reset to the safest mode so a stale multi-repo mapping from a
             # previous folder can never be used for the next run.
@@ -1143,7 +1156,6 @@ class App(tk.Tk):
                     self._apply_models(payload)
         except queue.Empty:
             pass
-        self.after(80, self._drain_logs)
 
     def _copy(self):
         self.clipboard_clear()
@@ -1167,19 +1179,17 @@ REFRESH_PLAIN: list = []
 
 
 def _default_project_dir():
-    """Folder the working-folder box starts on.
+    """Working folder to start on: deliberately none.
 
-    From a source checkout the parent of the PRISM folder is the natural guess
-    (projects usually sit beside it). A packaged build lives in a temporary
-    extraction directory or an install path that says nothing about the user's
-    code, so fall back to the current directory, then home.
+    PRISM used to guess — the parent of the checkout from source, the current
+    directory when packaged. Launched from a desktop shortcut the working
+    directory is $HOME, so the app scanned the user's entire home on startup
+    and pre-filled the repo box from whatever clone it happened to find there
+    (a dotfile checkout like ~/.nvm, say). Scanning a directory the user never
+    chose, and naming a CodeCommit repo off the back of it, is not a guess the
+    tool should be making. Start empty and wait for an explicit choice.
     """
-    if getattr(sys, "frozen", False):
-        for cand in (Path.cwd(), Path.home()):
-            if cand.is_dir():
-                return str(cand)
-        return str(Path.home())
-    return str(Path(__file__).resolve().parent.parent)
+    return ""
 
 
 def _add_placeholder(entry, text):
