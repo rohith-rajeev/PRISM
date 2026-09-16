@@ -92,6 +92,10 @@ on any other skill, agent, or checkout outside this folder.
 - `docs/requirements/PRISM.md` — full tool documentation
 - No runtime dependencies: `requirements.txt` intentionally empty.
 
+## License
+
+[MIT](LICENSE).
+
 ## Safety
 - Dry-run toggle previews without any writes/merges.
 - Merge only on Approve verdicts + PR status OPEN.
