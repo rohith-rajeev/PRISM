@@ -161,6 +161,7 @@ class RoundedButton(tk.Canvas):
         self._anchor = anchor
         self._hover = False
         self._enabled = True
+        self._fontobj = None
         self.bind("<Configure>", lambda _e: self._draw())
         self.bind("<Enter>", lambda _e: (setattr(self, "_hover", True), self._draw()))
         self.bind("<Leave>", lambda _e: (setattr(self, "_hover", False), self._draw()))
@@ -170,6 +171,33 @@ class RoundedButton(tk.Canvas):
     def set_text(self, text):
         self._text = text
         self._draw()
+
+    def _fit(self, text, max_px):
+        """Trim `text` with an ellipsis so it cannot run past the button edge.
+
+        Canvas text is not clipped to the widget, so an over-long clone or
+        model name would otherwise be drawn straight over the rounded border.
+        """
+        # Ellipsising something this short only loses information — an icon
+        # glyph is better clipped than replaced by "…".
+        if max_px <= 0 or len(text) <= 2:
+            return text
+        try:
+            if self._fontobj is None:
+                self._fontobj = tkfont.Font(font=self._font)
+            font = self._fontobj
+            if font.measure(text) <= max_px:
+                return text
+            lo, hi = 0, len(text)
+            while lo < hi:                      # longest prefix that still fits
+                mid = (lo + hi + 1) // 2
+                if font.measure(text[:mid] + "…") <= max_px:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            return text[:lo].rstrip() + "…"
+        except Exception:  # noqa: BLE001 - never fail a redraw over text metrics
+            return text
 
     def set_enabled(self, enabled):
         self._enabled = enabled
@@ -211,8 +239,15 @@ class RoundedButton(tk.Canvas):
         page = self.master.cget("bg")
         self.config(bg=page)
         _rr(self, 1, 1, w - 1, h - 1, min(self._radius, h // 2 - 1), fill, outline or None)
-        x = 14 if self._anchor == "w" else w // 2
-        self.create_text(x, h // 2, text=self._text, fill=fg, font=self._font,
+        left_pad = 14
+        x = left_pad if self._anchor == "w" else w // 2
+        # Available text width differs by alignment: left-aligned text starts
+        # at left_pad and needs a small right margin, centred text just needs a
+        # margin either side. Using the left-aligned budget for both starved
+        # narrow icon buttons (the 36px "↻") into rendering as a bare ellipsis.
+        avail = (w - left_pad - 10) if self._anchor == "w" else (w - 20)
+        label = self._fit(self._text, avail)
+        self.create_text(x, h // 2, text=label, fill=fg, font=self._font,
                          anchor="w" if self._anchor == "w" else "center")
 
 
@@ -664,28 +699,31 @@ class App(tk.Tk):
         maprow = tk.Frame(mapi, bg=PAL["card"])
         maprow.pack(fill="x")
         REFRESH_PLAIN.append((maprow, {"bg": "card"}))
-        becol = tk.Frame(maprow, bg=PAL["card"])
-        becol.pack(side="left", fill="x", expand=True, padx=(0, 8))
-        REFRESH_PLAIN.append((becol, {"bg": "card"}))
-        tk.Label(becol, text="Backend", font=FONT_B, bg=PAL["card"], fg=PAL["text"],
-                 anchor="w").pack(anchor="w", pady=(0, 2))
-        REFRESH_PLAIN.append((becol.winfo_children()[0], {"bg": "card", "fg": "text"}))
-        self.be_picker = Picker(becol, title="SELECT BACKEND CLONE",
-                                empty_label="Select backend clone…",
-                                group_key=lambda m: "", field_width=200,
-                                empty_hint="No clones detected")
-        self.be_picker.pack(anchor="w")
-        fecol = tk.Frame(maprow, bg=PAL["card"])
-        fecol.pack(side="left", fill="x", expand=True)
-        REFRESH_PLAIN.append((fecol, {"bg": "card"}))
-        tk.Label(fecol, text="Frontend", font=FONT_B, bg=PAL["card"], fg=PAL["text"],
-                 anchor="w").pack(anchor="w", pady=(0, 2))
-        REFRESH_PLAIN.append((fecol.winfo_children()[0], {"bg": "card", "fg": "text"}))
-        self.fe_picker = Picker(fecol, title="SELECT FRONTEND CLONE",
-                                empty_label="Select frontend clone…",
-                                group_key=lambda m: "", field_width=200,
-                                empty_hint="No clones detected")
-        self.fe_picker.pack(anchor="w")
+
+        def _clone_row(label, title, empty_label, pady):
+            """One full-width labelled clone picker.
+
+            Backend and Frontend are stacked rather than placed side by side:
+            clone folder names are routinely long enough to overflow a
+            half-width field, and the repo name is the one thing the user has
+            to read in full to confirm the mapping is right.
+            """
+            col = tk.Frame(maprow, bg=PAL["card"])
+            col.pack(fill="x", pady=pady)
+            REFRESH_PLAIN.append((col, {"bg": "card"}))
+            lb = tk.Label(col, text=label, font=FONT_B, bg=PAL["card"],
+                          fg=PAL["text"], anchor="w")
+            lb.pack(anchor="w", pady=(0, 2))
+            REFRESH_PLAIN.append((lb, {"bg": "card", "fg": "text"}))
+            picker = Picker(col, title=title, empty_label=empty_label,
+                            group_key=lambda m: "", empty_hint="No clones detected")
+            picker.pack(fill="x")
+            return picker
+
+        self.be_picker = _clone_row("Backend", "SELECT BACKEND CLONE",
+                                    "Select backend clone…", (0, 0))
+        self.fe_picker = _clone_row("Frontend", "SELECT FRONTEND CLONE",
+                                    "Select frontend clone…", (8, 0))
 
         # ---- Model and behavior card ----
         mc = RoundedCard(root)
