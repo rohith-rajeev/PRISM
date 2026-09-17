@@ -1652,10 +1652,7 @@ class App(tk.Tk):
         children they spawned, so without cancelling each job those processes
         would outlive the window.
         """
-        active = self.manager.active_jobs()
-        if active and not messagebox.askyesno(
-                "Quit PRISM",
-                f"{len(active)} job(s) are still running. Stop them and quit?"):
+        if not self._confirm_quit():
             return
         if self._drain_job is not None:
             try:
@@ -1665,6 +1662,44 @@ class App(tk.Tk):
             self._drain_job = None
         self.manager.stop_all()
         self.destroy()
+
+    def _confirm_quit(self):
+        """Ask before discarding work, since closing discards all of it.
+
+        PRISM keeps nothing on disk, so the window is the only place a verdict
+        or a transcript exists. Closing it is therefore destructive in a way a
+        window close usually is not, and the prompt says exactly what goes.
+        """
+        active = self.manager.active_jobs()
+        finished = [j for j in self.manager.jobs.values() if j.is_terminal]
+        if not active and not finished:
+            return True            # nothing to lose; don't nag
+        lines = ["PRISM is stateless — nothing is saved to disk, so closing "
+                 "this window discards everything below."]
+        if active:
+            started = "it started" if len(active) == 1 else "they started"
+            lines.append(f"• {_plural(len(active), 'unfinished job')} will be "
+                         f"stopped, and the reviewer and git processes "
+                         f"{started} terminated.")
+        # A job past the review stage may be mid-write; worth calling out
+        # separately because that is the only case with an effect outside PRISM.
+        writing = [j for j in active
+                   if any(j.stages.get(s) == "active"
+                          for s in (STAGE_DESCRIBE, STAGE_MERGE, STAGE_SYNC))]
+        if writing:
+            verb = "is" if len(writing) == 1 else "are"
+            lines.append(f"• {len(writing)} of them {verb} updating a PR description "
+                         f"or merging. Stopping is checked between steps, so a call "
+                         f"already in flight with AWS may still complete.")
+        if finished:
+            whose = "its verdict and conversation" if len(finished) == 1 \
+                else "their verdicts and conversations"
+            lines.append(f"• {_plural(len(finished), 'finished job')} will be "
+                         f"discarded, including {whose}.")
+        lines.append("Do you still want to quit?")
+        return messagebox.askyesno("Quit PRISM?", "\n\n".join(lines),
+                                   icon=messagebox.WARNING,
+                                   default=messagebox.NO)
 
     def _drain_once(self):
         touched = False
@@ -1866,6 +1901,11 @@ def _impact_style(score, out_of=10):
     if ratio <= 0.8:
         return "🔴", "bad"         # 7-8  high
     return "⛔", "bad"             # 9-10 critical
+
+
+def _plural(n, singular, plural=None):
+    """"1 job" / "3 jobs" — these strings are shown to people."""
+    return f"{n} {singular if n == 1 else (plural or singular + 's')}"
 
 
 def _classify(text):

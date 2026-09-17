@@ -248,6 +248,11 @@ outstanding and costs no space otherwise.
   definition; all writes go through PRISM's orchestrator or the agent's
   gated description-update step.
 - Stop is available for the entire run and always returns the UI to idle.
+- Closing the window is confirmed whenever any job exists, naming what goes:
+  unfinished jobs and the processes they started, any job mid-write, and
+  finished jobs whose verdicts and conversations are only held in memory. The
+  dialog defaults to **No**, so a stray Enter cannot discard a day's reviews.
+  With no jobs at all it closes without asking.
 
 ---
 

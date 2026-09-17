@@ -127,6 +127,8 @@ on any other skill, agent, or checkout outside this folder.
 - Dry-run toggle previews without any writes/merges.
 - Merge only on Approve verdicts + PR status OPEN.
 - Sync conflicts abort cleanly (`git merge --abort`) and are reported, never forced.
+- Closing the window asks first whenever any job exists — PRISM keeps nothing
+  on disk, so that is the only copy of your verdicts — and defaults to *No*.
 - A sync refuses to start on a dirty working tree, refuses to push commits that
   exist only in your clone, and returns the clone to the branch you had checked
   out when it finishes.
