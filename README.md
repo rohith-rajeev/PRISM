@@ -38,7 +38,10 @@ pre-filled from the last job (usually only the PR id changes).
    source** (`git fetch + merge origin/<dest> + push`) and retries the merge.
 6. 🔴 Request-changes / ⛔ Block verdicts are **never merged**.
 
-A progress bar under the **Start Prisming** button tracks the run: the fill
+The conversation pane shows the reviewer's prose in blue and the tools it runs
+in grey, so you can watch it work; anything running carries a spinner so a long
+step never looks like a hang. A progress bar under the **Start Prisming**
+button tracks the run: the fill
 stops on the stage in flight, with a marker and caption per stage. The plan is
 dynamic per PR — describe/merge stages show as skipped when disabled, blocked
 by verdict, or dry-run, and the Merge caption switches to "Syncing…" when a

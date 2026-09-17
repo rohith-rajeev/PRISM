@@ -85,6 +85,21 @@ def _rr(canvas, x1, y1, x2, y2, r, fill, outline, tags="rr"):
         canvas.create_line(x2, y1 + r, x2, y2 - r, fill=outline, tags=tags)
 
 
+def _spinner(canvas, cx, cy, r, frame, colour):
+    """Draw one frame of a rotating arc.
+
+    Work happens in a subprocess for minutes at a time with nothing to show
+    for it, so a static dot reads as "stuck". Frames are advanced by the
+    existing queue pump rather than a timer of their own — the app has
+    exactly one `after` loop and keeping it that way is deliberate.
+    """
+    canvas.create_oval(cx - r, cy - r, cx + r, cy + r,
+                       outline=PAL["border"], width=2)
+    canvas.create_arc(cx - r, cy - r, cx + r, cy + r,
+                      start=(90 - frame * 30) % 360, extent=100,
+                      style=tk.ARC, outline=colour, width=2)
+
+
 class RoundedCard(tk.Frame):
     """Card with rounded fill + outline. Set stretch=True when the inner
     content must expand to fill leftover space (log console)."""
@@ -357,11 +372,18 @@ class StatusPill(tk.Canvas):
         self._color = PAL["muted"]
         self.bind("<Configure>", lambda _e: self._draw())
 
-    def set(self, text, color_key="muted"):
+    def set(self, text, color_key="muted", spin=False):
         self._text = text
         self._color_key = color_key
         self._color = PAL[color_key]
+        self._spin = spin
         self._draw()
+
+    def tick(self, frame):
+        """Advance the animation. No-op unless this pill is spinning."""
+        if getattr(self, "_spin", False):
+            self._frame = frame
+            self._draw()
 
     def refresh_theme(self):
         self.config(bg=PAL["page"])
@@ -374,7 +396,10 @@ class StatusPill(tk.Canvas):
         h = self.winfo_height() or 28
         self.config(bg=PAL["page"])
         _rr(self, 1, 1, w - 1, h - 1, (h - 2) // 2, PAL["card"], PAL["border"])
-        self.create_oval(14, h / 2 - 4, 22, h / 2 + 4, fill=self._color, outline="")
+        if getattr(self, "_spin", False):
+            _spinner(self, 18, h / 2, 5, getattr(self, "_frame", 0), self._color)
+        else:
+            self.create_oval(14, h / 2 - 4, 22, h / 2 + 4, fill=self._color, outline="")
         self.create_text(30, h / 2, text=self._text, fill=PAL["text"], font=FONT_S, anchor="w")
 
 
@@ -566,6 +591,11 @@ class JobRow(RoundedCard):
             w.bind("<Button-1>", lambda _e: on_open(job.id))
         self.refresh()
 
+    def tick(self, frame):
+        if getattr(self, "_spin", False):
+            self._frame = frame
+            self.refresh()
+
     def refresh(self):
         job = self.job
         colour = {J.RUNNING: "accent", J.NEEDS_INPUT: "warn", J.QUEUED: "muted",
@@ -573,7 +603,13 @@ class JobRow(RoundedCard):
                   J.DONE: "good"}.get(job.status, "muted")
         self.dot.delete("all")
         self.dot.config(bg=PAL["card"])
-        self.dot.create_oval(3, 3, 12, 12, fill=PAL[colour], outline="")
+        # Spin only while genuinely working — a job waiting on the user is not
+        # making progress and should not pretend to be.
+        self._spin = job.status in (J.RUNNING, J.STOPPING)
+        if self._spin:
+            _spinner(self.dot, 7, 7, 5, getattr(self, "_frame", 0), PAL[colour])
+        else:
+            self.dot.create_oval(3, 3, 12, 12, fill=PAL[colour], outline="")
         label = {J.NEEDS_INPUT: "Needs input", J.QUEUED: "Queued",
                  J.RUNNING: "Running…", J.STOPPING: "Stopping…",
                  J.STOPPED: "Stopped", J.ERROR: "Error",
@@ -794,6 +830,7 @@ class App(tk.Tk):
         self.rows = {}               # job id -> JobRow
         self.screen = None
         self.stage_state = {}        # mirrors the displayed job, for the bar
+        self._anim = 0               # spinner frame, advanced by the pump
         self._verdict_key = ""
         self._drain_job = None
         self._build()
@@ -1064,6 +1101,11 @@ class App(tk.Tk):
         self.log.configure(yscrollcommand=scroll.set)
         self.log.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
+        # Agent prose gets the logo blue; it is neither PRISM's own output nor
+        # an error, and colouring it red on a stray word like "error handling"
+        # made ordinary commentary look like a failure.
+        self.log.tag_config("agent", foreground=PAL["accent_text"])
+        self.log.tag_config("tool", foreground=PAL["muted"])
         self.log.tag_config("ok", foreground=PAL["good"])
         self.log.tag_config("warn", foreground=PAL["warn"])
         self.log.tag_config("err", foreground=PAL["bad"])
@@ -1374,6 +1416,7 @@ class App(tk.Tk):
         self.selected_job_id = job_id
         self._show_screen(self.detail_screen)
         self._render_job(job)
+        self._refresh_pill()
 
     def _close_pickers(self):
         for picker in (getattr(self, "be_picker", None),
@@ -1411,10 +1454,10 @@ class App(tk.Tk):
         running = sum(1 for j in jobs if j.status in (J.RUNNING, J.STOPPING))
         queued = sum(1 for j in jobs if j.status == J.QUEUED)
         if asking:
-            self.pill.set(f"{asking} need input", "warn")
+            self.pill.set(f"{asking} need input", "warn", spin=bool(running))
         elif running or queued:
             txt = f"{running} running" + (f" · {queued} queued" if queued else "")
-            self.pill.set(txt, "accent")
+            self.pill.set(txt, "accent", spin=bool(running))
         else:
             self.pill.set("Idle", "muted")
 
@@ -1490,6 +1533,7 @@ class App(tk.Tk):
         self.last_spec = spec
         self.manager.pump()
         self._refresh_jobs_list()
+        self._refresh_pill()      # the job just went RUNNING; start the spinner
         self.show_detail(job.id)
 
     # ---------------- per-job control ----------------
@@ -1595,6 +1639,7 @@ class App(tk.Tk):
     def _drain_logs(self):
         try:
             self._drain_once()
+            self._tick_animation()
         finally:
             # Always reschedule: one bad line must not kill the pump and leave
             # the UI frozen mid-run with no log and no progress.
@@ -1649,6 +1694,22 @@ class App(tk.Tk):
             if self.screen is self.jobs_screen:
                 self._refresh_jobs_list()
 
+    def _tick_animation(self):
+        """Advance spinners. Idle when nothing is working, so a settled app
+        costs nothing — the pump still runs, it just has no frames to draw."""
+        working = [j for j in self.manager.jobs.values()
+                   if j.status in (J.RUNNING, J.STOPPING)]
+        if not working:
+            self._anim = 0
+            return
+        self._anim = (self._anim + 1) % 12
+        self.pill.tick(self._anim)
+        if self.screen is self.jobs_screen:
+            for job in working:
+                row = self.rows.get(job.id)
+                if row is not None:
+                    row.tick(self._anim)
+
     def _handle(self, job, kind, payload):
         """Apply one message to the model, then to the screen if it is showing.
 
@@ -1656,18 +1717,14 @@ class App(tk.Tk):
         """
         shown = job.id == self.selected_job_id and self.screen is self.detail_screen
         if kind == "log":
-            text = payload.strip()
-            low = text.lower()
-            tag = None
-            if text.startswith("◆") or text.startswith("✅"):
-                tag = "ok"
-            elif text.startswith("⚠") or "warning" in low:
-                tag = "warn"
-            elif text.startswith("⛔") or "fail" in low or "error" in low:
-                tag = "err"
-            job.append_log(payload, tag)
+            line, tag = payload if isinstance(payload, tuple) else (payload, None)
+            text = line.strip()
+            if tag is None:
+                tag = _classify(text)
+            job.append_log(line, tag)
+            payload = line
             if shown:
-                self._append(payload, tag)
+                self._append(line, tag)
             if text.startswith("◆ Verdict:"):
                 m = re.match(r"◆ Verdict:\s*(.*?)\s{2,}Impact:\s*(.*)", text)
                 job.verdict_raw = (m.group(1).strip() if m
@@ -1809,6 +1866,22 @@ def _impact_style(score, out_of=10):
     if ratio <= 0.8:
         return "🔴", "bad"         # 7-8  high
     return "⛔", "bad"             # 9-10 critical
+
+
+def _classify(text):
+    """Tag for a line PRISM emitted itself.
+
+    Marker-driven on purpose. The previous version tagged any line containing
+    "error" or "fail" as a failure, which painted ordinary agent commentary —
+    "its error handling", "the failing test" — in alarming red.
+    """
+    if text.startswith(("◆", "✅")):
+        return "ok"
+    if text.startswith(("⚠", "■")):
+        return "warn"
+    if text.startswith("⛔") or "ERROR:" in text or "Traceback" in text:
+        return "err"
+    return None
 
 
 def _verdict_colour(key):

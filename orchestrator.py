@@ -59,6 +59,12 @@ DESC_BLOCK_RE = re.compile(r"<!-- pr-reviewer:start -->.*?<!-- pr-reviewer:end -
 MERGEABLE_VERDICTS = ("approve", "approve with comments")
 
 
+def _emit_plain(text, tag=None):
+    """Default emit target. The tag is what the UI colours by; on stdout it
+    carries no meaning, so it is accepted and ignored."""
+    print(text)
+
+
 # ---------------------------------------------------------------- locking --
 # Jobs run concurrently, and several of them commonly share one project folder
 # or one local clone. These locks serialise the few operations that mutate
@@ -248,7 +254,7 @@ def parse_review_output(text: str) -> ReviewResult:
     return res
 
 
-def ensure_bundled_agent(project_dir: str, emit=print) -> str:
+def ensure_bundled_agent(project_dir: str, emit=_emit_plain) -> str:
     """Install the bundled pr-reviewer agent into the target project.
 
     opencode resolves `--agent pr-reviewer` from the run directory's
@@ -398,11 +404,12 @@ def _event_session_id(evt):
 
 
 def _event_text(evt):
-    """Assistant-visible text an event carries, or None if it carries none.
+    """Assistant prose an event carries, or None.
 
-    Verified against a live `opencode run --format json`: text sits at
-    part.text, not at the top level — the top-level `type` only labels the
-    event. Tool calls and step markers carry no prose and return None.
+    Verified against a live run: text sits at part.text, and one event carries
+    one *complete* part — an 844-character answer arrived in a single event,
+    not as token deltas. Parts must therefore be separated when emitted, or
+    consecutive messages run together into one paragraph.
     """
     part = evt.get("part")
     if isinstance(part, dict) and part.get("type") == "text":
@@ -410,6 +417,34 @@ def _event_text(evt):
     if evt.get("type") == "text" and isinstance(evt.get("text"), str):
         return evt["text"]
     return None
+
+
+def _event_tool(evt):
+    """One-line description of a tool the agent just used, or None.
+
+    Without this the transcript shows only the agent's commentary and looks
+    stalled during the long stretches where it is reading files and running
+    git — which is most of a review.
+    """
+    part = evt.get("part")
+    if not isinstance(part, dict) or part.get("type") != "tool":
+        return None
+    name = part.get("tool") or "tool"
+    state = part.get("state") or {}
+    detail = state.get("title")
+    if not detail:
+        args = state.get("input")
+        if isinstance(args, dict):
+            detail = (args.get("command") or args.get("filePath")
+                      or args.get("path") or args.get("pattern") or "")
+        else:
+            detail = ""
+    detail = " ".join(str(detail).split())
+    if len(detail) > 160:
+        detail = detail[:157] + "…"
+    status = state.get("status")
+    mark = "✗" if status == "error" else "⚙"
+    return f"{mark} {name}" + (f": {detail}" if detail else "")
 
 
 def _run_stream(cmd, cwd, emit, timeout=1200, control=None, json_mode=False):
@@ -451,8 +486,14 @@ def _run_stream(cmd, cwd, emit, timeout=1200, control=None, json_mode=False):
     watchdog.start()
     session_id = None
     text_parts = []
-    flushed = 0
+    seen_parts = {}
     malformed = False
+
+    def emit_block(block):
+        """Release one completed part, line by line."""
+        for out_line in block.split("\n"):
+            emit(out_line, "agent")
+
     try:
         for line in proc.stdout:
             out_lines.append(line)
@@ -472,22 +513,35 @@ def _run_stream(cmd, cwd, emit, timeout=1200, control=None, json_mode=False):
                 continue
             if session_id is None:
                 session_id = _event_session_id(evt)
+            tool = _event_tool(evt)
+            if tool is not None:
+                emit(tool, "tool")
+                continue
             piece = _event_text(evt)
             if piece is None:
                 if str(evt.get("type", "")).endswith("error"):
                     emit(f"⚠ {evt.get('message') or stripped[:200]}")
                 continue
-            # Events carry token-level deltas. Emitting one log line per event
-            # would shred the transcript into fragments, so buffer and release
-            # only completed lines — matching the one-line-per-emit behaviour
-            # of the plain-text path.
+            part_id = ((evt.get("part") or {}).get("id")
+                       if isinstance(evt.get("part"), dict) else None)
+            if part_id is not None and part_id in seen_parts:
+                # Same part seen again: cumulative if it extends what we have,
+                # otherwise a delta. Handle both rather than assume.
+                prev = seen_parts[part_id]
+                addition = piece[len(prev):] if piece.startswith(prev) else piece
+                seen_parts[part_id] = prev + addition if not piece.startswith(prev) else piece
+                if addition:
+                    emit_block(addition)
+                    text_parts.append(addition)
+                continue
+            if part_id is not None:
+                seen_parts[part_id] = piece
+            # A new part always starts on its own line, or consecutive replies
+            # concatenate into one unreadable paragraph.
+            if text_parts and not text_parts[-1].endswith("\n"):
+                text_parts.append("\n")
             text_parts.append(piece)
-            joined = "".join(text_parts)
-            nl = joined.rfind("\n")
-            if nl >= flushed:
-                for done_line in joined[flushed:nl].split("\n"):
-                    emit(done_line)
-                flushed = nl + 1
+            emit_block(piece)
         proc.wait(timeout=60)
     except Exception as e:  # noqa: BLE001
         try:
@@ -510,9 +564,6 @@ def _run_stream(cmd, cwd, emit, timeout=1200, control=None, json_mode=False):
         raise Cancelled("Run stopped.")
     if json_mode:
         text = "".join(text_parts)
-        tail = text[flushed:]
-        if tail.strip():
-            emit(tail.rstrip("\n"))
         if malformed:
             # Any surprise in the stream means the id may not belong to this
             # conversation; refuse it rather than pin the wrong session.
@@ -527,7 +578,7 @@ def _run_stream(cmd, cwd, emit, timeout=1200, control=None, json_mode=False):
 
 
 def run_opencode_review(pr_id, repo_name, local_repo, project_dir,
-                        region=REGION_DEFAULT, emit=print, model=None,
+                        region=REGION_DEFAULT, emit=_emit_plain, model=None,
                         control=None):
     """Step 1: trigger the pr-reviewer agent. Returns raw agent output."""
     exe = require_engine()
@@ -555,7 +606,7 @@ def run_opencode_review(pr_id, repo_name, local_repo, project_dir,
     return out, session_id
 
 
-def run_opencode_reply(message, project_dir, session_id=None, emit=print,
+def run_opencode_reply(message, project_dir, session_id=None, emit=_emit_plain,
                        model=None, control=None):
     """Send a free-text reply into the agent's existing session.
 
@@ -601,7 +652,7 @@ def _continue_turn(prompt, project_dir, session_id, emit, model, control, what):
 
 
 def run_opencode_approve_description(pr_id, project_dir, session_id=None,
-                                     emit=print, model=None,
+                                     emit=_emit_plain, model=None,
                                      repo_name=None, region=REGION_DEFAULT,
                                      control=None):
     """Step 2: tell the agent 'yes' — append findings to the PR description.
@@ -725,7 +776,7 @@ def try_fast_forward_merge(pr_id, repo_name, region=REGION_DEFAULT):
     return data
 
 
-def sync_destination_into_source(local_repo, dest, src, pr_id, emit=print):
+def sync_destination_into_source(local_repo, dest, src, pr_id, emit=_emit_plain):
     """Sync destination commits onto the source branch locally, then push.
 
     Equivalent of: git fetch, checkout source, merge origin/destination, push.
@@ -824,7 +875,7 @@ MAX_CLARIFY_ROUNDS = 4
 def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
                   region=REGION_DEFAULT,
                   do_update_desc=True, do_merge=True, do_sync=True,
-                  dry_run=False, model=None, progress=None, emit=print,
+                  dry_run=False, model=None, progress=None, emit=_emit_plain,
                   control=None, ask=None):
     """Run the whole review → describe → merge pipeline. Returns dict summary.
 

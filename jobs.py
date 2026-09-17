@@ -250,7 +250,7 @@ class JobManager:
         """Worker body. Posts messages; never touches Job state directly."""
         try:
             summary = self._runner(
-                emit=lambda m: job.emit_event("log", m),
+                emit=lambda m, tag=None: job.emit_event("log", (m, tag)),
                 progress=lambda stage, state: job.emit_event("progress", (stage, state)),
                 control=job.control, ask=job.ask.ask,
                 **job.spec.pipeline_kwargs())

@@ -22,14 +22,23 @@ def jline(**kw):
     return json.dumps(kw)
 
 
-def text_event(sid, text):
+def text_event(sid, text, part_id="prt_1"):
+    """One *complete* text part, which is what the engine actually emits — an
+    844-character answer arrived in a single event, not as token deltas."""
     return jline(type="text", timestamp=1, sessionID=sid,
-                 part={"type": "text", "text": text, "sessionID": sid})
+                 part={"type": "text", "text": text, "id": part_id,
+                       "sessionID": sid})
+
+
+def tool_event(sid, tool, title, status="completed"):
+    return jline(type="tool_use", timestamp=1, sessionID=sid,
+                 part={"type": "tool", "tool": tool, "callID": "c1",
+                       "state": {"status": status, "title": title,
+                                 "input": {"command": title}}})
 
 
 class EventShape(unittest.TestCase):
-    """Verified against a real `opencode run --format json`: the prose lives
-    at part.text, and every line carries sessionID."""
+    """Shapes verified against a real `opencode run --format json`."""
 
     def test_session_id_from_top_level_or_part(self):
         self.assertEqual(o._event_session_id(json.loads(
@@ -40,11 +49,27 @@ class EventShape(unittest.TestCase):
 
     def test_text_only_from_text_parts(self):
         self.assertEqual(o._event_text(json.loads(text_event("s", "hi"))), "hi")
-        # step markers and tool calls carry no prose
         self.assertIsNone(o._event_text(json.loads(
             jline(type="step_start", part={"type": "step-start"}))))
-        self.assertIsNone(o._event_text(json.loads(
-            jline(type="tool_use", part={"type": "tool", "name": "bash"}))))
+
+    def test_tool_events_become_one_readable_line(self):
+        ev = json.loads(tool_event("s", "bash", "git diff --stat"))
+        self.assertEqual(o._event_tool(ev), "⚙ bash: git diff --stat")
+
+    def test_failed_tool_is_marked(self):
+        ev = json.loads(tool_event("s", "bash", "git push", status="error"))
+        self.assertTrue(o._event_tool(ev).startswith("✗ bash"))
+
+    def test_tool_detail_falls_back_to_input_and_is_bounded(self):
+        ev = json.loads(jline(type="tool_use", part={
+            "type": "tool", "tool": "read",
+            "state": {"status": "completed", "input": {"filePath": "x" * 400}}}))
+        line = o._event_tool(ev)
+        self.assertTrue(line.startswith("⚙ read: "))
+        self.assertLessEqual(len(line), 180, "a huge argument must not flood the log")
+
+    def test_non_tool_events_are_not_tools(self):
+        self.assertIsNone(o._event_tool(json.loads(text_event("s", "hi"))))
 
 
 class StreamDecoding(unittest.TestCase):
@@ -55,39 +80,72 @@ class StreamDecoding(unittest.TestCase):
         rc, text, sid = o._run_stream(
             [sys.executable, "-c",
              "import sys; sys.stdout.write(sys.argv[1])", payload],
-            cwd=".", emit=emitted.append, json_mode=json_mode)
+            cwd=".", emit=lambda m, tag=None: emitted.append((m, tag)),
+            json_mode=json_mode)
         return rc, text, sid, emitted
 
-    def test_captures_session_and_reassembles_prose(self):
+    def test_captures_session_and_emits_prose_as_agent_text(self):
         sid = "ses_f549009ebffeP4JgANr76DIva5"
-        report = "**Verdict:** OK Approve\n**Impact score:** 3/10 - small\n"
-        # deltas, exactly as the engine streams them
-        payload = jline(type="step_start", sessionID=sid, part={"type": "step-start"}) + "\n"
-        payload += "".join(text_event(sid, report[i:i + 7]) + "\n"
-                           for i in range(0, len(report), 7))
+        report = "**Verdict:** OK Approve\n**Impact score:** 3/10 - small"
+        payload = (jline(type="step_start", sessionID=sid,
+                         part={"type": "step-start"}) + "\n"
+                   + text_event(sid, report) + "\n")
         rc, text, got, emitted = self._run(payload)
         self.assertEqual(rc, 0)
         self.assertEqual(got, sid)
         self.assertEqual(text, report)
-        # prose is released as whole lines, never token fragments
-        self.assertIn("**Verdict:** OK Approve", emitted)
-        self.assertNotIn("**Verd", emitted)
+        self.assertIn(("**Verdict:** OK Approve", "agent"), emitted)
+
+    def test_consecutive_parts_do_not_run_together(self):
+        """Separate replies are separate messages; without a break between
+        them the transcript reads as one unbroken paragraph."""
+        sid = "ses_x"
+        payload = (text_event(sid, "I have the full diff.", "prt_a") + "\n"
+                   + text_event(sid, "Now let me verify the context.", "prt_b") + "\n")
+        _rc, text, _sid, _e = self._run(payload)
+        self.assertIn("diff.\nNow let me", text)
+        self.assertNotIn("diff.Now let me", text)
+
+    def test_tool_activity_reaches_the_log(self):
+        """Most of a review is reading files and running git; without these
+        lines the UI looks stalled."""
+        sid = "ses_x"
+        payload = (tool_event(sid, "bash", "git diff --stat") + "\n"
+                   + text_event(sid, "Two commits, 7 files.") + "\n")
+        _rc, _text, _sid, emitted = self._run(payload)
+        self.assertIn(("⚙ bash: git diff --stat", "tool"), emitted)
+        self.assertIn(("Two commits, 7 files.", "agent"), emitted)
+
+    def test_tool_lines_stay_out_of_the_parsed_report(self):
+        sid = "ses_x"
+        payload = (tool_event(sid, "bash", "git log") + "\n"
+                   + text_event(sid, "**Verdict:** OK Approve") + "\n")
+        _rc, text, _sid, _e = self._run(payload)
+        self.assertNotIn("git log", text, "tool chatter must not reach the parser")
+        self.assertEqual(o.parse_review_output(text).verdict_key, "approve")
 
     def test_parses_to_the_same_verdict_as_the_markdown_path(self):
         report = ("## PR #7\n**Verdict:** OK Approve with comments\n"
                   "**Impact score:** 6/10 - shared auth\n"
                   "- **[High] security - `a.py:1`** bad\n")
-        payload = "".join(text_event("ses_x", report[i:i + 5]) + "\n"
-                          for i in range(0, len(report), 5))
+        payload = text_event("ses_x", report) + "\n"
         _rc, text, _sid, _e = self._run(payload)
         a = o.parse_review_output(text)
         b = o.parse_review_output(report)
         self.assertEqual((a.verdict_key, a.impact_score, a.findings),
                          (b.verdict_key, b.impact_score, b.findings))
 
+    def test_repeated_part_is_not_duplicated(self):
+        """Guard for a build that streams cumulative updates per part."""
+        sid = "ses_x"
+        payload = (text_event(sid, "Hello", "prt_a") + "\n"
+                   + text_event(sid, "Hello world", "prt_a") + "\n")
+        _rc, text, _sid, _e = self._run(payload)
+        self.assertEqual(text, "Hello world")
+
     def test_malformed_stream_refuses_the_session_id(self):
         """Any surprise means the id may not belong to this conversation."""
-        payload = text_event("ses_x", "hello\n") + "\nthis is not json\n"
+        payload = text_event("ses_x", "hello") + "\nthis is not json\n"
         _rc, _text, sid, _e = self._run(payload)
         self.assertIsNone(sid, "a malformed line must invalidate the session id")
 
