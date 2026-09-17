@@ -13,7 +13,7 @@ import re
 import threading
 import tkinter as tk
 import tkinter.font as tkfont
-from tkinter import filedialog, messagebox
+from tkinter import filedialog
 from pathlib import Path
 import sys
 
@@ -509,6 +509,93 @@ class AgentPanel(RoundedCard):
 
     def _skip(self):
         self._on_skip()
+
+
+class Dialog(tk.Toplevel):
+    """Modal in PRISM's own palette.
+
+    Tk's messagebox draws a light system panel, which is jarring against a
+    dark app and — for the quit prompt especially — makes the one dialog that
+    destroys work look like it belongs to something else. This is the same
+    rounded card, button and colour language as the rest of the UI.
+    """
+
+    def __init__(self, parent, title, message, confirm=None, cancel="OK",
+                 tone="warn"):
+        super().__init__(parent)
+        self.withdraw()
+        self.title(title)
+        self.configure(bg=PAL["page"])
+        self.resizable(False, False)
+        self.transient(parent)
+        self.result = False
+
+        card = RoundedCard(self, outline_key=tone)
+        card.pack(fill="both", expand=True, padx=10, pady=10)
+        inner = card.inner
+        inner.config(padx=16, pady=12)
+
+        head = tk.Frame(inner, bg=PAL["card"])
+        head.pack(fill="x", pady=(0, 8))
+        glyph = {"bad": "⛔", "warn": "⚠", "accent": "💬"}.get(tone, "⚠")
+        tk.Label(head, text=glyph, font=("Segoe UI", 14), bg=PAL["card"],
+                 fg=PAL[tone]).pack(side="left", padx=(0, 10))
+        tk.Label(head, text=title, font=("Segoe UI", 12, "bold"), bg=PAL["card"],
+                 fg=PAL["text"], anchor="w").pack(side="left")
+
+        tk.Label(inner, text=message, font=FONT_S, bg=PAL["card"], fg=PAL["text"],
+                 justify="left", anchor="w", wraplength=430).pack(fill="x")
+
+        row = tk.Frame(inner, bg=PAL["card"])
+        row.pack(fill="x", pady=(14, 0))
+        # Cancel sits on the right and takes focus: the destructive choice
+        # should never be the one a stray Enter or Space triggers.
+        cancel_btn = RoundedButton(row, text=cancel, height=32, width=120,
+                                   font=FONT_B, command=self._cancel)
+        cancel_btn.pack(side="right")
+        if confirm:
+            RoundedButton(row, text=confirm, height=32, width=140, font=FONT_B,
+                          style="primary",
+                          command=self._confirm).pack(side="right", padx=(0, 8))
+
+        self.bind("<Escape>", lambda _e: self._cancel())
+        self.bind("<Return>", lambda _e: self._cancel())
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.update_idletasks()
+        self._centre(parent)
+        self.deiconify()
+        cancel_btn.focus_set()
+        self.grab_set()
+        self.wait_window(self)
+
+    def _centre(self, parent):
+        w, h = self.winfo_reqwidth(), self.winfo_reqheight()
+        try:
+            x = parent.winfo_rootx() + (parent.winfo_width() - w) // 2
+            y = parent.winfo_rooty() + (parent.winfo_height() - h) // 3
+        except Exception:  # noqa: BLE001
+            x = y = 200
+        self.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+    def _confirm(self):
+        self.result = True
+        self.destroy()
+
+    def _cancel(self):
+        self.result = False
+        self.destroy()
+
+
+def ask_confirm(parent, title, message, confirm="Continue", cancel="Cancel",
+                tone="warn"):
+    """Themed yes/no. Returns True only on the explicit confirm button."""
+    return Dialog(parent, title, message, confirm=confirm, cancel=cancel,
+                  tone=tone).result
+
+
+def show_warning(parent, title, message):
+    """Themed acknowledgement, replacing messagebox.showwarning."""
+    Dialog(parent, title, message, confirm=None, cancel="OK", tone="warn")
 
 
 class ScrollFrame(tk.Frame):
@@ -1467,30 +1554,30 @@ class App(tk.Tk):
         pr = _entry_value(self.pr_entry).strip()
         proj = self.proj_var.get().strip()
         if not pr.isdigit():
-            messagebox.showwarning("PR id", "Enter a numeric CodeCommit PR id.")
+            show_warning(self, "PR id", "Enter a numeric CodeCommit PR id.")
             return None
         if not Path(proj).is_dir():
-            messagebox.showwarning("Project folder", "Pick a valid root folder first.")
+            show_warning(self, "Project folder", "Pick a valid root folder first.")
             return None
         if self.mode == "multi":
             mapping = self._mapping()
             target = self.target_var.get() or "BE"
             picked = mapping.get(target)
             if not picked:
-                messagebox.showwarning(
-                    "Mapping",
+                show_warning(
+                    self, "Mapping",
                     f"Select the {'Backend' if target == 'BE' else 'Frontend'} clone "
                     f"in Repository mapping first.")
                 return None
             other = mapping.get("FE" if target == "BE" else "BE")
             if other and other[1] == picked[1]:
-                messagebox.showwarning("Mapping", "Backend and Frontend point to the same clone.")
+                show_warning(self, "Mapping", "Backend and Frontend point to the same clone.")
                 return None
             repo, local_repo = Path(picked[1]).name, picked[1]
         else:
             repo = self.repo_var.get().strip()
             if not repo:
-                messagebox.showwarning("Repository", "Enter the CodeCommit repository name.")
+                show_warning(self, "Repository", "Enter the CodeCommit repository name.")
                 return None
             local_repo = self.single_path
         return J.JobSpec(
@@ -1519,16 +1606,17 @@ class App(tk.Tk):
         if spec is None:
             return
         sharer = self.manager.shares_clone_with(spec)
-        if sharer is not None and not messagebox.askyesno(
-                "Same clone",
+        if sharer is not None and not ask_confirm(
+                self, "Same clone",
                 f"{sharer.spec.label} is already using this clone.\n\n"
                 f"Both jobs can run — git operations on a shared checkout are "
-                f"serialised — but one may wait for the other. Start anyway?"):
+                f"serialised — but one may wait for the other.",
+                confirm="Start anyway", cancel="Cancel"):
             return
         try:
             job = self.manager.create(spec)
         except J.DuplicateJob as e:
-            messagebox.showwarning("Already running", str(e))
+            show_warning(self, "Already running", str(e))
             return
         self.last_spec = spec
         self.manager.pump()
@@ -1556,8 +1644,12 @@ class App(tk.Tk):
 
     def _remove_job(self, job_id):
         job = self.manager.jobs.get(job_id)
-        if job is not None and job.is_active and not messagebox.askyesno(
-                "Stop and remove", f"{job.label} is still running. Stop and remove it?"):
+        if job is not None and job.is_active and not ask_confirm(
+                self, "Stop and remove",
+                f"{job.label} is still running.\n\nStopping it terminates the "
+                f"reviewer and git processes it started. Its log and verdict are "
+                f"discarded — PRISM keeps nothing on disk.",
+                confirm="Stop and remove", cancel="Keep it", tone="bad"):
             return
         self.manager.remove(job_id)
         if self.selected_job_id == job_id:
@@ -1697,9 +1789,9 @@ class App(tk.Tk):
             lines.append(f"• {_plural(len(finished), 'finished job')} will be "
                          f"discarded, including {whose}.")
         lines.append("Do you still want to quit?")
-        return messagebox.askyesno("Quit PRISM?", "\n\n".join(lines),
-                                   icon=messagebox.WARNING,
-                                   default=messagebox.NO)
+        return ask_confirm(self, "Quit PRISM?", "\n\n".join(lines),
+                           confirm="Quit and discard", cancel="Stay open",
+                           tone="bad")
 
     def _drain_once(self):
         touched = False

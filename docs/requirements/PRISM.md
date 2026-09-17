@@ -214,6 +214,9 @@ outstanding and costs no space otherwise.
 
 ## 5. UI reference
 
+- **Dialogs** are drawn in PRISM's own palette rather than Tk's light system
+  panel, and a destructive one is never the keyboard default — Enter and Escape
+  both choose the safe option.
 - **Header:** ◇ badge, `PRISM` + subtitle, status pill (right). The window
   title is just `PRISM`.
 - **Project card:** working folder + Browse; dynamic target row
