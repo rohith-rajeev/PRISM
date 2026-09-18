@@ -41,6 +41,15 @@ class UpdateError(RuntimeError):
     """Anything that stops an update, phrased for the person reading it."""
 
 
+class NoRelease(UpdateError):
+    """Nothing has been published yet.
+
+    Not a failure: from the user's side "there is no newer version" and "there
+    are no versions at all" are the same answer, and presenting the second as
+    an error makes an ordinary, correct outcome look broken.
+    """
+
+
 class Release:
     """The subset of a GitHub release this tool cares about."""
 
@@ -136,18 +145,24 @@ def _open(url, timeout=CONNECT_TIMEOUT, accept="application/vnd.github+json"):
         return urllib.request.urlopen(req, timeout=timeout)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
-            raise UpdateError("No published release to update to yet.") from exc
+            raise NoRelease("Nothing published to update to yet.") from exc
         if exc.code in (403, 429):
-            raise UpdateError("GitHub is rate-limiting this machine. "
+            raise UpdateError("Too many checks from this machine just now. "
                               "Try again in a few minutes.") from exc
-        raise UpdateError(f"GitHub returned HTTP {exc.code}.") from exc
+        raise UpdateError(f"The update service returned an error "
+                          f"({exc.code}).") from exc
     except urllib.error.URLError as exc:
         reason = getattr(exc, "reason", exc)
         if isinstance(reason, ssl.SSLError):
-            raise UpdateError(f"Could not verify GitHub's certificate: {reason}") from exc
-        raise UpdateError(f"Could not reach GitHub: {reason}") from exc
+            raise UpdateError(f"Could not establish a secure connection.\n\n"
+                              f"({reason})") from exc
+        # The plain-language line first, the detail after: one is what to do
+        # about it, the other is only useful if that does not work.
+        raise UpdateError(f"Could not connect. Check your internet connection "
+                          f"and try again.\n\n({reason})") from exc
     except OSError as exc:
-        raise UpdateError(f"Could not reach GitHub: {exc}") from exc
+        raise UpdateError(f"Could not connect. Check your internet connection "
+                          f"and try again.\n\n({exc})") from exc
 
 
 def _pick_asset(assets, key=None):
@@ -168,9 +183,17 @@ def _pick_asset(assets, key=None):
 
 
 def check(timeout=CONNECT_TIMEOUT, current=__version__, key=None):
-    """The latest release if it is newer than `current`, else None."""
-    with _open(API_LATEST, timeout=timeout) as resp:
-        payload = json.loads(resp.read().decode("utf-8", "replace"))
+    """The latest release if it is newer than `current`, else None.
+
+    Nothing published at all reports the same None as nothing newer: the
+    caller's question is "is there an update", and the answer in both cases
+    is no.
+    """
+    try:
+        with _open(API_LATEST, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode("utf-8", "replace"))
+    except NoRelease:
+        return None
     return release_from_payload(payload, current=current, key=key)
 
 
@@ -269,8 +292,8 @@ def verify(path, release, timeout=CONNECT_TIMEOUT, sums_text=None):
     actual = sha256(path)
     if actual != expected:
         raise UpdateError(
-            "The downloaded file does not match the checksum GitHub "
-            "published for it. Nothing has been installed.")
+            "The download did not pass its integrity check, so nothing was "
+            "installed. Try again, or download it manually.")
     return True
 
 
