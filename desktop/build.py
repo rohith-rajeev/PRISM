@@ -49,7 +49,8 @@ def preflight():
     except ImportError:
         fail(f"PyInstaller is missing — install it with:\n"
              f"    {sys.executable} -m pip install -r {Path('desktop') / 'requirements-build.txt'}")
-    for rel in ("app.py", "orchestrator.py", Path("agents") / "pr-reviewer.md"):
+    for rel in ("app.py", "orchestrator.py", "jobs.py",
+                Path("agents") / "pr-reviewer.md"):
         if not (ROOT / rel).is_file():
             fail(f"missing {rel} — run this from the PRISM checkout")
 
@@ -119,10 +120,10 @@ def main():
         elif stale.exists():
             stale.unlink()
 
-    # The bundled reviewer agent must ride along as data; orchestrator.py finds
-    # it via sys._MEIPASS. PyInstaller's --add-data separator is ':' on POSIX
+    # The whole agents folder rides along as data — one file per pipeline step —
+    # and orchestrator.py finds it via sys._MEIPASS. PyInstaller's --add-data separator is ':' on POSIX
     # and ';' on Windows.
-    agent_src = ROOT / "agents" / "pr-reviewer.md"
+    agent_src = ROOT / "agents"
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--noconfirm", "--clean",

@@ -37,8 +37,27 @@ PR_DESCRIPTION_MAX = 10240
 # up there rather than next to __file__.
 FROZEN = getattr(sys, "frozen", False)
 TOOL_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).parent)).resolve()
-BUNDLED_AGENT = TOOL_DIR / "agents" / "pr-reviewer.md"
-AGENT_NAME = "pr-reviewer"
+AGENTS_DIR = TOOL_DIR / "agents"
+BUNDLED_AGENT = AGENTS_DIR / "pr-reviewer.md"
+
+# One agent per pipeline step, each with its own prompt and permission block.
+# The reviewer reads an untrusted diff; nothing it decides can write, because
+# every write in this module is performed by PRISM behind its own gates.
+AGENT_REVIEWER = "pr-reviewer"
+AGENT_CONTEXT = "pr-context-resolver"
+AGENT_POSTER = "review-comments-poster"
+AGENT_FF_CHECK = "fast-forward-merge-checker"
+AGENT_SYNC = "pr-sync"
+AGENT_CONFLICT = "conflict-analyst"
+AGENT_MERGER = "pr-merger"
+AGENT_NAME = AGENT_REVIEWER          # default for continuation turns
+
+# A decision block closes every agent reply except the reviewer's:
+#     ```prism
+#     decision: sync-then-merge
+#     reason: source is 3 commits behind
+#     ```
+DECISION_RE = re.compile(r"```prism\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
 
 # Pipeline stage ids (also consumed by the UI progress bar — keep stable).
 STAGE_REVIEW = "review"
@@ -121,6 +140,23 @@ def engine_supports_json(exe):
 
 class Cancelled(RuntimeError):
     """Raised inside the pipeline when the user hits Stop."""
+
+
+class SyncConflict(RuntimeError):
+    """A sync merge conflicted. Carries the hunks so the user can choose.
+
+    Raised only after the merge has been aborted and the clone restored, so
+    nothing is left half-merged while the user decides — and no lock is held
+    across that wait.
+    """
+
+    def __init__(self, entries, dest, src, detail=""):
+        self.entries = entries
+        self.dest, self.src = dest, src
+        total = sum(len(e["hunks"]) for e in entries) or len(entries)
+        super().__init__(
+            f"Sync {dest} → {src} hit {total} conflict(s) in "
+            f"{len(entries)} file(s).{(chr(10) + detail) if detail else ''}")
 
 
 class RunControl:
@@ -254,25 +290,65 @@ def parse_review_output(text: str) -> ReviewResult:
     return res
 
 
-def ensure_bundled_agent(project_dir: str, emit=_emit_plain) -> str:
-    """Install the bundled pr-reviewer agent into the target project.
+def ensure_bundled_agents(project_dir: str, emit=_emit_plain) -> list:
+    """Install every bundled agent into the target project.
 
-    opencode resolves `--agent pr-reviewer` from the run directory's
-    `.opencode/agents/` folder, so without this the tool would depend on
-    whatever agent checkout happens to exist on the machine. Copying our
-    bundled file makes the tool self-contained: any system with `opencode`
-    installed can run it. Returns the agent name.
+    opencode resolves `--agent <name>` from the run directory's
+    `.opencode/agents/` folder, so without this PRISM would depend on whatever
+    agent files happen to exist on the machine. Copying the whole bundle keeps
+    the tool self-contained: any system with `opencode` can run it.
+
+    Files beginning with `_` are documentation for the agent authors, not
+    agents, and are skipped.
     """
-    if not BUNDLED_AGENT.is_file():
-        raise RuntimeError(f"Bundled agent missing: {BUNDLED_AGENT}")
+    if not AGENTS_DIR.is_dir():
+        raise RuntimeError(f"Bundled agents missing: {AGENTS_DIR}")
     dest_dir = Path(project_dir).expanduser().resolve() / ".opencode" / "agents"
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / "pr-reviewer.md"
-    src_text = BUNDLED_AGENT.read_text()
-    if not dest.is_file() or dest.read_text() != src_text:
-        dest.write_text(src_text)
-        emit("▸ Reviewer agent installed for this run.")
-    return AGENT_NAME
+    installed, written = [], 0
+    for src in sorted(AGENTS_DIR.glob("*.md")):
+        if src.name.startswith("_"):
+            continue
+        dest = dest_dir / src.name
+        text = src.read_text()
+        if not dest.is_file() or dest.read_text() != text:
+            dest.write_text(text)
+            written += 1
+        installed.append(src.stem)
+    if written:
+        emit(f"▸ Installed {written} reviewer agent(s) for this run.")
+    if AGENT_REVIEWER not in installed:
+        raise RuntimeError(f"Bundled agent missing: {BUNDLED_AGENT}")
+    return installed
+
+
+def ensure_bundled_agent(project_dir: str, emit=_emit_plain) -> str:
+    """Back-compatible single-agent entry point."""
+    ensure_bundled_agents(project_dir, emit=emit)
+    return AGENT_REVIEWER
+
+
+def parse_decision(text: str) -> dict:
+    """Read an agent's ```prism decision block into a dict.
+
+    Deliberately strict: a missing or malformed block returns {} so the caller
+    falls back to its own deterministic judgement rather than guessing at what
+    the agent meant. The last block wins, so an agent that shows an example
+    earlier in its reply does not confuse the parser.
+    """
+    blocks = DECISION_RE.findall(strip_ansi(text or ""))
+    if not blocks:
+        return {}
+    out = {}
+    for line in blocks[-1].splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key = key.strip().lower()
+        if key:
+            out[key] = value.strip()
+    return out
 
 
 ENGINE_BIN = "opencode"
@@ -577,12 +653,40 @@ def _run_stream(cmd, cwd, emit, timeout=1200, control=None, json_mode=False):
     return (1 if rc is None else rc), text, session_id
 
 
+def run_agent(agent, prompt, project_dir, emit=_emit_plain, model=None,
+              control=None, label=None):
+    """Run one specialised agent to completion in its own fresh session.
+
+    Each step gets its own conversation rather than sharing the reviewer's:
+    the agents have different jobs and different permissions, and keeping them
+    separate means one agent's context cannot leak into another's reasoning.
+    Returns (output_text, decision_dict).
+    """
+    exe = require_engine()
+    ensure_bundled_agents(project_dir, emit=emit)
+    json_mode = engine_supports_json(exe)
+    emit(f"\n▸ {label or agent} …")
+    cmd = [exe, "run", "--agent", agent, "--dir", project_dir, "--auto"]
+    if json_mode:
+        cmd += ["--format", "json"]
+    if model:
+        cmd += ["--model", model]
+    cmd += [prompt]
+    rc, out, _sid = _run_stream(cmd, cwd=project_dir, emit=emit,
+                                control=control, json_mode=json_mode)
+    decision = parse_decision(out)
+    if rc != 0 and not decision:
+        raise RuntimeError(f"{agent} failed (exit {rc}). See the conversation.")
+    return out, decision
+
+
 def run_opencode_review(pr_id, repo_name, local_repo, project_dir,
                         region=REGION_DEFAULT, emit=_emit_plain, model=None,
                         control=None):
     """Step 1: trigger the pr-reviewer agent. Returns raw agent output."""
     exe = require_engine()
-    agent = ensure_bundled_agent(project_dir, emit=emit)
+    ensure_bundled_agents(project_dir, emit=emit)
+    agent = AGENT_REVIEWER
     prompt = (
         f"Review CodeCommit pull request {pr_id} in CodeCommit repository "
         f"'{repo_name}' (AWS region {region}). Local clone path: {local_repo}. "
@@ -618,7 +722,8 @@ def run_opencode_reply(message, project_dir, session_id=None, emit=_emit_plain,
                           what="reply")
 
 
-def _continue_turn(prompt, project_dir, session_id, emit, model, control, what):
+def _continue_turn(prompt, project_dir, session_id, emit, model, control, what,
+                   agent=None):
     """One follow-up agent turn, pinned to a session where possible.
 
     `--session <id>` addresses one specific conversation and cannot be hijacked
@@ -629,7 +734,7 @@ def _continue_turn(prompt, project_dir, session_id, emit, model, control, what):
     """
     exe = require_engine()
     json_mode = engine_supports_json(exe)
-    cmd = [exe, "run", "--agent", AGENT_NAME, "--dir", project_dir, "--auto"]
+    cmd = [exe, "run", "--agent", agent or AGENT_NAME, "--dir", project_dir, "--auto"]
     if json_mode:
         cmd += ["--format", "json"]
     if model:
@@ -715,6 +820,24 @@ def description_has_review_block(pr_id, region=REGION_DEFAULT):
         return False
 
 
+def write_description_block(pr_id, block, region=REGION_DEFAULT):
+    """Write an agent-composed block onto the PR, replacing any stale one.
+
+    The agent produced the text; this function is the only thing that talks to
+    CodeCommit, so the write stays deterministic, size-checked, and impossible
+    to reach from a prompt.
+    """
+    pr = get_pr(pr_id, region=region)
+    desc = DESC_BLOCK_RE.sub("", pr["description"] or "").strip()
+    merged = (desc + "\n\n" + block.strip()).strip()
+    if len(merged) > PR_DESCRIPTION_MAX:
+        keep = PR_DESCRIPTION_MAX - len(block) - 2
+        merged = (desc[:max(0, keep)] + "\n\n" + block.strip()).strip()
+    aws_cli("update-pull-request-description", "--pull-request-id", str(pr_id),
+            "--description", merged, region=region)
+    return merged
+
+
 def update_description_direct(pr_id, verdict_text, impact, findings, region=REGION_DEFAULT):
     """Fallback: replicate the agent's Step-5 marker block via AWS CLI directly."""
     pr = get_pr(pr_id, region=region)
@@ -776,7 +899,103 @@ def try_fast_forward_merge(pr_id, repo_name, region=REGION_DEFAULT):
     return data
 
 
-def sync_destination_into_source(local_repo, dest, src, pr_id, emit=_emit_plain):
+# ------------------------------------------------------------- conflicts --
+# A conflicted file carries git's markers:
+#     <<<<<<< HEAD          ours   — the pull request's branch
+#     =======
+#     >>>>>>> origin/main   theirs — the destination branch
+CONFLICT_RE = re.compile(
+    r"^<<<<<<<[^\n]*\n(.*?)^=======[^\n]*\n(.*?)^>>>>>>>[^\n]*\n",
+    re.DOTALL | re.MULTILINE)
+
+KEEP_CURRENT, TAKE_INCOMING, ABORT = "current", "incoming", "abort"
+
+
+def parse_conflicts(text):
+    """Split a conflicted file into (prefix, [(ours, theirs)], suffix) pieces.
+
+    Returns a list of segments: plain strings for untouched text, and
+    (ours, theirs) tuples for each conflicting hunk. Rebuilding is then just a
+    matter of choosing a side per tuple — no diffing, no guessing.
+    """
+    segments, last = [], 0
+    for m in CONFLICT_RE.finditer(text):
+        if m.start() > last:
+            segments.append(text[last:m.start()])
+        segments.append((m.group(1), m.group(2)))
+        last = m.end()
+    if last < len(text):
+        segments.append(text[last:])
+    return segments
+
+
+def conflict_hunks(local_repo):
+    """Every unresolved conflict in the working tree, as structured data.
+
+    Called while the merge is still conflicted, immediately before PRISM aborts
+    it — the markers only exist on disk at that moment.
+    """
+    proc = subprocess.run(["git", "diff", "--name-only", "--diff-filter=U"],
+                          cwd=local_repo, capture_output=True, text=True, timeout=60)
+    files = [ln.strip() for ln in (proc.stdout or "").splitlines() if ln.strip()]
+    out = []
+    for rel in files:
+        path = Path(local_repo) / rel
+        try:
+            text = path.read_text(errors="replace")
+        except Exception:  # noqa: BLE001
+            # Binary or unreadable: a side must still be chosen, but there is
+            # nothing meaningful to show, so record it without hunks.
+            out.append({"file": rel, "binary": True, "hunks": []})
+            continue
+        hunks = [(a, b) for seg in parse_conflicts(text)
+                 if isinstance(seg, tuple) for a, b in (seg,)]
+        out.append({"file": rel, "binary": False, "hunks": hunks})
+    return out
+
+
+def apply_conflict_choices(local_repo, choices):
+    """Rebuild each conflicted file from the user's per-hunk choices.
+
+    `choices` maps "<file>#<hunk index>" to KEEP_CURRENT or TAKE_INCOMING.
+    Purely mechanical: each hunk becomes one side verbatim. Anything without a
+    recorded choice is an error rather than a default, because silently picking
+    a side is exactly what the user asked PRISM never to do.
+    """
+    resolved = []
+    for rel in sorted({k.split("#")[0] for k in choices}):
+        path = Path(local_repo) / rel
+        text = path.read_text(errors="replace")
+        segments = parse_conflicts(text)
+        rebuilt, index = [], 0
+        for seg in segments:
+            if isinstance(seg, str):
+                rebuilt.append(seg)
+                continue
+            key = f"{rel}#{index}"
+            pick = choices.get(key)
+            if pick not in (KEEP_CURRENT, TAKE_INCOMING):
+                raise RuntimeError(f"No choice recorded for {key}; refusing to guess.")
+            rebuilt.append(seg[0] if pick == KEEP_CURRENT else seg[1])
+            index += 1
+        path.write_text("".join(rebuilt))
+        resolved.append(rel)
+    return resolved
+
+
+def describe_conflict(entry, index, hunk):
+    """One conflict, rendered for the question panel."""
+    ours, theirs = hunk
+    def trim(s, n=1400):
+        s = s.rstrip("\n")
+        return s if len(s) <= n else s[:n] + "\n… (truncated)"
+    return (f"{entry['file']} — conflict {index + 1} of {len(entry['hunks'])}\n\n"
+            f"CURRENT (this pull request):\n{trim(ours)}\n\n"
+            f"INCOMING (the base branch):\n{trim(theirs)}")
+
+
+def sync_destination_into_source(local_repo, dest, src, pr_id, emit=_emit_plain,
+                                 choices=None):
     """Sync destination commits onto the source branch locally, then push.
 
     Equivalent of: git fetch, checkout source, merge origin/destination, push.
@@ -790,10 +1009,10 @@ def sync_destination_into_source(local_repo, dest, src, pr_id, emit=_emit_plain)
     multi-minute agent turn would serialise the whole tool.
     """
     with _lock_for(local_repo):
-        return _sync_locked(local_repo, dest, src, pr_id, emit)
+        return _sync_locked(local_repo, dest, src, pr_id, emit, choices)
 
 
-def _sync_locked(local_repo, dest, src, pr_id, emit):
+def _sync_locked(local_repo, dest, src, pr_id, emit, choices=None):
     def git(*args, quiet=False):
         cmd = ["git"] + list(args)
         if not quiet:
@@ -850,13 +1069,47 @@ def _sync_locked(local_repo, dest, src, pr_id, emit):
             git("merge", f"origin/{dest}", "-m",
                 f"chore: sync {dest} into {src} for PR #{pr_id} fast-forward")
         except RuntimeError as e:
+            # Capture the hunks while the markers still exist on disk, then put
+            # the clone straight back. PRISM never resolves a conflict itself;
+            # the user picks a side per hunk and we replay with those choices.
+            entries = []
+            try:
+                entries = conflict_hunks(local_repo)
+            except Exception:  # noqa: BLE001
+                pass
             try:
                 subprocess.run(["git", "merge", "--abort"], cwd=local_repo,
                                capture_output=True, timeout=60)
             except Exception:  # noqa: BLE001
                 pass
+            if choices:
+                # Replay: the user already chose, so resolve in place rather
+                # than abort. If the conflict set moved under us, refuse — the
+                # answers were given for different hunks.
+                expected = {f"{en['file']}#{i}" for en in entries
+                            for i in range(len(en["hunks"]))}
+                if expected - set(choices):
+                    raise SyncConflict(entries, dest, src,
+                                       "The conflicts changed since you chose; "
+                                       "asking again.")
+                resolved = apply_conflict_choices(local_repo, choices)
+                for rel in resolved:
+                    git("add", "--", rel, quiet=True)
+                git("commit", "-m",
+                    f"chore: sync {dest} into {src} for PR #{pr_id} "
+                    f"(conflicts resolved by the user)")
+                emit(f"  (resolved {len(resolved)} file(s) from your choices)")
+                git("push", "origin", src)
+                return
+            if entries:
+                raise SyncConflict(entries, dest, src, str(e)[-800:])
             raise RuntimeError(
                 f"Sync merge hit conflicts ({dest} → {src}). Aborted; resolve manually.\n{e}")
+        if choices:
+            resolved = apply_conflict_choices(local_repo, choices)
+            for rel in resolved:
+                git("add", "--", rel, quiet=True)
+            emit(f"  (applied your choices to {len(resolved)} file(s))")
         git("push", "origin", src)
     finally:
         # Leave the clone on the branch the user had checked out — PRISM is a
@@ -867,6 +1120,63 @@ def _sync_locked(local_repo, dest, src, pr_id, emit):
                 emit(f"  (restored branch {original})")
             except RuntimeError:
                 emit(f"⚠ Could not restore branch {original}; clone is left on {src}.")
+
+
+def resolve_conflicts_with_user(conflict, project_dir, ask, emit=_emit_plain,
+                                model=None, control=None):
+    """Walk the user through each conflicting hunk. Returns choices or None.
+
+    PRISM never picks a side. The analyst agent explains what each side does,
+    then every hunk is put to the user one at a time. Returning None means
+    they chose to abort, and the caller leaves the clone untouched.
+    """
+    entries = [e for e in conflict.entries if e["hunks"]]
+    binary = [e["file"] for e in conflict.entries if not e["hunks"]]
+    if binary:
+        emit(f"⚠ Cannot offer a choice for binary file(s): {', '.join(binary)}. "
+             f"Resolve these by hand.")
+        return None
+    if not entries:
+        return None
+
+    brief = "\n\n".join(
+        describe_conflict(e, i, h)
+        for e in entries for i, h in enumerate(e["hunks"]))
+    try:
+        notes, _ = run_agent(
+            AGENT_CONFLICT,
+            "A branch sync hit merge conflicts. Explain each one for someone "
+            "choosing which side to keep.\n\n" + brief[:12000],
+            project_dir, emit=emit, model=model, control=control,
+            label="conflict-analyst")
+    except Exception as e:  # noqa: BLE001
+        emit(f"⚠ Could not get an explanation ({e}); showing the raw conflicts.")
+        notes = ""
+
+    choices = {}
+    total = sum(len(e["hunks"]) for e in entries)
+    seen = 0
+    for entry in entries:
+        for index, hunk in enumerate(entry["hunks"]):
+            if control is not None:
+                control.check()
+            seen += 1
+            question = (f"[{seen}/{total}]  {describe_conflict(entry, index, hunk)}")
+            if notes and seen == 1:
+                question = notes.strip()[:1500] + "\n\n" + question
+            answer = ask(question, choices=[
+                (KEEP_CURRENT, "Keep current"),
+                (TAKE_INCOMING, "Take incoming"),
+                (ABORT, "Abort sync"),
+            ])
+            if answer is None or answer == ABORT:
+                emit("■ Conflict resolution abandoned; the clone is untouched.")
+                return None
+            if answer not in (KEEP_CURRENT, TAKE_INCOMING):
+                emit(f"⚠ Unrecognised choice {answer!r}; abandoning.")
+                return None
+            choices[f"{entry['file']}#{index}"] = answer
+    return choices
 
 
 MAX_CLARIFY_ROUNDS = 4
@@ -901,7 +1211,7 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
          + (f"  |  model {model}" if model else "  |  model (default)"))
     repo_name, local_clone = resolve_repo(repo_name, project_dir, local_repo)
     emit(f"▸ Local clone: {local_clone}")
-    ensure_bundled_agent(project_dir, emit=emit)
+    ensure_bundled_agents(project_dir, emit=emit)
 
     if not Path(local_clone).is_dir():
         raise RuntimeError(f"Local clone path not found: {local_clone}")
@@ -958,11 +1268,24 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
             pg(STAGE_DESCRIBE, "skipped")
         else:
             try:
-                _out, session_id = run_opencode_approve_description(
-                    pr_id, project_dir, session_id, emit=emit, model=model,
-                    repo_name=repo_name, region=region, control=control)
+                # A separate agent composes the block; PRISM writes it. The
+                # agent that read the diff never gets to touch the PR.
+                out, decision = run_agent(
+                    AGENT_POSTER,
+                    "Condense this review into the PR description block.\n\n"
+                    + (review.raw_output or "")[:14000],
+                    project_dir, emit=emit, model=model, control=control,
+                    label="review-comments-poster")
+                block = DESC_BLOCK_RE.search(out or "")
+                if decision.get("decision") == "skip":
+                    emit(f"◆ Poster skipped: {decision.get('reason', 'no reason given')}")
+                elif block:
+                    write_description_block(pr_id, block.group(0), region=region)
+                    emit("◆ Description updated from the poster's block.")
+                else:
+                    emit("⚠ Poster returned no marker block.")
             except Exception as e:  # noqa: BLE001
-                emit(f"⚠ Reviewer update run failed ({e}).")
+                emit(f"⚠ Description poster failed ({e}).")
             # A zero exit code only means the engine ran, not that the agent
             # wrote anything — confirm against the live PR before believing it.
             if description_has_review_block(pr_id, region=region):
@@ -1029,6 +1352,28 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
         emit(f"▸ Syncing {dest} into {src}, then retrying merge …")
         try:
             sync_destination_into_source(local_clone, dest, src, pr_id, emit=emit)
+        except SyncConflict as conflict:
+            # The clone is already back to a clean state and the lock released,
+            # so the user can take as long as they like without blocking other
+            # jobs sharing this checkout.
+            emit(f"⚠ {conflict}")
+            if ask is None:
+                pg(STAGE_SYNC, "error")
+                raise RuntimeError(str(conflict))
+            picks = resolve_conflicts_with_user(conflict, project_dir, ask,
+                                                emit=emit, model=model,
+                                                control=control)
+            if not picks:
+                pg(STAGE_SYNC, "error")
+                raise RuntimeError(
+                    f"{conflict}\nNo changes were made; resolve them and re-run.")
+            emit("▸ Replaying the sync with your choices …")
+            try:
+                sync_destination_into_source(local_clone, dest, src, pr_id,
+                                             emit=emit, choices=picks)
+            except Exception:  # noqa: BLE001
+                pg(STAGE_SYNC, "error")
+                raise
         except RuntimeError:
             pg(STAGE_SYNC, "error")
             raise
@@ -1053,9 +1398,52 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
     ck()
     pg(STAGE_MERGE, "active")
     emit("\n═══ STEP 4 — Merge ═══")
+    # Every precondition below was already enforced in code above; this is a
+    # second, independent opinion. A "go" cannot merge anything on its own —
+    # PRISM has already decided it is allowed to be here.
+    try:
+        _out, call = run_agent(
+            AGENT_MERGER,
+            f"Final check before merging pull request {pr_id} in CodeCommit "
+            f"repository '{repo_name}' (region {region}).\n"
+            f"Reviewer verdict: {review.verdict_raw or review.verdict_key}\n"
+            f"Impact: {review.impact_score or '?'}/10\n"
+            f"Source: {src}  Destination: {dest}\n"
+            f"Fast-forward possible: {mergeable}\n"
+            f"Confirm independently whether this should be merged now.",
+            project_dir, emit=emit, model=model, control=control,
+            label="pr-merger")
+    except Exception as e:  # noqa: BLE001
+        emit(f"⚠ Merge checker agent failed ({e}); holding rather than merging.")
+        call = {"decision": "no-go", "reason": str(e)[:200]}
+    if call.get("decision") == "no-go":
+        emit(f"⛔ pr-merger says no-go: {call.get('reason', 'no reason given')}")
+        pg(STAGE_MERGE, "skipped")
+        return {"review": review, "merged": False, "stopped": "merger-no-go"}
     if not mergeable:
-        # The merge check already told us a fast-forward can't work; go straight
-        # to the sync instead of spending a doomed write call on CodeCommit.
+        # A fast-forward is not possible. This is the ambiguous case, so ask the
+        # checker how to land it — a clean fast-forward never reaches here and
+        # so never costs a model call.
+        try:
+            _out, call = run_agent(
+                AGENT_FF_CHECK,
+                f"Pull request {pr_id} in CodeCommit repository '{repo_name}' "
+                f"(region {region}) cannot be fast-forwarded.\n"
+                f"Source: {src}\nDestination: {dest}\n"
+                f"Local clone: {local_clone}\n"
+                f"Merge-conflict check said: {detail[:600]}\n"
+                f"Decide how it should be landed.",
+                project_dir, emit=emit, model=model, control=control,
+                label="fast-forward-merge-checker")
+        except Exception as e:  # noqa: BLE001
+            emit(f"⚠ Merge checker failed ({e}); falling back to sync-then-merge.")
+            call = {}
+        verdict_call = call.get("decision", "sync-then-merge")
+        if verdict_call == "manual":
+            emit(f"⛔ Checker says this needs a person: "
+                 f"{call.get('reason', 'no reason given')}")
+            pg(STAGE_MERGE, "error")
+            return {"review": review, "merged": False, "stopped": "needs-manual-merge"}
         if not do_sync:
             emit("⛔ Not fast-forward mergeable and sync is disabled — stopping.")
             pg(STAGE_MERGE, "error")

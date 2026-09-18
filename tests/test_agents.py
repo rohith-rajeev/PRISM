@@ -1,0 +1,182 @@
+"""Multi-agent contracts, conflict handling, and the safety gates.
+
+The design rests on one claim: an agent can *decide*, but only PRISM can act,
+and PRISM's gates are code that no prompt can reach. The SafetyGates tests are
+the ones that prove it — they feed a "go" from pr-merger into situations where
+merging is forbidden and assert nothing merges.
+"""
+import importlib
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+import orchestrator as o  # noqa: E402
+
+REPORT = ("## PR #7\n**Verdict:** OK Approve\n"
+          "**Impact score:** 2/10 - isolated\n"
+          "- **[Low] style — `x.py:1`** nit\n")
+
+
+def block(decision, **kw):
+    lines = "\n".join(f"{k}: {v}" for k, v in (("decision", decision), *kw.items()))
+    return f"Some prose from the agent.\n\n```prism\n{lines}\n```\n"
+
+
+class DecisionContract(unittest.TestCase):
+    def test_parses_keys(self):
+        d = o.parse_decision(block("sync-then-merge", reason="behind", behind="3"))
+        self.assertEqual(d["decision"], "sync-then-merge")
+        self.assertEqual(d["behind"], "3")
+
+    def test_missing_block_returns_empty_not_a_guess(self):
+        self.assertEqual(o.parse_decision("I think you should merge it."), {})
+
+    def test_last_block_wins(self):
+        """An agent file shows an example block; only the real answer counts."""
+        text = block("manual", reason="example") + block("merge", reason="real")
+        self.assertEqual(o.parse_decision(text)["decision"], "merge")
+
+    def test_survives_ansi_and_junk_lines(self):
+        d = o.parse_decision("\x1b[32m" + block("go", reason="fine") + "\x1b[0m")
+        self.assertEqual(d["decision"], "go")
+
+
+class AgentBundle(unittest.TestCase):
+    def test_every_agent_declares_mode_and_denies_writes(self):
+        for path in sorted((ROOT / "agents").glob("*.md")):
+            if path.name.startswith("_"):
+                continue
+            head = path.read_text().split("---")[1]
+            with self.subTest(agent=path.stem):
+                self.assertIn("mode:", head)
+                self.assertIn("edit: deny", head, "agents must never edit files")
+                self.assertIn("task: deny", head, "agents must not spawn subagents")
+
+    def test_no_agent_may_merge_or_push(self):
+        """The permission layer backs up PRISM's gates."""
+        for path in sorted((ROOT / "agents").glob("*.md")):
+            if path.name.startswith("_"):
+                continue
+            head = path.read_text().split("---")[1]
+            if "bash: deny" in head:
+                continue          # no shell at all
+            with self.subTest(agent=path.stem):
+                for forbidden in ('"git push*": deny', '"aws codecommit merge*": deny'):
+                    self.assertIn(forbidden, head)
+
+    def test_installs_every_agent(self):
+        with tempfile.TemporaryDirectory() as d:
+            names = o.ensure_bundled_agents(d, emit=lambda *a, **k: None)
+            installed = {p.stem for p in Path(d, ".opencode", "agents").glob("*.md")}
+            self.assertIn("pr-reviewer", installed)
+            self.assertGreaterEqual(len(installed), 6)
+            self.assertNotIn("_shared-contract", installed,
+                             "reference docs must not install as agents")
+            self.assertEqual(set(names), installed)
+
+
+class Conflicts(unittest.TestCase):
+    SAMPLE = ("head\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> origin/main\n"
+              "mid\n<<<<<<< HEAD\nours2\n=======\ntheirs2\n>>>>>>> origin/main\ntail\n")
+
+    def test_splits_into_hunks(self):
+        segs = o.parse_conflicts(self.SAMPLE)
+        hunks = [s for s in segs if isinstance(s, tuple)]
+        self.assertEqual(len(hunks), 2)
+        self.assertEqual(hunks[0], ("ours\n", "theirs\n"))
+
+    def test_applies_each_choice_verbatim(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d, "x.py")
+            f.write_text(self.SAMPLE)
+            o.apply_conflict_choices(d, {"x.py#0": o.KEEP_CURRENT,
+                                         "x.py#1": o.TAKE_INCOMING})
+            self.assertEqual(f.read_text(), "head\nours\nmid\ntheirs2\ntail\n")
+
+    def test_refuses_to_guess_a_missing_choice(self):
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "x.py").write_text(self.SAMPLE)
+            with self.assertRaises(RuntimeError):
+                o.apply_conflict_choices(d, {"x.py#0": o.KEEP_CURRENT})
+
+    def test_abort_makes_no_choices(self):
+        asked = []
+        conflict = o.SyncConflict(
+            [{"file": "x.py", "binary": False, "hunks": [("a\n", "b\n")]}],
+            "main", "feat")
+        def ask(q, choices=None):
+            asked.append(q)
+            return o.ABORT
+        o.run_agent = lambda *a, **k: ("", {})
+        self.assertIsNone(o.resolve_conflicts_with_user(
+            conflict, "/tmp", ask, emit=lambda *a, **k: None))
+        self.assertEqual(len(asked), 1)
+
+    def test_binary_conflicts_are_refused_not_guessed(self):
+        conflict = o.SyncConflict(
+            [{"file": "logo.png", "binary": True, "hunks": []}], "main", "feat")
+        self.assertIsNone(o.resolve_conflicts_with_user(
+            conflict, "/tmp", lambda *a, **k: o.KEEP_CURRENT,
+            emit=lambda *a, **k: None))
+
+
+class SafetyGates(unittest.TestCase):
+    """A 'go' from an agent must never be sufficient on its own."""
+
+    def setUp(self):
+        importlib.reload(o)
+        self.merged = []
+        o.ensure_bundled_agents = lambda *a, **k: ["pr-reviewer"]
+        o.resolve_repo = lambda r, p, l: (r, "/tmp")
+        o.run_opencode_review = lambda *a, **k: (REPORT, "ses_x")
+        o.run_agent = lambda *a, **k: ("", {"decision": "go", "reason": "looks fine"})
+        o.check_ff_mergeable = lambda *a, **k: (True, "ok")
+        o.try_fast_forward_merge = lambda *a, **k: self.merged.append(1) or {}
+        o.description_has_review_block = lambda *a, **k: True
+        o.write_description_block = lambda *a, **k: ""
+
+    def _run(self, report=REPORT, status="OPEN", **kw):
+        o.run_opencode_review = lambda *a, **k: (report, "ses_x")
+        o.get_pr = lambda *a, **k: {"status": status, "repositoryName": "repo",
+                                    "destinationReference": "main",
+                                    "sourceReference": "feat", "description": ""}
+        return o.full_pipeline("/tmp", "repo", "7", local_repo="/tmp",
+                               emit=lambda *a, **k: None, **kw)
+
+    def test_go_does_not_merge_a_request_changes_verdict(self):
+        res = self._run(report="**Verdict:** NO Request changes\n")
+        self.assertEqual(self.merged, [], "agent 'go' merged a rejected PR")
+        self.assertEqual(res["stopped"], "verdict-blocks-merge")
+
+    def test_go_does_not_merge_a_closed_pr(self):
+        res = self._run(status="CLOSED")
+        self.assertEqual(self.merged, [], "agent 'go' merged a closed PR")
+        self.assertTrue(res["stopped"].startswith("status-"))
+
+    def test_go_does_not_merge_in_dry_run(self):
+        res = self._run(dry_run=True)
+        self.assertEqual(self.merged, [], "agent 'go' merged during a dry run")
+        self.assertEqual(res["stopped"], "dry-run")
+
+    def test_go_does_not_merge_when_auto_merge_is_off(self):
+        res = self._run(do_merge=False)
+        self.assertEqual(self.merged, [])
+        self.assertEqual(res["stopped"], "merge-disabled")
+
+    def test_no_go_holds_even_though_prism_would_allow_it(self):
+        o.run_agent = lambda *a, **k: ("", {"decision": "no-go", "reason": "changed"})
+        res = self._run()
+        self.assertEqual(self.merged, [])
+        self.assertEqual(res["stopped"], "merger-no-go")
+
+    def test_clean_fast_forward_still_merges(self):
+        res = self._run()
+        self.assertEqual(len(self.merged), 1)
+        self.assertTrue(res["merged"])
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
