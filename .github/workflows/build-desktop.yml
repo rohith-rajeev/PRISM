@@ -95,6 +95,10 @@ jobs:
           name: ${{ matrix.artifact }}
           path: out/
           if-no-files-found: error
+          # Old builds expire on their own; with a run per push they otherwise
+          # pile up and it stops being obvious which one is current. Anything
+          # worth keeping should be a tagged release, which does not expire.
+          retention-days: 7
 
   render:
     name: Render check (${{ matrix.label }})
@@ -120,10 +124,15 @@ jobs:
       - name: Render the screens
         run: python tests/render_scene.py render-out
       - uses: actions/upload-artifact@v4
+        # Diagnostics, not a deliverable. Uploaded only when asked for by hand
+        # or when something failed, so the artifact list shows the three
+        # distributions and nothing else.
+        if: ${{ failure() || github.event_name == 'workflow_dispatch' }}
         with:
           name: render-${{ matrix.label }}
           path: render-out/
           if-no-files-found: warn
+          retention-days: 3
 
   release:
     name: Attach builds to the release
