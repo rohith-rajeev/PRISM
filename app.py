@@ -220,6 +220,23 @@ class RoundedCard(tk.Frame):
                 self.canvas.itemconfig(self._win, height=want_h)
         self._draw()
 
+    def resize_content(self):
+        """Re-apply the inner frame's width/height inside the canvas.
+
+        _draw() paints only the card's own outline. The content is a Frame
+        placed in the canvas with create_window, and its size is applied from
+        the canvas's <Configure>. After a re-map macOS delivers a small
+        Configure and defers the real one, which left the card drawing its
+        outline at full size while the content stayed clipped to a sliver —
+        a correctly shaped but completely empty card.
+        """
+        w = self.canvas.winfo_width()
+        h = self.canvas.winfo_height()
+        if w > 4:
+            self.canvas.itemconfig(self._win, width=max(w - 2 * self._r, 1))
+        if self._stretch and h > 4:
+            self.canvas.itemconfig(self._win, height=max(h - 2 * self._r, 1))
+
     def _draw(self):
         self.canvas.delete("rr")
         w = self.canvas.winfo_width()
@@ -772,6 +789,18 @@ class ScrollFrame(tk.Frame):
         for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
             for w in (self.canvas, self.inner):
                 w.bind(seq, self._wheel)
+
+    def resize_content(self):
+        """Apply the inner frame's width and refresh the scroll region.
+
+        Same deferred-<Configure> problem as RoundedCard: without this the
+        content is one pixel wide after a re-map, which is why the empty-state
+        text appeared only once some later event forced a repaint.
+        """
+        w = self.canvas.winfo_width()
+        if w > 4:
+            self.canvas.itemconfig(self._win, width=w)
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
     def _resized(self, _e):
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -1387,6 +1416,10 @@ class App(tk.Tk):
         else:
             self.map_card.grid_remove()
             self.model_card.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=0)
+        # The cards just changed size (or one appeared). Same deferred-event
+        # problem as a screen switch, so size and paint them now.
+        if getattr(self, "midrow", None) is not None:
+            self._repaint(self.midrow)
 
     # ----- badge -----
     def _draw_badge(self):
@@ -1648,35 +1681,45 @@ class App(tk.Tk):
         self._repaint(screen)
 
     def _repaint(self, widget):
-        """Settle geometry, then redraw every hand-drawn widget underneath.
+        """Settle geometry, re-apply content sizes, then redraw — in that order.
 
-        Everything custom in this UI paints only from its <Configure> handler,
-        and bails out until it has a real size. Packing a frame relies on Tk
-        delivering those events to each descendant — which X11 does on map, but
-        macOS defers when the widget's size has not changed since it was
-        unmapped. The result was a screen that stayed blank until some
-        unrelated event forced an expose, such as switching apps and back.
-
-        update_idletasks() gives the children their real geometry; drawing then
-        explicitly removes the dependency on an event that may never arrive.
+        Everything custom in this UI paints from its <Configure> handler and
+        returns early until it has a real size. Showing a screen relies on Tk
+        delivering those events to each descendant; X11 does on map, macOS
+        defers them when the size has not changed since the widget was
+        unmapped. Content sizes must be applied before drawing, or a card
+        paints its outline at full width around a sliver of content.
         """
         try:
             self.update_idletasks()
         except Exception:  # noqa: BLE001
             return
-        stack = [widget]
+        nodes, stack = [], [widget]
         while stack:
             w = stack.pop()
-            draw = getattr(w, "_draw", None)
-            if callable(draw):
-                try:
-                    draw()
-                except Exception:  # noqa: BLE001
-                    pass
+            nodes.append(w)
             try:
                 stack.extend(w.winfo_children())
             except Exception:  # noqa: BLE001
                 pass
+        for w in nodes:                       # pass 1 — geometry
+            fn = getattr(w, "resize_content", None)
+            if callable(fn):
+                try:
+                    fn()
+                except Exception:  # noqa: BLE001
+                    pass
+        try:
+            self.update_idletasks()           # let pass 1 take effect
+        except Exception:  # noqa: BLE001
+            pass
+        for w in nodes:                       # pass 2 — paint
+            fn = getattr(w, "_draw", None)
+            if callable(fn):
+                try:
+                    fn()
+                except Exception:  # noqa: BLE001
+                    pass
 
     def show_jobs(self):
         # Popups are position-anchored Toplevels; left open they would float

@@ -100,9 +100,13 @@ def main(out_dir):
     # those on re-map — which left screens blank until an unrelated event
     # forced an expose. This is the condition that exposed it; a correct build
     # shows a fully drawn screen here.
-    for name, go in (("fastswitch-jobs", root.show_jobs),
-                     ("fastswitch-detail", lambda: root.show_detail(1)),
-                     ("fastswitch-new", root.show_new)):
+    # The reported sequence: new job -> jobs -> new job. The second visit is
+    # where cards came back as empty outlines, so capture that one.
+    for name, go in (("fastswitch-new", root.show_new),
+                     ("fastswitch-jobs", root.show_jobs),
+                     ("fastswitch-new2", root.show_new),
+                     ("fastswitch-jobs2", root.show_jobs),
+                     ("fastswitch-detail", lambda: root.show_detail(1))):
         go()
         root.update_idletasks()      # geometry only — no redraw events pumped
         time.sleep(0.35)
