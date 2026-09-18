@@ -128,6 +128,7 @@ class Job:
         self.verdict_raw = ""
         self.verdict_key = ""
         self.impact = ""
+        self.tokens = {}
         self.pending_question = None
         self.result = None
         self.error = None
@@ -260,8 +261,12 @@ class JobManager:
                 progress=lambda stage, state: job.emit_event("progress", (stage, state)),
                 control=job.control, ask=job.ask.ask,
                 **job.spec.pipeline_kwargs())
-            job.emit_event("done", {k: v if isinstance(v, bool) else str(v)[:160]
-                                    for k, v in summary.items() if k != "review"})
+            # "tokens" is a small dict for the UI to render directly; every
+            # other field is a short display string, same as before.
+            payload = {k: v if isinstance(v, bool) else str(v)[:160]
+                      for k, v in summary.items() if k not in ("review", "tokens")}
+            payload["tokens"] = summary.get("tokens")
+            job.emit_event("done", payload)
         except Exception as e:  # noqa: BLE001
             # Stopping kills the child process, so the failure it provokes is
             # the stop, not a real error — report it as such.

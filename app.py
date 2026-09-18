@@ -8,6 +8,7 @@ repository + local clone.
 
 Run:  python3 app.py   (or ./run.sh, or the packaged desktop build)
 """
+import json
 import math
 import queue
 import re
@@ -901,15 +902,18 @@ class JobRow(RoundedCard):
         self.impact = tk.Label(inner, text="", font=FONT_S, bg=PAL["card"],
                                fg=PAL["muted"], anchor="w", width=9)
         self.impact.grid(row=0, column=3, rowspan=2, sticky="w", padx=(0, 8))
+        self.tokens_lbl = tk.Label(inner, text="", font=FONT_S, bg=PAL["card"],
+                                   fg=PAL["muted"], anchor="w", width=9)
+        self.tokens_lbl.grid(row=0, column=4, rowspan=2, sticky="w", padx=(0, 8))
 
         self.stop_btn = RoundedButton(inner, text="Stop", style="outline",
                                       height=26, width=66, font=FONT_XS,
                                       command=lambda: on_stop(job.id))
-        self.stop_btn.grid(row=0, column=4, rowspan=2, padx=(0, 6))
+        self.stop_btn.grid(row=0, column=5, rowspan=2, padx=(0, 6))
         self.del_btn = RoundedButton(inner, text="✕", style="ghost", height=26,
                                      width=30, font=FONT_XS,
                                      command=lambda: on_remove(job.id))
-        self.del_btn.grid(row=0, column=5, rowspan=2)
+        self.del_btn.grid(row=0, column=6, rowspan=2)
 
         for w in (inner, self.title, self.sub):
             w.bind("<Button-1>", lambda _e: on_open(job.id))
@@ -962,6 +966,8 @@ class JobRow(RoundedCard):
                                fg=PAL[colour])
         else:
             self.impact.config(text="", fg=PAL["muted"])
+        total = (job.tokens or {}).get("total")
+        self.tokens_lbl.config(text=f"⛃ {_format_tokens(total)}" if total else "")
         self.stop_btn.set_enabled(job.is_active)
         self.del_btn.set_enabled(True)
 
@@ -1934,8 +1940,10 @@ class App(tk.Tk):
         vi.config(padx=14, pady=4)
         vi.columnconfigure(0, weight=3, uniform="v")
         vi.columnconfigure(1, weight=2, uniform="v")
+        vi.columnconfigure(2, weight=2, uniform="v")
         self._lab(vi, "VERDICT").grid(row=0, column=0, sticky="w")
         self._lab(vi, "IMPACT").grid(row=0, column=1, sticky="w")
+        self._lab(vi, "TOKENS").grid(row=0, column=2, sticky="w")
         self.verdict_val = tk.Label(vi, text="Not run yet", font=(_FAMILY, 11, "bold"),
                                     bg=PAL["card"], fg=PAL["text"], anchor="w",
                                     justify="left")
@@ -1944,6 +1952,10 @@ class App(tk.Tk):
                                    bg=PAL["card"], fg=PAL["text"], anchor="w",
                                    justify="left")
         self.impact_val.grid(row=1, column=1, sticky="ew")
+        self.tokens_val = tk.Label(vi, text="—", font=(_FAMILY, 11, "bold"),
+                                   bg=PAL["card"], fg=PAL["muted"], anchor="w",
+                                   justify="left")
+        self.tokens_val.grid(row=1, column=2, sticky="ew")
 
         # ---- agent conversation (packed only while a question is open) ----
         self.agent_panel = AgentPanel(root, on_send=self._answer_agent,
@@ -2257,6 +2269,12 @@ class App(tk.Tk):
         label = f"{icon}  {score}/{out_of}".strip()
         self.impact_val.config(text=label, fg=PAL[colour])
 
+    def _paint_tokens(self, tokens):
+        """Live running total for the whole pipeline run, updated as it goes
+        rather than only once the run finishes — see TokenMeter."""
+        total = (tokens or {}).get("total")
+        self.tokens_val.config(text=_format_tokens(total) if total else "—")
+
     def _paint_verdict(self):
         try:
             self.verdict_val.config(fg=PAL[_verdict_colour(self._verdict_key)])
@@ -2525,6 +2543,7 @@ class App(tk.Tk):
         self._verdict_key = job.verdict_key
         self._paint_verdict()
         self._paint_impact(job.impact)
+        self._paint_tokens(job.tokens)
         self.run_btn.set_text("▶  Start Prisming")
         self.stop_btn.set_enabled(job.is_active)
         self._render_log(job)
@@ -2700,6 +2719,19 @@ class App(tk.Tk):
         shown = job.id == self.selected_job_id and self.screen is self.detail_screen
         if kind == "log":
             line, tag = payload if isinstance(payload, tuple) else (payload, None)
+            if tag == "tokens":
+                # A live running total, not a transcript line — update the
+                # meter and skip the log buffer entirely so it doesn't push
+                # real conversation out of the ring buffer or show up as
+                # unreadable JSON if the log is ever displayed.
+                try:
+                    job.tokens = json.loads(line)
+                except (TypeError, ValueError):
+                    pass
+                else:
+                    if shown:
+                        self._paint_tokens(job.tokens)
+                return True
             text = line.strip()
             if tag is None:
                 tag = _classify(text)
@@ -2740,7 +2772,11 @@ class App(tk.Tk):
             if kind == "done":
                 job.status = J.DONE
                 job.result = payload
-                job.append_log(f"\n—— finished: {payload} ——", "ok")
+                if isinstance(payload, dict) and payload.get("tokens"):
+                    job.tokens = payload["tokens"]
+                shown_payload = {k: v for k, v in payload.items() if k != "tokens"} \
+                    if isinstance(payload, dict) else payload
+                job.append_log(f"\n—— finished: {shown_payload} ——", "ok")
             elif kind == "stopped":
                 job.status = J.STOPPED
                 job.append_log("\n■ Run stopped.", "warn")
@@ -2849,6 +2885,20 @@ def _impact_style(score, out_of=10):
     if ratio <= 0.8:
         return "🔴", "bad"         # 7-8  high
     return "⛔", "bad"             # 9-10 critical
+
+
+def _format_tokens(n):
+    """Compact token count — a reasoning-heavy step can run into the millions,
+    where the raw digit count stops being readable at a glance."""
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return "—"
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.2f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k"
+    return str(n)
 
 
 def _plural(n, singular, plural=None):

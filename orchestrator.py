@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -75,7 +76,21 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 DESC_BLOCK_RE = re.compile(r"<!-- pr-reviewer:start -->.*?<!-- pr-reviewer:end -->", re.DOTALL)
 
+# Embedded inside a description block by PRISM itself (never by an agent) so
+# a later run can tell *this* run's write apart from a stale block a previous
+# review left behind — presence of the start/end markers alone proves nothing
+# about which run wrote them.
+STAMP_RE = re.compile(r"<!--\s*pr-reviewer:meta\s+verdict=(\S+)\s+commit=(\S+)\s*-->")
+
 MERGEABLE_VERDICTS = ("approve", "approve with comments")
+
+# A free-tier model occasionally bounces one call in a back-to-back sequence
+# with a 403 "can only be used from within OpenCode" while an identical call
+# moments earlier or later on the same account succeeds — transient, not a
+# real capability gap. See _run_stream_resilient.
+FREE_TIER_MARKER = "free tier"
+PROVIDER_ERROR_RETRIES = 2
+PROVIDER_ERROR_BACKOFF = 6  # seconds, multiplied by the attempt number
 
 
 def _emit_plain(text, tag=None):
@@ -383,6 +398,105 @@ def require_engine():
     return exe
 
 
+_DB_PATH = None
+_DB_PATH_GUARD = threading.Lock()
+
+
+def _engine_db_path():
+    """Path to the review engine's own database, or None when unavailable.
+
+    Used only to *read* live token/cost usage for the TOKENS meter — PRISM
+    never writes to it. Located via `opencode db path` (a stable, public
+    subcommand) rather than a hardcoded XDG data directory, so this keeps
+    working if that location ever changes. Cached: it cannot change for the
+    life of the process.
+    """
+    global _DB_PATH
+    with _DB_PATH_GUARD:
+        if _DB_PATH is None:
+            exe = engine_path()
+            if exe is None:
+                _DB_PATH = False
+            else:
+                try:
+                    proc = subprocess.run([exe, "db", "path"], capture_output=True,
+                                          text=True, encoding="utf-8",
+                                          errors="replace", timeout=20)
+                    out = (proc.stdout or "").strip()
+                    _DB_PATH = out if (proc.returncode == 0 and out) else False
+                except Exception:  # noqa: BLE001
+                    _DB_PATH = False
+    return _DB_PATH or None
+
+
+def _session_usage(db_path, session_id):
+    """Best-effort read-only snapshot of one session's live cumulative usage.
+
+    Reads the same row the engine's own UI reads, so the numbers PRISM shows
+    match what the user would see there — including while the run is still
+    in progress, not only once it finishes. Never raises: a lookup that fails
+    just means no update this tick.
+    """
+    if not db_path or not session_id:
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1)
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        row = conn.execute(
+            "SELECT tokens_input, tokens_output, tokens_reasoning, "
+            "tokens_cache_read, tokens_cache_write, cost FROM session "
+            "WHERE id = ?", (session_id,)).fetchone()
+    except Exception:  # noqa: BLE001
+        return None
+    finally:
+        conn.close()
+    if not row:
+        return None
+    keys = ("input", "output", "reasoning", "cache_read", "cache_write")
+    usage = dict(zip(keys, (int(v or 0) for v in row[:5])))
+    usage["cost"] = float(row[5] or 0.0)
+    return usage
+
+
+class TokenMeter:
+    """Running token/cost total across every agent session in one pipeline
+    run (review, description-poster, merge-checker, …).
+
+    Each session's row in the engine's own database is already cumulative
+    for that whole conversation, so a session in progress simply overwrites
+    its own entry on every tick rather than being added to repeatedly —
+    otherwise a chatty session would be double-counted.
+    """
+
+    FIELDS = ("input", "output", "reasoning", "cache_read", "cache_write")
+
+    def __init__(self):
+        self._sessions = {}
+        self._lock = threading.Lock()
+
+    def update(self, session_id, usage):
+        with self._lock:
+            self._sessions[session_id] = usage
+            return self._total_locked()
+
+    def _total_locked(self):
+        out = {k: 0 for k in self.FIELDS}
+        cost = 0.0
+        for usage in self._sessions.values():
+            for k in self.FIELDS:
+                out[k] += usage.get(k, 0)
+            cost += usage.get("cost", 0.0)
+        out["total"] = sum(out[k] for k in self.FIELDS)
+        out["cost"] = round(cost, 4)
+        return out
+
+    def total(self):
+        with self._lock:
+            return self._total_locked()
+
+
 def list_available_models(timeout=60):
     """Return `provider/model` ids from `opencode models` (empty list on failure)."""
     exe = engine_path()
@@ -570,6 +684,8 @@ def _run_stream(cmd, cwd, emit, timeout=1200, control=None, json_mode=False):
     text_parts = []
     seen_parts = {}
     malformed = False
+    db_path = _engine_db_path() if json_mode else None
+    last_poll = 0.0
 
     def emit_block(block):
         """Release one completed part, line by line."""
@@ -595,6 +711,16 @@ def _run_stream(cmd, cwd, emit, timeout=1200, control=None, json_mode=False):
                 continue
             if session_id is None:
                 session_id = _event_session_id(evt)
+            if session_id and db_path:
+                # Throttled on wall-clock time, not on every event: a chatty
+                # agent should not turn this into a DB read per line, but the
+                # meter should still move noticeably while the run is long.
+                now = time.monotonic()
+                if now - last_poll >= 1.0:
+                    last_poll = now
+                    usage = _session_usage(db_path, session_id)
+                    if usage is not None:
+                        emit(json.dumps({"session": session_id, **usage}), "tokens")
             tool = _event_tool(evt)
             if tool is not None:
                 emit(tool, "tool")
@@ -602,7 +728,11 @@ def _run_stream(cmd, cwd, emit, timeout=1200, control=None, json_mode=False):
             piece = _event_text(evt)
             if piece is None:
                 if str(evt.get("type", "")).endswith("error"):
-                    emit(f"⚠ {evt.get('message') or stripped[:200]}")
+                    err = evt.get("error") if isinstance(evt.get("error"), dict) else {}
+                    data = err.get("data") if isinstance(err.get("data"), dict) else {}
+                    msg = (data.get("message") or err.get("message")
+                           or evt.get("message") or stripped[:200])
+                    emit(f"⚠ {msg}")
                 continue
             part_id = ((evt.get("part") or {}).get("id")
                        if isinstance(evt.get("part"), dict) else None)
@@ -659,8 +789,52 @@ def _run_stream(cmd, cwd, emit, timeout=1200, control=None, json_mode=False):
     return (1 if rc is None else rc), text, session_id
 
 
+def _run_stream_resilient(cmd, cwd, emit, timeout=1200, control=None,
+                          json_mode=False, meter=None):
+    """Like _run_stream, but retries a call the provider bounced as a
+    free-tier automation restriction, and folds any live token usage it
+    reports into `meter` before forwarding it.
+
+    Retrying is the whole fix for the free-tier case (see the module-level
+    comment by FREE_TIER_MARKER) — real runs show an identical call succeed
+    moments after one was rejected. Everything else about the call is
+    unchanged, and a non-free-tier failure is never retried here.
+    """
+    attempt = 0
+    while True:
+        hit = {"free_tier": False}
+
+        def _observe(text, tag=None):
+            if tag == "tokens":
+                if meter is not None:
+                    try:
+                        payload = json.loads(text)
+                        sid = payload.pop("session", None)
+                    except (TypeError, ValueError):
+                        sid, payload = None, None
+                    if sid and payload is not None:
+                        text = json.dumps(meter.update(sid, payload))
+                emit(text, tag)
+                return
+            if tag is None and isinstance(text, str) and FREE_TIER_MARKER in text.lower():
+                hit["free_tier"] = True
+            emit(text, tag)
+
+        rc, text, sid = _run_stream(cmd, cwd=cwd, emit=_observe, timeout=timeout,
+                                    control=control, json_mode=json_mode)
+        if rc == 0 or not hit["free_tier"] or attempt >= PROVIDER_ERROR_RETRIES:
+            return rc, text, sid
+        attempt += 1
+        wait = PROVIDER_ERROR_BACKOFF * attempt
+        emit(f"⚠ The model's free tier bounced this call as automation — "
+             f"retrying in {wait}s ({attempt}/{PROVIDER_ERROR_RETRIES}) …")
+        if control is not None:
+            control.check()
+        time.sleep(wait)
+
+
 def run_agent(agent, prompt, project_dir, emit=_emit_plain, model=None,
-              control=None, label=None):
+              control=None, label=None, meter=None):
     """Run one specialised agent to completion in its own fresh session.
 
     Each step gets its own conversation rather than sharing the reviewer's:
@@ -678,8 +852,9 @@ def run_agent(agent, prompt, project_dir, emit=_emit_plain, model=None,
     if model:
         cmd += ["--model", model]
     cmd += [prompt]
-    rc, out, _sid = _run_stream(cmd, cwd=project_dir, emit=emit,
-                                control=control, json_mode=json_mode)
+    rc, out, _sid = _run_stream_resilient(cmd, cwd=project_dir, emit=emit,
+                                          control=control, json_mode=json_mode,
+                                          meter=meter)
     decision = parse_decision(out)
     if rc != 0 and not decision:
         raise RuntimeError(f"{agent} failed (exit {rc}). See the conversation.")
@@ -688,7 +863,7 @@ def run_agent(agent, prompt, project_dir, emit=_emit_plain, model=None,
 
 def run_opencode_review(pr_id, repo_name, local_repo, project_dir,
                         region=REGION_DEFAULT, emit=_emit_plain, model=None,
-                        control=None):
+                        control=None, meter=None):
     """Step 1: trigger the pr-reviewer agent. Returns raw agent output."""
     exe = require_engine()
     ensure_bundled_agents(project_dir, emit=emit)
@@ -709,8 +884,9 @@ def run_opencode_review(pr_id, repo_name, local_repo, project_dir,
     if model:
         cmd += ["--model", model]
     cmd += [prompt]
-    rc, out, session_id = _run_stream(cmd, cwd=project_dir, emit=emit,
-                                      control=control, json_mode=json_mode)
+    rc, out, session_id = _run_stream_resilient(cmd, cwd=project_dir, emit=emit,
+                                                control=control, json_mode=json_mode,
+                                                meter=meter)
     if rc != 0 and "Verdict" not in out:
         raise RuntimeError(f"Review run failed (exit {rc}). See log.")
     return out, session_id
@@ -729,7 +905,7 @@ def run_opencode_reply(message, project_dir, session_id=None, emit=_emit_plain,
 
 
 def _continue_turn(prompt, project_dir, session_id, emit, model, control, what,
-                   agent=None):
+                   agent=None, meter=None):
     """One follow-up agent turn, pinned to a session where possible.
 
     `--session <id>` addresses one specific conversation and cannot be hijacked
@@ -748,16 +924,18 @@ def _continue_turn(prompt, project_dir, session_id, emit, model, control, what,
     if session_id:
         cmd += ["--session", session_id]
         cmd += [prompt]
-        rc, out, sid = _run_stream(cmd, cwd=project_dir, emit=emit,
-                                   control=control, json_mode=json_mode)
+        rc, out, sid = _run_stream_resilient(cmd, cwd=project_dir, emit=emit,
+                                             control=control, json_mode=json_mode,
+                                             meter=meter)
         return rc, out, (sid or session_id)
     emit(f"⚠ No session id was captured — running this {what} with --continue "
          f"and holding a lock on {project_dir} so a concurrent job here cannot "
          f"take over the wrong conversation.")
     cmd += ["--continue", prompt]
     with _lock_for(project_dir):
-        rc, out, sid = _run_stream(cmd, cwd=project_dir, emit=emit,
-                                   control=control, json_mode=json_mode)
+        rc, out, sid = _run_stream_resilient(cmd, cwd=project_dir, emit=emit,
+                                             control=control, json_mode=json_mode,
+                                             meter=meter)
     # If this turn did yield a clean id, later turns pin properly again.
     return rc, out, sid
 
@@ -814,26 +992,60 @@ def get_pr(pr_id, region=REGION_DEFAULT):
     }
 
 
-def description_has_review_block(pr_id, region=REGION_DEFAULT):
-    """True when the PR description already carries a pr-reviewer marker block.
+def _stamped(block_text, verdict_key, source_commit):
+    """Embed a freshness marker right after a block's start comment.
 
-    Used to verify the agent actually performed the Step-5 write: the engine
+    PRISM writes this, never an agent — it is what lets a later run tell
+    *this* run's write apart from a stale block a previous review left
+    behind, instead of just checking that a block exists at all.
+    """
+    if not verdict_key and not source_commit:
+        return block_text
+    stamp = (f"<!-- pr-reviewer:meta verdict={verdict_key or 'unknown'} "
+             f"commit={source_commit or 'unknown'} -->")
+    if "<!-- pr-reviewer:start -->" in block_text:
+        return block_text.replace("<!-- pr-reviewer:start -->",
+                                  "<!-- pr-reviewer:start -->\n" + stamp, 1)
+    return stamp + "\n" + block_text
+
+
+def description_has_review_block(pr_id, verdict_key=None, source_commit=None,
+                                 region=REGION_DEFAULT):
+    """True when the PR description carries a pr-reviewer marker block.
+
+    Used to verify the agent actually performed the Step-2 write: the engine
     exits 0 even when the agent declines to act, so a zero exit code alone is
     not evidence that anything was written.
+
+    Pass `verdict_key`/`source_commit` (this run's own values) to additionally
+    require that the block matches *this* run rather than merely existing —
+    without it, a stale block a previous review left behind reads as success
+    for a run whose own write actually failed, which then hands the merge
+    check a description that contradicts the fresh verdict it was given.
     """
     try:
-        return bool(DESC_BLOCK_RE.search(get_pr(pr_id, region=region)["description"]))
+        desc = get_pr(pr_id, region=region)["description"]
     except Exception:  # noqa: BLE001
         return False
+    m = DESC_BLOCK_RE.search(desc or "")
+    if not m:
+        return False
+    if verdict_key is None and source_commit is None:
+        return True
+    stamp = STAMP_RE.search(m.group(0))
+    return bool(stamp and stamp.group(1) == verdict_key
+               and stamp.group(2) == source_commit)
 
 
-def write_description_block(pr_id, block, region=REGION_DEFAULT):
+def write_description_block(pr_id, block, region=REGION_DEFAULT,
+                            verdict_key=None, source_commit=None):
     """Write an agent-composed block onto the PR, replacing any stale one.
 
     The agent produced the text; this function is the only thing that talks to
     CodeCommit, so the write stays deterministic, size-checked, and impossible
     to reach from a prompt.
     """
+    block = _stamped(block, verdict_key, source_commit)
     pr = get_pr(pr_id, region=region)
     desc = DESC_BLOCK_RE.sub("", pr["description"] or "").strip()
     merged = (desc + "\n\n" + block.strip()).strip()
@@ -845,13 +1057,16 @@ def write_description_block(pr_id, block, region=REGION_DEFAULT):
     return merged
 
 
-def update_description_direct(pr_id, verdict_text, impact, findings, region=REGION_DEFAULT):
-    """Fallback: replicate the agent's Step-5 marker block via AWS CLI directly."""
+def update_description_direct(pr_id, verdict_text, impact, findings, region=REGION_DEFAULT,
+                              verdict_key=None, source_commit=None):
+    """Fallback: replicate the agent's Step-2 marker block via AWS CLI directly."""
     pr = get_pr(pr_id, region=region)
     desc = DESC_BLOCK_RE.sub("", pr["description"] or "").strip()  # drop stale block
     bullets = "\n".join(f"{b}" for b in (findings or [])[:20]) or "- (no discrete findings)"
+    stamp = (f"<!-- pr-reviewer:meta verdict={verdict_key or 'unknown'} "
+             f"commit={source_commit or 'unknown'} -->\n") if (verdict_key or source_commit) else ""
     header = (
-        "\n\n<!-- pr-reviewer:start -->\n---\n"
+        "\n\n<!-- pr-reviewer:start -->\n" + stamp + "---\n"
         f"**Automated review — {verdict_text} (impact {impact}/10)**\n"
     )
     footer = "\n<!-- pr-reviewer:end -->"
@@ -1149,7 +1364,7 @@ def _sync_locked(local_repo, dest, src, pr_id, emit, choices=None):
 
 
 def resolve_conflicts_with_user(conflict, project_dir, ask, emit=_emit_plain,
-                                model=None, control=None):
+                                model=None, control=None, meter=None):
     """Walk the user through each conflicting hunk. Returns choices or None.
 
     PRISM never picks a side. The analyst agent explains what each side does,
@@ -1173,7 +1388,7 @@ def resolve_conflicts_with_user(conflict, project_dir, ask, emit=_emit_plain,
             AGENT_CONFLICT,
             "A branch sync hit merge conflicts. Explain each one for someone "
             "choosing which side to keep.\n\n" + brief[:12000],
-            project_dir, emit=emit, model=model, control=control,
+            project_dir, emit=emit, model=model, control=control, meter=meter,
             label="conflict-analyst")
     except Exception as e:  # noqa: BLE001
         emit(f"⚠ Could not get an explanation ({e}); showing the raw conflicts.")
@@ -1242,13 +1457,18 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
     if not Path(local_clone).is_dir():
         raise RuntimeError(f"Local clone path not found: {local_clone}")
 
+    # One meter for the whole run: every agent session below reports into it,
+    # so TOKENS is a live running total across all pipeline steps, not just
+    # the last one that happened to run.
+    meter = TokenMeter()
+
     # ---- Step 1: review ----
     ck()
     pg(STAGE_REVIEW, "active")
     emit("\n═══ STEP 1 — AI review ═══")
     raw, session_id = run_opencode_review(pr_id, repo_name, local_clone, project_dir,
                                           region=region, emit=emit, model=model,
-                                          control=control)
+                                          control=control, meter=meter)
     review = parse_review_output(raw)
 
     # The agent stops and asks when something is missing or ambiguous. Rather
@@ -1271,7 +1491,8 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
         rounds += 1
         emit(f"▸ You: {answer[:300]}")
         _rc, raw, session_id = _continue_turn(answer, project_dir, session_id,
-                                              emit, model, control, what="reply")
+                                              emit, model, control, what="reply",
+                                              meter=meter)
         review = parse_review_output(raw)
 
     emit(f"\n◆ Verdict: {review.verdict_raw or review.verdict_key}   "
@@ -1282,7 +1503,18 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
         pg(STAGE_DESCRIBE, "skipped")
         pg(STAGE_MERGE_CHECK, "skipped")
         pg(STAGE_MERGE, "skipped")
-        return {"review": review, "merged": False, "stopped": "unparsed-verdict"}
+        return {"review": review, "merged": False, "stopped": "unparsed-verdict",
+                "tokens": meter.total()}
+
+    # The commit this review actually saw, so a later run can tell whether a
+    # description block reflects *this* review or a stale one from an
+    # earlier run (see description_has_review_block). Best-effort: a failure
+    # here only costs the freshness check, never the run itself.
+    try:
+        source_commit_at_review = get_pr(pr_id, region=region).get("sourceCommit", "")
+    except Exception:  # noqa: BLE001
+        source_commit_at_review = ""
+    desc_updated = False
 
     # ---- Step 2: description ----
     ck()
@@ -1301,30 +1533,41 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
                     "Condense this review into the PR description block.\n\n"
                     + (review.raw_output or "")[:14000],
                     project_dir, emit=emit, model=model, control=control,
-                    label="review-comments-poster")
+                    meter=meter, label="review-comments-poster")
                 block = DESC_BLOCK_RE.search(out or "")
                 if decision.get("decision") == "skip":
                     emit(f"◆ Poster skipped: {decision.get('reason', 'no reason given')}")
                 elif block:
-                    write_description_block(pr_id, block.group(0), region=region)
+                    write_description_block(pr_id, block.group(0), region=region,
+                                            verdict_key=review.verdict_key,
+                                            source_commit=source_commit_at_review)
                     emit("◆ Description updated from the poster's block.")
                 else:
                     emit("⚠ Poster returned no marker block.")
             except Exception as e:  # noqa: BLE001
                 emit(f"⚠ Description poster failed ({e}).")
             # A zero exit code only means the engine ran, not that the agent
-            # wrote anything — confirm against the live PR before believing it.
-            if description_has_review_block(pr_id, region=region):
+            # wrote anything — and a block already on the PR may be a stale
+            # one a previous run left behind, so require it to match this
+            # run's own verdict and commit before calling it done.
+            if description_has_review_block(pr_id, verdict_key=review.verdict_key,
+                                            source_commit=source_commit_at_review,
+                                            region=region):
                 emit("◆ Description update finished (marker block present on the PR).")
                 pg(STAGE_DESCRIBE, "done")
+                desc_updated = True
             else:
-                emit("⚠ No reviewer block on the PR — falling back to direct AWS update …")
+                emit("⚠ No fresh reviewer block on the PR for this run — "
+                     "falling back to direct AWS update …")
                 try:
                     merged = update_description_direct(
                         pr_id, review.verdict_raw or review.verdict_key,
-                        review.impact_score or "?", review.findings, region=region)
+                        review.impact_score or "?", review.findings, region=region,
+                        verdict_key=review.verdict_key,
+                        source_commit=source_commit_at_review)
                     emit(f"◆ Direct description update wrote {len(merged)} chars.")
                     pg(STAGE_DESCRIBE, "done")
+                    desc_updated = True
                 except Exception as e:  # noqa: BLE001
                     # A description is cosmetic — report loudly, but don't throw
                     # away a completed review by aborting the whole run.
@@ -1341,13 +1584,15 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
         emit("\n═══ Merge skipped by option. Done. ═══")
         pg(STAGE_MERGE_CHECK, "skipped")
         pg(STAGE_MERGE, "skipped")
-        return {"review": review, "merged": False, "stopped": "merge-disabled"}
+        return {"review": review, "merged": False, "stopped": "merge-disabled",
+                "tokens": meter.total()}
 
     if not review.merge_allowed():
         emit(f"\n⛔ Verdict is '{review.verdict_raw}' — NOT merging (needs changes/blocked). Done.")
         pg(STAGE_MERGE_CHECK, "skipped")
         pg(STAGE_MERGE, "skipped")
-        return {"review": review, "merged": False, "stopped": "verdict-blocks-merge"}
+        return {"review": review, "merged": False, "stopped": "verdict-blocks-merge",
+                "tokens": meter.total()}
 
     ck()
     pr = get_pr(pr_id, region=region)
@@ -1355,7 +1600,8 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
         emit(f"\n⛔ PR status is {pr['status']} (not OPEN) — will not merge.")
         pg(STAGE_MERGE_CHECK, "skipped")
         pg(STAGE_MERGE, "skipped")
-        return {"review": review, "merged": False, "stopped": f"status-{pr['status']}"}
+        return {"review": review, "merged": False, "stopped": f"status-{pr['status']}",
+                "tokens": meter.total()}
     if pr["repositoryName"] and pr["repositoryName"] != repo_name:
         emit(f"⚠ PR lives in '{pr['repositoryName']}' (target said '{repo_name}'); "
              f"using '{pr['repositoryName']}' for merge calls.")
@@ -1370,7 +1616,8 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
     if dry_run:
         emit("(dry-run) would merge now. Stopping.")
         pg(STAGE_MERGE, "skipped")
-        return {"review": review, "merged": False, "stopped": "dry-run"}
+        return {"review": review, "merged": False, "stopped": "dry-run",
+                "tokens": meter.total()}
 
     def _sync_then_merge():
         """Sync destination into source, then retry the fast-forward merge."""
@@ -1388,7 +1635,7 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
                 raise RuntimeError(str(conflict))
             picks = resolve_conflicts_with_user(conflict, project_dir, ask,
                                                 emit=emit, model=model,
-                                                control=control)
+                                                control=control, meter=meter)
             if not picks:
                 pg(STAGE_SYNC, "error")
                 raise RuntimeError(
@@ -1414,7 +1661,8 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
                 emit(f"✅ Synced + merged PR #{pr_id} by fast-forward. Closed.")
                 pg(STAGE_MERGE, "done")
                 return {"review": review, "merged": True,
-                        "strategy": "sync-then-fast-forward"}
+                        "strategy": "sync-then-fast-forward",
+                        "tokens": meter.total()}
             except RuntimeError as err:
                 last = err
                 emit(f"  merge retry {attempt + 1}/3 failed: {str(err)[:200]}")
@@ -1427,6 +1675,14 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
     # Every precondition below was already enforced in code above; this is a
     # second, independent opinion. A "go" cannot merge anything on its own —
     # PRISM has already decided it is allowed to be here.
+    stale_desc_note = (
+        "" if desc_updated else
+        "Note: the PR description could not be refreshed with this run's "
+        "findings (the update step failed or was skipped this run). If it "
+        "still shows an older review write-up, that is stale — trust the "
+        "verdict and impact score given above, which are this run's fresh "
+        "result, and do not re-review the diff yourself to double-check "
+        "them; that is the reviewer's job, not yours.\n")
     try:
         _out, call = run_agent(
             AGENT_MERGER,
@@ -1436,8 +1692,9 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
             f"Impact: {review.impact_score or '?'}/10\n"
             f"Source: {src}  Destination: {dest}\n"
             f"Fast-forward possible: {mergeable}\n"
-            f"Confirm independently whether this should be merged now.",
-            project_dir, emit=emit, model=model, control=control,
+            + stale_desc_note +
+            "Confirm independently whether this should be merged now.",
+            project_dir, emit=emit, model=model, control=control, meter=meter,
             label="pr-merger")
     except Exception as e:  # noqa: BLE001
         emit(f"⚠ Merge checker agent failed ({e}); holding rather than merging.")
@@ -1445,7 +1702,8 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
     if call.get("decision") == "no-go":
         emit(f"⛔ pr-merger says no-go: {call.get('reason', 'no reason given')}")
         pg(STAGE_MERGE, "skipped")
-        return {"review": review, "merged": False, "stopped": "merger-no-go"}
+        return {"review": review, "merged": False, "stopped": "merger-no-go",
+                "tokens": meter.total()}
     if not mergeable:
         # A fast-forward is not possible. This is the ambiguous case, so ask the
         # checker how to land it — a clean fast-forward never reaches here and
@@ -1459,7 +1717,7 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
                 f"Local clone: {local_clone}\n"
                 f"Merge-conflict check said: {detail[:600]}\n"
                 f"Decide how it should be landed.",
-                project_dir, emit=emit, model=model, control=control,
+                project_dir, emit=emit, model=model, control=control, meter=meter,
                 label="fast-forward-merge-checker")
         except Exception as e:  # noqa: BLE001
             emit(f"⚠ Merge checker failed ({e}); falling back to sync-then-merge.")
@@ -1469,17 +1727,20 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
             emit(f"⛔ Checker says this needs a person: "
                  f"{call.get('reason', 'no reason given')}")
             pg(STAGE_MERGE, "error")
-            return {"review": review, "merged": False, "stopped": "needs-manual-merge"}
+            return {"review": review, "merged": False, "stopped": "needs-manual-merge",
+                    "tokens": meter.total()}
         if not do_sync:
             emit("⛔ Not fast-forward mergeable and sync is disabled — stopping.")
             pg(STAGE_MERGE, "error")
-            return {"review": review, "merged": False, "stopped": "not-fast-forwardable"}
+            return {"review": review, "merged": False, "stopped": "not-fast-forwardable",
+                    "tokens": meter.total()}
         return _sync_then_merge()
     try:
         try_fast_forward_merge(pr_id, repo_name, region=region)
         emit(f"✅ Merged PR #{pr_id} by fast-forward. Closed.")
         pg(STAGE_MERGE, "done")
-        return {"review": review, "merged": True, "strategy": "fast-forward"}
+        return {"review": review, "merged": True, "strategy": "fast-forward",
+                "tokens": meter.total()}
     except RuntimeError as e:
         emit(f"⚠ Fast-forward failed: {str(e)[:400]}")
         if not do_sync:
