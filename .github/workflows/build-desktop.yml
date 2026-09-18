@@ -96,6 +96,35 @@ jobs:
           path: out/
           if-no-files-found: error
 
+  render:
+    name: Render check (${{ matrix.label }})
+    # Rendering differences are per-platform — rounded shapes and font metrics
+    # that look right on one OS can look wrong on another, and no unit test
+    # catches that. This uploads screenshots so a regression is visible.
+    # Never blocks a build: a capture failure is not a code failure.
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            label: macOS
+          - os: windows-latest
+            label: Windows
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Render the screens
+        run: python tests/render_scene.py render-out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: render-${{ matrix.label }}
+          path: render-out/
+          if-no-files-found: warn
+
   release:
     name: Attach builds to the release
     needs: build

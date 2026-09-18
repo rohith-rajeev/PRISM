@@ -8,6 +8,7 @@ repository + local clone.
 
 Run:  python3 app.py   (or ./run.sh, or the packaged desktop build)
 """
+import math
 import queue
 import re
 import threading
@@ -47,11 +48,60 @@ def _mono():
     return ("TkFixedFont", 10)
 
 
-FONT = ("Segoe UI", 10)
-FONT_B = ("Segoe UI", 10, "bold")
-FONT_S = ("Segoe UI", 9)
-FONT_XS = ("Segoe UI", 8)
-TITLE_F = ("Segoe UI", 16, "bold")
+def _ui_family(available=None):
+    """The UI font family for this platform.
+
+    Every font in the app used to be hardcoded to "Segoe UI", which ships only
+    with Windows. On macOS and Linux Tk silently substituted something else,
+    with different metrics — which is why spacing and alignment looked subtly
+    wrong off Windows. Resolved by platform, then checked against the families
+    Tk actually reports once a root exists.
+    """
+    if sys.platform == "darwin":
+        prefer = ("SF Pro Text", ".AppleSystemUIFont", "Helvetica Neue", "Lucida Grande")
+    elif sys.platform == "win32":
+        prefer = (_FAMILY, "Tahoma", "Arial")
+    else:
+        prefer = ("Ubuntu", "Cantarell", "DejaVu Sans", "Liberation Sans", "Arial")
+    if available:
+        for name in prefer:
+            if name in available:
+                return name
+        return None          # caller falls back to Tk's own default
+    return prefer[0]
+
+
+_FAMILY = _ui_family()
+FONT = (_FAMILY, 10)
+FONT_B = (_FAMILY, 10, "bold")
+FONT_S = (_FAMILY, 9)
+FONT_XS = (_FAMILY, 8)
+TITLE_F = (_FAMILY, 16, "bold")
+
+
+def _resolve_fonts():
+    """Re-pick the family now that Tk can tell us what is installed.
+
+    Called once, from App.__init__. Falls back to whatever Tk uses for its own
+    default widgets, which is always correct for the platform.
+    """
+    global _FAMILY, FONT, FONT_B, FONT_S, FONT_XS, TITLE_F
+    try:
+        available = set(tkfont.families())
+    except Exception:  # noqa: BLE001
+        return
+    family = _ui_family(available)
+    if family is None:
+        try:
+            family = tkfont.nametofont("TkDefaultFont").actual("family")
+        except Exception:  # noqa: BLE001
+            return
+    _FAMILY = family
+    FONT = (family, 10)
+    FONT_B = (family, 10, "bold")
+    FONT_S = (family, 9)
+    FONT_XS = (family, 8)
+    TITLE_F = (family, 16, "bold")
 
 STAGE_DEFS = [
     (STAGE_REVIEW, "Review"),
@@ -62,27 +112,43 @@ STAGE_DEFS = [
 STAGE_LABEL = dict(STAGE_DEFS)
 
 
-def _rr(canvas, x1, y1, x2, y2, r, fill, outline, tags="rr"):
-    """Rounded rectangle from arcs + rects (Tk has no native primitive)."""
-    r = max(1, min(r, (x2 - x1) / 2, (y2 - y1) / 2))
-    canvas.create_arc(x1, y1, x1 + 2 * r, y1 + 2 * r, start=90, extent=90,
-                      style=tk.PIESLICE, fill=fill, outline="", tags=tags)
-    canvas.create_arc(x2 - 2 * r, y1, x2, y1 + 2 * r, start=0, extent=90,
-                      style=tk.PIESLICE, fill=fill, outline="", tags=tags)
-    canvas.create_arc(x1, y2 - 2 * r, x1 + 2 * r, y2, start=180, extent=90,
-                      style=tk.PIESLICE, fill=fill, outline="", tags=tags)
-    canvas.create_arc(x2 - 2 * r, y2 - 2 * r, x2, y2, start=270, extent=90,
-                      style=tk.PIESLICE, fill=fill, outline="", tags=tags)
-    canvas.create_rectangle(x1 + r, y1, x2 - r, y2, fill=fill, outline="", tags=tags)
-    canvas.create_rectangle(x1, y1 + r, x2, y2 - r, fill=fill, outline="", tags=tags)
-    if outline:
-        for a in [(x1, y1, 90), (x2 - 2 * r, y1, 0), (x1, y2 - 2 * r, 180), (x2 - 2 * r, y2 - 2 * r, 270)]:
-            canvas.create_arc(a[0], a[1], a[0] + 2 * r, a[1] + 2 * r, start=a[2],
-                              extent=90, style=tk.ARC, outline=outline, tags=tags)
-        canvas.create_line(x1 + r, y1, x2 - r, y1, fill=outline, tags=tags)
-        canvas.create_line(x1 + r, y2, x2 - r, y2, fill=outline, tags=tags)
-        canvas.create_line(x1, y1 + r, x1, y2 - r, fill=outline, tags=tags)
-        canvas.create_line(x2, y1 + r, x2, y2 - r, fill=outline, tags=tags)
+def _rr(canvas, x1, y1, x2, y2, r, fill, outline, tags="rr", width=1):
+    """Rounded rectangle as a *single* smoothed polygon.
+
+    This used to be composited from four pie-slice arcs plus two overlapping
+    rectangles. On X11 those pieces happened to land on the same pixels; on
+    macOS's antialiasing renderer they do not, and every seam showed as a faint
+    horizontal or vertical hairline across buttons, pills and cards.
+
+    One polygon has no seams to show on any platform, antialiases properly on
+    Aqua, and replaces six to fourteen canvas items with one — which also makes
+    the spinner and resize redraws noticeably cheaper.
+
+    Coordinates are snapped to integers: fractional ones put edges between
+    device pixels, which is the other half of the blurry-line problem.
+    """
+    x1, y1, x2, y2 = int(round(x1)), int(round(y1)), int(round(x2)), int(round(y2))
+    r = max(0, min(int(r), (x2 - x1) // 2, (y2 - y1) // 2))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    if r <= 0:
+        pts = [x1, y1, x2, y1, x2, y2, x1, y2]
+    else:
+        # Walk the four corners, emitting a short arc of points for each. Eight
+        # steps per corner is indistinguishable from a true arc at these radii
+        # and keeps the item small.
+        steps = 8
+        pts = []
+        for cx, cy, start_ang in ((x2 - r, y1 + r, 0.0),        # top-right
+                                  (x2 - r, y2 - r, 90.0),       # bottom-right
+                                  (x1 + r, y2 - r, 180.0),      # bottom-left
+                                  (x1 + r, y1 + r, 270.0)):     # top-left
+            for i in range(steps + 1):
+                a = math.radians(start_ang + 90.0 * i / steps)
+                pts.extend((cx + r * math.sin(a), cy - r * math.cos(a)))
+    return canvas.create_polygon(
+        pts, fill=fill or "", outline=(outline or fill or ""),
+        width=width if outline else 1, joinstyle="round", tags=tags)
 
 
 def _spinner(canvas, cx, cy, r, frame, colour):
@@ -125,10 +191,15 @@ class RoundedCard(tk.Frame):
         self._draw()
 
     def _in_cfg(self, _e):
-        rw = self.inner.winfo_reqwidth()
-        rh = self.inner.winfo_reqheight()
-        self.canvas.config(width=rw + 2 * self._r, height=rh + 2 * self._r,
-                           scrollregion=(0, 0, rw + 2 * self._r, rh + 2 * self._r))
+        want_w = self.inner.winfo_reqwidth() + 2 * self._r
+        want_h = self.inner.winfo_reqheight() + 2 * self._r
+        # Reconfiguring to the size it already has still emits a Configure,
+        # which comes straight back here — a feedback loop that shows up as
+        # jitter while anything is animating.
+        if (want_w, want_h) != getattr(self, "_last_req", None):
+            self._last_req = (want_w, want_h)
+            self.canvas.config(width=want_w, height=want_h,
+                               scrollregion=(0, 0, want_w, want_h))
         self._draw()
 
     def _cv_cfg(self, e):
@@ -163,14 +234,14 @@ class RoundedButton(tk.Canvas):
     """Rounded clickable button. Styles: primary | outline | ghost | field."""
 
     def __init__(self, parent, text="", command=None, style="outline", height=36,
-                 radius=10, font=FONT_B, anchor="center", width=160):
+                 radius=10, font=None, anchor="center", width=160):
         super().__init__(parent, height=height, width=width,
                          highlightthickness=0, bd=0)
         self._text = text
         self._command = command
         self._style = style
         self._radius = radius
-        self._font = font
+        self._font = font or FONT_B
         self._anchor = anchor
         self._hover = False
         self._enabled = True
@@ -348,9 +419,9 @@ class ProgressBar(tk.Canvas):
             if state == "done":
                 dot, fg, font = PAL["good"], PAL["good"], FONT_XS
             elif state == "active":
-                dot, fg, font = PAL["accent_text"], PAL["accent_text"], ("Segoe UI", 8, "bold")
+                dot, fg, font = PAL["accent_text"], PAL["accent_text"], (_FAMILY, 8, "bold")
             elif state == "error":
-                dot, fg, font = PAL["bad"], PAL["bad"], ("Segoe UI", 8, "bold")
+                dot, fg, font = PAL["bad"], PAL["bad"], (_FAMILY, 8, "bold")
             elif state == "skipped":
                 dot, fg, font = PAL["border"], PAL["muted"], FONT_XS
             else:
@@ -436,7 +507,7 @@ class CheckRow(tk.Frame):
         fill = PAL["accent"] if on else PAL["card"]
         _rr(self.box, 2, 2, 18, 18, 5, fill, PAL["accent"] if on else PAL["muted"])
         if on:
-            self.box.create_text(10, 10, text="✓", fill="white", font=("Segoe UI", 9, "bold"))
+            self.box.create_text(10, 10, text="✓", fill="white", font=(_FAMILY, 9, "bold"))
 
 
 class AgentPanel(RoundedCard):
@@ -538,9 +609,9 @@ class Dialog(tk.Toplevel):
         head = tk.Frame(inner, bg=PAL["card"])
         head.pack(fill="x", pady=(0, 8))
         glyph = {"bad": "⛔", "warn": "⚠", "accent": "💬"}.get(tone, "⚠")
-        tk.Label(head, text=glyph, font=("Segoe UI", 14), bg=PAL["card"],
+        tk.Label(head, text=glyph, font=(_FAMILY, 14), bg=PAL["card"],
                  fg=PAL[tone]).pack(side="left", padx=(0, 10))
-        tk.Label(head, text=title, font=("Segoe UI", 12, "bold"), bg=PAL["card"],
+        tk.Label(head, text=title, font=(_FAMILY, 12, "bold"), bg=PAL["card"],
                  fg=PAL["text"], anchor="w").pack(side="left")
 
         tk.Label(inner, text=message, font=FONT_S, bg=PAL["card"], fg=PAL["text"],
@@ -679,9 +750,17 @@ class JobRow(RoundedCard):
         self.refresh()
 
     def tick(self, frame):
-        if getattr(self, "_spin", False):
-            self._frame = frame
-            self.refresh()
+        """Animate the dot only.
+
+        This used to call refresh(), reconfiguring every label in the row 12
+        times a second for a change confined to one 14px canvas — visible as
+        flicker on platforms that repaint eagerly.
+        """
+        if not getattr(self, "_spin", False):
+            return
+        self._frame = frame
+        self.dot.delete("all")
+        _spinner(self.dot, 7, 7, 5, frame, PAL[self._dot_colour])
 
     def refresh(self):
         job = self.job
@@ -693,6 +772,7 @@ class JobRow(RoundedCard):
         # Spin only while genuinely working — a job waiting on the user is not
         # making progress and should not pretend to be.
         self._spin = job.status in (J.RUNNING, J.STOPPING)
+        self._dot_colour = colour
         if self._spin:
             _spinner(self.dot, 7, 7, 5, getattr(self, "_frame", 0), PAL[colour])
         else:
@@ -788,7 +868,7 @@ class Picker(tk.Frame):
 
         head = tk.Frame(top, bg=PAL["border"])
         head.pack(fill="x")
-        tk.Label(head, text=f"  {self._title}", font=("Segoe UI", 8, "bold"),
+        tk.Label(head, text=f"  {self._title}", font=(_FAMILY, 8, "bold"),
                  bg=PAL["border"], fg=PAL["muted"]).pack(side="left", pady=4)
         tk.Button(head, text="✕", command=self.close, bg=PAL["border"], fg=PAL["muted"],
                   activebackground=PAL["bad"], activeforeground="white", relief="flat",
@@ -851,7 +931,7 @@ class Picker(tk.Frame):
             return
         for key in sorted(groups):
             if key:
-                tk.Label(self._inner, text=f"  {key}", font=("Segoe UI", 8, "bold"),
+                tk.Label(self._inner, text=f"  {key}", font=(_FAMILY, 8, "bold"),
                          bg=PAL["card"], fg=PAL["muted"]).pack(anchor="w", padx=4, pady=(8, 0))
             for name, full in sorted(groups[key]):
                 sel = full == self._value
@@ -906,6 +986,7 @@ class App(tk.Tk):
 
     def __init__(self):
         super().__init__(className="prism")
+        _resolve_fonts()          # before any widget is built
         self.title("PRISM")
         self.geometry("1020x900")
         self.minsize(900, 620)
@@ -925,13 +1006,14 @@ class App(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ----- themed primitives -----
-    def _lab(self, parent, text, font=FONT_XS, fg="muted", bg="card"):
-        lb = tk.Label(parent, text=text, font=font, bg=PAL[bg], fg=PAL[fg])
+    def _lab(self, parent, text, font=None, fg="muted", bg="card"):
+        lb = tk.Label(parent, text=text, font=font or FONT_XS, bg=PAL[bg], fg=PAL[fg])
         lb._roles = {"bg": bg, "fg": fg}  # noqa: SLF001
         return lb
 
-    def _entry(self, parent, var=None, font=FONT, width=None, mono=False):
-        e = tk.Entry(parent, textvariable=var, font=_mono() if mono else font,
+    def _entry(self, parent, var=None, font=None, width=None, mono=False):
+        e = tk.Entry(parent, textvariable=var,
+                     font=_mono() if mono else (font or FONT),
                      bg=PAL["field"], fg=PAL["text"], insertbackground=PAL["text"],
                      relief="flat", highlightthickness=1,
                      highlightbackground=PAL["border"], highlightcolor=PAL["accent"])
@@ -1113,7 +1195,7 @@ class App(tk.Tk):
         arow.pack(fill="x", pady=(2, 0))
         self.run_btn = RoundedButton(arow, text="▶  Start Prisming", command=self._start,
                                      style="primary", height=38, radius=10,
-                                     font=("Segoe UI", 11, "bold"))
+                                     font=(_FAMILY, 11, "bold"))
         self.run_btn.pack(side="left", fill="x", expand=True)
         RoundedButton(arow, text="Cancel", command=self.show_jobs, style="outline",
                       height=38, radius=10, font=FONT_B,
@@ -1147,11 +1229,11 @@ class App(tk.Tk):
         vi.columnconfigure(1, weight=2, uniform="v")
         self._lab(vi, "VERDICT").grid(row=0, column=0, sticky="w")
         self._lab(vi, "IMPACT").grid(row=0, column=1, sticky="w")
-        self.verdict_val = tk.Label(vi, text="Not run yet", font=("Segoe UI", 11, "bold"),
+        self.verdict_val = tk.Label(vi, text="Not run yet", font=(_FAMILY, 11, "bold"),
                                     bg=PAL["card"], fg=PAL["text"], anchor="w",
                                     justify="left")
         self.verdict_val.grid(row=1, column=0, sticky="ew")
-        self.impact_val = tk.Label(vi, text="—", font=("Segoe UI", 11, "bold"),
+        self.impact_val = tk.Label(vi, text="—", font=(_FAMILY, 11, "bold"),
                                    bg=PAL["card"], fg=PAL["text"], anchor="w",
                                    justify="left")
         self.impact_val.grid(row=1, column=1, sticky="ew")
@@ -1229,7 +1311,7 @@ class App(tk.Tk):
         c.delete("all")
         c.config(bg=PAL["page"])
         _rr(c, 2, 2, 30, 30, 8, PAL["badge_bg"], None)
-        c.create_text(16, 16, text="◇", fill=PAL["badge_fg"], font=("Segoe UI", 13, "bold"))
+        c.create_text(16, 16, text="◇", fill=PAL["badge_fg"], font=(_FAMILY, 13, "bold"))
 
     # ----- log -----
     def _show_placeholder(self):
