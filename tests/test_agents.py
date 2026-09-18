@@ -6,6 +6,8 @@ the ones that prove it — they feed a "go" from pr-merger into situations where
 merging is forbidden and assert nothing merges.
 """
 import importlib
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -49,7 +51,7 @@ class AgentBundle(unittest.TestCase):
         for path in sorted((ROOT / "agents").glob("*.md")):
             if path.name.startswith("_"):
                 continue
-            head = path.read_text().split("---")[1]
+            head = path.read_text(encoding="utf-8").split("---")[1]
             with self.subTest(agent=path.stem):
                 self.assertIn("mode:", head)
                 self.assertIn("edit: deny", head, "agents must never edit files")
@@ -60,7 +62,7 @@ class AgentBundle(unittest.TestCase):
         for path in sorted((ROOT / "agents").glob("*.md")):
             if path.name.startswith("_"):
                 continue
-            head = path.read_text().split("---")[1]
+            head = path.read_text(encoding="utf-8").split("---")[1]
             if "bash: deny" in head:
                 continue          # no shell at all
             with self.subTest(agent=path.stem):
@@ -91,14 +93,14 @@ class Conflicts(unittest.TestCase):
     def test_applies_each_choice_verbatim(self):
         with tempfile.TemporaryDirectory() as d:
             f = Path(d, "x.py")
-            f.write_text(self.SAMPLE)
+            o._write_worktree(f, self.SAMPLE)
             o.apply_conflict_choices(d, {"x.py#0": o.KEEP_CURRENT,
                                          "x.py#1": o.TAKE_INCOMING})
-            self.assertEqual(f.read_text(), "head\nours\nmid\ntheirs2\ntail\n")
+            self.assertEqual(o._read_worktree(f), "head\nours\nmid\ntheirs2\ntail\n")
 
     def test_refuses_to_guess_a_missing_choice(self):
         with tempfile.TemporaryDirectory() as d:
-            Path(d, "x.py").write_text(self.SAMPLE)
+            o._write_worktree(Path(d, "x.py"), self.SAMPLE)
             with self.assertRaises(RuntimeError):
                 o.apply_conflict_choices(d, {"x.py#0": o.KEEP_CURRENT})
 
@@ -176,6 +178,49 @@ class SafetyGates(unittest.TestCase):
         res = self._run()
         self.assertEqual(len(self.merged), 1)
         self.assertTrue(res["merged"])
+
+
+class LocaleIndependence(unittest.TestCase):
+    """Windows decodes with cp1252 unless told otherwise.
+
+    Every agent prompt carries the verdict emoji, the engine streams them back,
+    and aws returns PR titles in any language - all of which raise
+    UnicodeDecodeError under a locale codec. Rewriting a conflicted file would
+    be worse than a crash: it would re-encode the user's own source and flip
+    its line endings. PYTHONWARNDEFAULTENCODING flags every text I/O that
+    forgot to say `encoding=`, so this fails on Linux for a bug only Windows
+    hits.
+    """
+
+    SCRIPT = r"""
+import tempfile, pathlib, sys
+sys.path.insert(0, %r)
+import orchestrator as o
+with tempfile.TemporaryDirectory() as d:
+    o.ensure_bundled_agents(d, emit=lambda *a, **k: None)
+    o.ensure_bundled_agents(d, emit=lambda *a, **k: None)   # second pass compares
+    f = pathlib.Path(d, "x.py")
+    o._write_worktree(f, "a\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> b\nz\n")
+    o.apply_conflict_choices(d, {"x.py#0": o.KEEP_CURRENT})
+"""
+
+    @unittest.skipIf(sys.version_info < (3, 10),
+                     "EncodingWarning needs 3.10+; CI runs 3.12 everywhere")
+    def test_no_text_io_relies_on_the_locale_encoding(self):
+        env = dict(os.environ, PYTHONWARNDEFAULTENCODING="1")
+        proc = subprocess.run(
+            [sys.executable, "-W", "error::EncodingWarning", "-c",
+             self.SCRIPT % str(ROOT)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=60, env=env)
+        self.assertEqual(proc.returncode, 0,
+                         "text I/O without an explicit encoding:\n" + proc.stderr)
+
+    def test_the_agents_really_do_carry_non_ascii(self):
+        """Guards the premise: if this ever fails, the test above proves less."""
+        blobs = [p.read_bytes() for p in (ROOT / "agents").glob("*.md")]
+        self.assertTrue(any(b.decode("utf-8") != b.decode("ascii", "replace")
+                            for b in blobs))
 
 
 if __name__ == "__main__":

@@ -98,7 +98,7 @@ def write_linux_desktop_entry(dist, icon):
         # shows a second, generic icon for the running window.
         "StartupWMClass=Prism\n"
     )
-    (dist / "PRISM.desktop").write_text(entry)
+    (dist / "PRISM.desktop").write_text(entry, encoding="utf-8")
 
 
 def main():

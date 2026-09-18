@@ -131,7 +131,8 @@ def engine_supports_json(exe):
         if _JSON_SUPPORT is None:
             try:
                 proc = subprocess.run([exe, "run", "--help"], capture_output=True,
-                                      text=True, timeout=20)
+                                      text=True, encoding="utf-8",
+                                      errors="replace", timeout=20)
                 _JSON_SUPPORT = "--format" in ((proc.stdout or "") + (proc.stderr or ""))
             except Exception:  # noqa: BLE001
                 _JSON_SUPPORT = False
@@ -310,9 +311,13 @@ def ensure_bundled_agents(project_dir: str, emit=_emit_plain) -> list:
         if src.name.startswith("_"):
             continue
         dest = dest_dir / src.name
-        text = src.read_text()
-        if not dest.is_file() or dest.read_text() != text:
-            dest.write_text(text)
+        text = src.read_text(encoding="utf-8")
+        try:
+            current = dest.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            current = None
+        if current != text:
+            dest.write_text(text, encoding="utf-8")
             written += 1
         installed.append(src.stem)
     if written:
@@ -385,7 +390,8 @@ def list_available_models(timeout=60):
         return []
     try:
         proc = subprocess.run([exe, "models"], capture_output=True,
-                              text=True, timeout=timeout)
+                              text=True, encoding="utf-8", errors="replace",
+                              timeout=timeout)
         if proc.returncode != 0:
             return []
         models = []
@@ -539,7 +545,7 @@ def _run_stream(cmd, cwd, emit, timeout=1200, control=None, json_mode=False):
     emit(f"$ {_display_cmd(cmd)}")
     proc = subprocess.Popen(
         cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, bufsize=1,
+        text=True, encoding="utf-8", errors="replace", bufsize=1,
     )
     if control is not None:
         control.attach(proc)
@@ -780,7 +786,8 @@ def run_opencode_approve_description(pr_id, project_dir, session_id=None,
 
 def aws_cli(*args, region=REGION_DEFAULT):
     cmd = ["aws", "codecommit"] + list(args) + (["--region", region] if region else [])
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    proc = subprocess.run(cmd, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=120)
     if proc.returncode != 0:
         raise RuntimeError(f"aws {' '.join(cmd[2:])} failed:\n{proc.stderr.strip() or proc.stdout.strip()}")
     try:
@@ -929,6 +936,22 @@ def parse_conflicts(text):
     return segments
 
 
+def _read_worktree(path):
+    """Read a working-tree file byte-faithfully.
+
+    `surrogateescape` round-trips bytes that are not valid UTF-8 and
+    `newline=""` hands back line endings untouched, so rewriting a file changes
+    only the hunks the user chose - not its encoding and not its CRLFs.
+    """
+    with open(path, "r", encoding="utf-8", errors="surrogateescape", newline="") as fh:
+        return fh.read()
+
+
+def _write_worktree(path, text):
+    with open(path, "w", encoding="utf-8", errors="surrogateescape", newline="") as fh:
+        fh.write(text)
+
+
 def conflict_hunks(local_repo):
     """Every unresolved conflict in the working tree, as structured data.
 
@@ -936,13 +959,14 @@ def conflict_hunks(local_repo):
     it — the markers only exist on disk at that moment.
     """
     proc = subprocess.run(["git", "diff", "--name-only", "--diff-filter=U"],
-                          cwd=local_repo, capture_output=True, text=True, timeout=60)
+                          cwd=local_repo, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=60)
     files = [ln.strip() for ln in (proc.stdout or "").splitlines() if ln.strip()]
     out = []
     for rel in files:
         path = Path(local_repo) / rel
         try:
-            text = path.read_text(errors="replace")
+            text = _read_worktree(path)
         except Exception:  # noqa: BLE001
             # Binary or unreadable: a side must still be chosen, but there is
             # nothing meaningful to show, so record it without hunks.
@@ -965,7 +989,7 @@ def apply_conflict_choices(local_repo, choices):
     resolved = []
     for rel in sorted({k.split("#")[0] for k in choices}):
         path = Path(local_repo) / rel
-        text = path.read_text(errors="replace")
+        text = _read_worktree(path)
         segments = parse_conflicts(text)
         rebuilt, index = [], 0
         for seg in segments:
@@ -978,7 +1002,7 @@ def apply_conflict_choices(local_repo, choices):
                 raise RuntimeError(f"No choice recorded for {key}; refusing to guess.")
             rebuilt.append(seg[0] if pick == KEEP_CURRENT else seg[1])
             index += 1
-        path.write_text("".join(rebuilt))
+        _write_worktree(path, "".join(rebuilt))
         resolved.append(rel)
     return resolved
 
@@ -1017,7 +1041,9 @@ def _sync_locked(local_repo, dest, src, pr_id, emit, choices=None):
         cmd = ["git"] + list(args)
         if not quiet:
             emit(f"(git:{Path(local_repo).name})$ {' '.join(cmd)}")
-        proc = subprocess.run(cmd, cwd=local_repo, capture_output=True, text=True, timeout=300)
+        proc = subprocess.run(cmd, cwd=local_repo, capture_output=True,
+                              text=True, encoding="utf-8", errors="replace",
+                              timeout=300)
         out = (proc.stdout or "") + (proc.stderr or "")
         if not quiet:
             for line in out.strip().splitlines()[-8:]:
