@@ -1411,8 +1411,8 @@ class UpdateDialog(tk.Toplevel):
         self._clear()
         self._state = "checking"
         self._head("◇", "Checking for updates")
-        self._text(f"Asking GitHub whether anything newer than v{APP_VERSION} "
-                   f"has been released.", "muted")
+        self._text(f"You are on v{APP_VERSION}. This will only take a moment.",
+                   "muted")
         RoundedButton(self._buttons(), text="Cancel", height=32, width=120,
                       font=FONT_B, command=self._close).pack(side="right")
         self._resize()
@@ -1421,7 +1421,7 @@ class UpdateDialog(tk.Toplevel):
         self._clear()
         self._state = "current"
         self._head("✓", "You are up to date", tone="good")
-        self._text(f"v{APP_VERSION} is the latest release.")
+        self._text(f"You are running the latest version of PRISM (v{APP_VERSION}).")
         RoundedButton(self._buttons(), text="Close", height=32, width=120,
                       font=FONT_B, command=self._close).pack(side="right")
         self._resize()
@@ -1456,7 +1456,7 @@ class UpdateDialog(tk.Toplevel):
                           command=self._start_install).pack(side="right", padx=(0, 8))
         else:
             self._text(f"\nNo build for {U.platform_key()} in this release.", "warn")
-            RoundedButton(row, text="Open releases", height=32, width=140,
+            RoundedButton(row, text="Downloads", height=32, width=130,
                           font=FONT_B, command=self._open_page).pack(side="right",
                                                                      padx=(0, 8))
         self._resize()
@@ -1478,10 +1478,10 @@ class UpdateDialog(tk.Toplevel):
         self._clear()
         self._state = "installed"
         self._head("✓", f"Updated to v{self._release.version}", tone="good")
-        note = ("The download matched its published checksum."
+        note = ("The download was verified before it was installed."
                 if verified else
-                "This release published no checksum, so the download could "
-                "not be verified beyond its size.")
+                "The download could not be verified, so check it behaves as "
+                "you expect.")
         self._text(f"{note}\n\nPRISM has to restart to run the new version. "
                    f"It keeps nothing on disk, so anything still on screen is "
                    f"lost when it does.")
@@ -1501,7 +1501,7 @@ class UpdateDialog(tk.Toplevel):
         row = self._buttons()
         RoundedButton(row, text="Close", height=32, width=110, font=FONT_B,
                       command=self._close).pack(side="right")
-        RoundedButton(row, text="Open releases", height=32, width=140,
+        RoundedButton(row, text="Downloads", height=32, width=130,
                       font=FONT_B,
                       command=self._open_page).pack(side="right", padx=(0, 8))
         self._resize()
@@ -1515,9 +1515,9 @@ class UpdateDialog(tk.Toplevel):
             rel = U.check()
             self._q.put(("release", rel))
         except U.UpdateError as exc:
-            self._q.put(("error", str(exc)))
+            self._q.put(("check-failed", str(exc)))
         except Exception as exc:  # noqa: BLE001
-            self._q.put(("error", f"Unexpected problem checking: {exc}"))
+            self._q.put(("check-failed", str(exc)))
 
     def _work_install(self):
         try:
@@ -1547,6 +1547,9 @@ class UpdateDialog(tk.Toplevel):
                 elif kind == "cancelled":
                     self._close()
                     return
+                elif kind == "check-failed":
+                    self._show_error(payload, tone="warn",
+                                     title="Could not check for updates")
                 elif kind == "error":
                     self._show_error(payload)
         except queue.Empty:

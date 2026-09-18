@@ -277,5 +277,47 @@ class VersionModule(unittest.TestCase):
         self.assertGreater(u.parse_version(version.__version__), (0,))
 
 
+class NothingPublishedYet(unittest.TestCase):
+    """No releases at all must read as "up to date", not as a failure.
+
+    Before a project's first release this is the normal answer to "is there an
+    update", and surfacing it as an error told every user something was broken
+    when nothing was.
+    """
+
+    def _check_against(self, raising):
+        real = u.urllib.request.urlopen
+        u.urllib.request.urlopen = raising
+        self.addCleanup(setattr, u.urllib.request, "urlopen", real)
+        return u.check(timeout=1)
+
+    def test_a_missing_release_list_is_not_an_error(self):
+        def raise_404(*a, **k):
+            raise u.urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+        self.assertIsNone(self._check_against(raise_404))
+
+    def test_a_real_failure_still_raises(self):
+        def raise_500(*a, **k):
+            raise u.urllib.error.HTTPError("u", 500, "Server Error", {}, None)
+        with self.assertRaises(u.UpdateError):
+            self._check_against(raise_500)
+
+    def test_being_offline_still_raises(self):
+        def refuse(*a, **k):
+            raise u.urllib.error.URLError("Connection refused")
+        with self.assertRaises(u.UpdateError):
+            self._check_against(refuse)
+
+    def test_no_user_facing_message_names_the_hosting_service(self):
+        """The dialog shows these strings as-is; how it checks is not the
+        user's concern, and naming a service invites 'is that my problem?'."""
+        import inspect
+        for fn in (u._open, u.check, u.download, u.verify, u.apply_update):
+            src = inspect.getsource(fn)
+            for line in src.splitlines():
+                if "raise " in line or "UpdateError(" in line or '"' in line:
+                    self.assertNotIn("GitHub", line, f"in {fn.__name__}: {line.strip()}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
