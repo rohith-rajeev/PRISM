@@ -78,7 +78,7 @@ PyInstaller can't cross-compile, so each OS builds on its own machine — push t
 uploads them as artifacts. See [`desktop/README.md`](desktop/README.md).
 
 ## UI
-Three screens behind one header (badge, live job tally, back to the list):
+Four screens behind one header (badge, live job tally, Help, back to the list):
 
 - **Jobs** — one row per job: status, target, verdict, impact, Stop, dismiss.
 - **New job** — Project card plus a two-column row pairing Repository mapping
@@ -86,7 +86,12 @@ Three screens behind one header (badge, live job tally, back to the list):
   projects), then `Start Prisming`.
 - **Job detail** — a one-line target header with `Stop`, a progress bar, a
   compact Verdict + Impact row, the conditional reviewer-question panel, and
-  the conversation console with an inline Clear. The shipped theme is dark only — there is no
+  the conversation console with an inline Clear.
+- **Help** — the user manual, rendered from `docs/MANUAL.md` into the app's own
+  palette, plus `Check for updates`.
+
+The version sits quietly in the bottom-right corner and opens Help when
+clicked. The shipped theme is dark only — there is no
 theme toggle. All custom widgets are hand-drawn stdlib Tkinter canvas — still
 zero dependencies.
 
@@ -112,6 +117,25 @@ even it hands that text back for PRISM to write. Every agent denies `edit`,
 and `aws codecommit merge/update` commands. `agents/_shared-contract.md`
 documents the decision block they all answer with.
 
+## Updating
+`?  Help` → `Check for updates` asks GitHub for the latest release. If it is
+newer, PRISM shows the version and its notes, and can install it: the asset for
+the running platform is downloaded, checked against the `SHA256SUMS` published
+beside it, unpacked and swapped in, then PRISM offers to restart.
+
+- The previous copy is renamed rather than deleted, so a failed swap rolls back
+  and a locked executable on Windows still updates. It is removed at the next
+  launch.
+- It refuses while any job is running or queued — updating restarts a program
+  that keeps nothing on disk.
+- From a source checkout there is nothing to replace; it says to `git pull`.
+- Checking happens only when asked. There is no background polling.
+
+Releases are made by pushing a `v*` tag, which builds all three platforms and
+attaches `PRISM-linux-x86_64.tar.gz`, `PRISM-macos-arm64.zip`,
+`PRISM-windows-x86_64.zip` and `SHA256SUMS`. Workflow artifacts are not used:
+they need a token even on a public repository and expire on a retention clock.
+
 ## Prerequisites
 - `opencode` on PATH (provides the agent runtime + model list). PRISM also
   looks in `~/.opencode/bin` and `~/.local/bin`, so launching from a desktop
@@ -119,12 +143,15 @@ documents the decision block they all answer with.
 - `aws` CLI (CodeCommit access) + `git`
 
 ## Files
-- `app.py` — PRISM UI (three screens, threaded, live log, dry-run toggle)
+- `app.py` — PRISM UI (four screens, threaded, live log, dry-run toggle)
 - `jobs.py` — job model and scheduler (no Tkinter, unit-tested)
 - `orchestrator.py` — backend: reviewer runs, verdict parsing, CodeCommit merge/sync
+- `updater.py` — release check, download, checksum and in-place swap (no Tkinter, unit-tested)
+- `version.py` — the version, in one place; CI refuses a tag that disagrees with it
 - `tests/` — `python3 -m unittest discover -s tests`
 - `agents/` — one agent per pipeline step, plus `_shared-contract.md`
 - `desktop/` — packaging into a standalone executable (build-time only)
+- `docs/MANUAL.md` — the user manual, also shipped as the in-app Help screen
 - `docs/requirements/PRISM.md` — full tool documentation
 - No runtime dependencies: `requirements.txt` intentionally empty.
 

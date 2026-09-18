@@ -49,8 +49,9 @@ def preflight():
     except ImportError:
         fail(f"PyInstaller is missing — install it with:\n"
              f"    {sys.executable} -m pip install -r {Path('desktop') / 'requirements-build.txt'}")
-    for rel in ("app.py", "orchestrator.py", "jobs.py",
-                Path("agents") / "pr-reviewer.md"):
+    for rel in ("app.py", "orchestrator.py", "jobs.py", "updater.py",
+                "version.py", Path("agents") / "pr-reviewer.md",
+                Path("docs") / "MANUAL.md"):
         if not (ROOT / rel).is_file():
             fail(f"missing {rel} — run this from the PRISM checkout")
 
@@ -124,6 +125,8 @@ def main():
     # and orchestrator.py finds it via sys._MEIPASS. PyInstaller's --add-data separator is ':' on POSIX
     # and ';' on Windows.
     agent_src = ROOT / "agents"
+    # The manual is the in-app help, so it ships too and is found the same way.
+    manual_src = ROOT / "docs" / "MANUAL.md"
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--noconfirm", "--clean",
@@ -135,8 +138,11 @@ def main():
         "--specpath", str(BUILD),
         "--paths", str(ROOT),
         "--add-data", f"{agent_src}{os.pathsep}agents",
+        "--add-data", f"{manual_src}{os.pathsep}docs",
         "--hidden-import", "orchestrator",
         "--hidden-import", "jobs",
+        "--hidden-import", "updater",
+        "--hidden-import", "version",
         # Tkinter is the whole UI; everything else the stdlib drags in is dead
         # weight in a GUI binary.
         "--exclude-module", "test",

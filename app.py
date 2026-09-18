@@ -24,6 +24,24 @@ from orchestrator import (  # noqa: E402
     STAGE_REVIEW, STAGE_DESCRIBE, STAGE_MERGE_CHECK, STAGE_SYNC, STAGE_MERGE,
 )
 import jobs as J  # noqa: E402
+import updater as U  # noqa: E402
+from orchestrator import TOOL_DIR  # noqa: E402
+from version import __version__ as APP_VERSION  # noqa: E402
+
+# The manual doubles as the in-app help, so it ships inside the build and is
+# found the same way the agent bundle is.
+MANUAL_PATH = TOOL_DIR / "docs" / "MANUAL.md"
+
+
+def load_manual():
+    """The user manual, or a pointer to it if this build somehow lacks it."""
+    for candidate in (MANUAL_PATH, Path(__file__).parent / "docs" / "MANUAL.md"):
+        try:
+            return candidate.read_text(encoding="utf-8")
+        except OSError:
+            continue
+    return ("# Manual unavailable\n\nThis build does not contain the manual. "
+            "Read it online at the project's repository.\n")
 
 # ---------- palette (dark only) ----------
 PAL = {
@@ -1125,8 +1143,480 @@ class Picker(tk.Frame):
             self._popup = None
 
 
+# ---------------------------------------------------------------- help text
+_INLINE = re.compile(r"\*\*(.+?)\*\*|`([^`]+)`|\[([^\]]+)\]\([^)]+\)"
+                     r"|\*([^*\n]+)\*")
+
+
+def _plain(s):
+    """Inline Markdown stripped back to the text it decorates."""
+    s = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", s)
+    return s.replace("**", "").replace("`", "")
+
+
+def _inline(widget, s, base):
+    """Bold, inline code and links, inside one line of body text."""
+    pos = 0
+    for m in _INLINE.finditer(s):
+        if m.start() > pos:
+            widget.insert("end", s[pos:m.start()], base)
+        if m.group(1) is not None:
+            # Bold wrapping inline code is common in the manual's numbered
+            # steps; one pass cannot nest tags, so the markers just go.
+            widget.insert("end", _plain(m.group(1)), (base, "b"))
+        elif m.group(2) is not None:
+            widget.insert("end", m.group(2), (base, "mono"))
+        elif m.group(3) is not None:
+            widget.insert("end", m.group(3), (base, "link"))
+        else:
+            widget.insert("end", _plain(m.group(4)), (base, "i"))
+        pos = m.end()
+    widget.insert("end", s[pos:] + "\n", base)
+
+
+def _flush_table(widget, rows):
+    """Lay a Markdown pipe table out in aligned monospace.
+
+    The source columns are not padded, so rendering the raw lines would give
+    ragged pipes. Measuring each column first is a few lines and makes the
+    verdict and status tables readable, which is most of why they are tables.
+    """
+    if not rows:
+        return
+    cells = [[_plain(c.strip()) for c in r.strip().strip("|").split("|")]
+             for r in rows]
+    # The |---|---| separator carries no content.
+    cells = [r for r in cells if not all(set(c) <= set("-: ") and c for c in r)]
+    if not cells:
+        return
+    width = max(len(r) for r in cells)
+    cells = [r + [""] * (width - len(r)) for r in cells]
+    pads = [max(len(r[i]) for r in cells) for i in range(width)]
+    for n, row in enumerate(cells):
+        line = "  ".join(c.ljust(pads[i]) for i, c in enumerate(row)).rstrip()
+        widget.insert("end", "  " + line + "\n", "th" if n == 0 else "td")
+    widget.insert("end", "\n")
+
+
+def render_markdown(widget, md):
+    """Paint the subset of Markdown the manual actually uses.
+
+    Not a general parser: it handles the headings, lists, tables, fences and
+    inline runs that appear in MANUAL.md, because shipping a real one would
+    cost more than the feature is worth.
+
+    Source paragraphs are re-flowed rather than copied line for line. The file
+    is hard-wrapped at about 75 columns for reading as text; pasting those
+    breaks into a widget four hundred pixels wider leaves a ragged column with
+    a gutter of dead space beside it.
+    """
+    widget.config(state="normal")
+    widget.delete("1.0", "end")
+    fenced = False
+    table = []
+    pending = None          # (tag, [lines]) waiting to be re-flowed
+
+    def flush_para():
+        nonlocal pending
+        if pending:
+            tag, lines = pending
+            _inline(widget, " ".join(lines), tag)
+            pending = None
+
+    def flush_table():
+        nonlocal table
+        if table:
+            _flush_table(widget, table)
+            table = []
+
+    for raw in md.splitlines():
+        line = raw.rstrip()
+        body = line.strip()
+
+        if body.startswith("```"):
+            flush_para(); flush_table()
+            fenced = not fenced
+            continue
+        if fenced:
+            widget.insert("end", "  " + line + "\n", "code")
+            continue
+        if body.startswith("|"):
+            flush_para()
+            table.append(body)
+            continue
+        flush_table()
+
+        if not body:
+            flush_para()
+            continue
+        if body.startswith("### "):
+            flush_para(); widget.insert("end", body[4:] + "\n", "h3"); continue
+        if body.startswith("## "):
+            flush_para(); widget.insert("end", body[3:] + "\n", "h2"); continue
+        if body.startswith("# "):
+            flush_para(); widget.insert("end", body[2:] + "\n", "h1"); continue
+        if re.fullmatch(r"[-*_]{3,}", body):
+            flush_para()               # a rule; the heading spacing says it better
+            continue
+        if body.startswith("> "):
+            if pending and pending[0] == "quote":
+                pending[1].append(body[2:])
+            else:
+                flush_para()
+                pending = ("quote", [body[2:]])
+            continue
+        if body.startswith(("- ", "* ")):
+            flush_para(); pending = ("li", ["• " + body[2:]]); continue
+        m = re.match(r"^(\d+)\.\s+(.*)", body)
+        if m:
+            flush_para(); pending = ("li", [m.group(1) + ". " + m.group(2)]); continue
+        # A plain line continues whatever block is open - a wrapped paragraph,
+        # or the second line of a bullet - and otherwise starts a paragraph.
+        if pending:
+            pending[1].append(body)
+        else:
+            pending = ("body", [body])
+    flush_para()
+    flush_table()
+    widget.config(state="disabled")
+
+
+def style_markdown(widget):
+    """Tags for `render_markdown`, in the app palette."""
+    widget.tag_config("h1", font=(_FAMILY, 15, "bold"), foreground=PAL["text"],
+                      spacing1=4, spacing3=8)
+    widget.tag_config("h2", font=(_FAMILY, 12, "bold"), foreground=PAL["accent_text"],
+                      spacing1=16, spacing3=6)
+    widget.tag_config("h3", font=(_FAMILY, 11, "bold"), foreground=PAL["text"],
+                      spacing1=10, spacing3=4)
+    # spacing2 keeps re-flowed lines of one paragraph tighter than the gap
+    # between paragraphs, which is what makes the column readable.
+    widget.tag_config("body", font=FONT_S, foreground=PAL["log_fg"],
+                      spacing2=2, spacing3=9)
+    widget.tag_config("li", font=FONT_S, foreground=PAL["log_fg"], spacing2=2,
+                      spacing3=5, lmargin1=16, lmargin2=30)
+    widget.tag_config("quote", font=FONT_S, foreground=PAL["muted"], spacing2=2,
+                      spacing3=9, lmargin1=18, lmargin2=18)
+    widget.tag_config("code", font=_mono(), foreground=PAL["accent_text"])
+    widget.tag_config("mono", font=_mono(), foreground=PAL["accent_text"])
+    widget.tag_config("th", font=_mono(), foreground=PAL["text"])
+    widget.tag_config("td", font=_mono(), foreground=PAL["log_fg"])
+    widget.tag_config("b", font=(_FAMILY, 10, "bold"), foreground=PAL["text"])
+    widget.tag_config("i", font=(_FAMILY, 10, "italic"), foreground=PAL["text"])
+    widget.tag_config("link", font=FONT_S, foreground=PAL["accent"])
+
+
+# ---------------------------------------------------------------- updating
+class _Bar(tk.Canvas):
+    """A determinate download bar; the staged ProgressBar is stage-shaped."""
+
+    def __init__(self, parent, width=400, height=6):
+        super().__init__(parent, width=width, height=height, bg=PAL["card"],
+                         highlightthickness=0, bd=0)
+        # Not self._w / self._h: Tkinter keeps the widget's Tcl path name in
+        # self._w, and shadowing it breaks every call made on the widget.
+        self._px, self._py, self._frac = width, height, 0.0
+
+    def set(self, frac):
+        self._frac = max(0.0, min(1.0, frac))
+        self._draw()
+
+    def _draw(self):
+        self.delete("all")
+        r = self._py // 2
+        _rr(self, 0, 0, self._px, self._py, r, PAL["field"], None)
+        if self._frac > 0:
+            _rr(self, 0, 0, max(self._py, int(self._px * self._frac)), self._py,
+                r, PAL["accent"], None)
+
+
+class UpdateDialog(tk.Toplevel):
+    """Check for a newer release and, if the user agrees, install it.
+
+    All network and disk work happens on a worker thread which only ever puts
+    messages on a queue; this dialog polls that queue with `after`, so every
+    Tk call still happens on the Tk thread - the same rule the job pump keeps.
+    """
+
+    def __init__(self, parent, app):
+        super().__init__(parent)
+        self.withdraw()
+        self.app = app
+        self.title("Software update")
+        self.configure(bg=PAL["page"])
+        self.resizable(False, False)
+        self.transient(parent)
+
+        self._q = queue.Queue()
+        self._stop = threading.Event()
+        self._release = None
+        self._installed_root = None
+        self._frame = 0
+
+        self.card = RoundedCard(self, outline_key="border")
+        self.card.pack(fill="both", expand=True, padx=10, pady=10)
+        self.body = self.card.inner
+        self.body.config(padx=16, pady=14)
+
+        self.bind("<Escape>", lambda _e: self._close())
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        self._show_checking()
+        self.update_idletasks()
+        self._centre(parent)
+        self.deiconify()
+        self.grab_set()
+        self._spawn(self._work_check)
+        self._pump()
+
+    # ----- scaffolding -----
+    def _centre(self, parent):
+        w, h = self.winfo_reqwidth(), self.winfo_reqheight()
+        try:
+            x = parent.winfo_rootx() + (parent.winfo_width() - w) // 2
+            y = parent.winfo_rooty() + (parent.winfo_height() - h) // 3
+        except Exception:  # noqa: BLE001
+            x = y = 200
+        self.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+    def _clear(self):
+        for child in self.body.winfo_children():
+            child.destroy()
+
+    def _head(self, glyph, title, tone="accent"):
+        row = tk.Frame(self.body, bg=PAL["card"])
+        row.pack(fill="x", pady=(0, 8))
+        self._glyph = tk.Label(row, text=glyph, font=(_FAMILY, 14),
+                               bg=PAL["card"], fg=PAL[tone])
+        self._glyph.pack(side="left", padx=(0, 10))
+        tk.Label(row, text=title, font=(_FAMILY, 12, "bold"), bg=PAL["card"],
+                 fg=PAL["text"], anchor="w").pack(side="left")
+
+    def _text(self, message, tone="text"):
+        tk.Label(self.body, text=message, font=FONT_S, bg=PAL["card"],
+                 fg=PAL[tone], justify="left", anchor="w",
+                 wraplength=430).pack(fill="x")
+
+    def _buttons(self):
+        row = tk.Frame(self.body, bg=PAL["card"])
+        row.pack(fill="x", pady=(14, 0))
+        return row
+
+    def _resize(self):
+        self.update_idletasks()
+        self.geometry("")
+        self.app._repaint(self)
+
+    # ----- states -----
+    def _show_checking(self):
+        self._clear()
+        self._state = "checking"
+        self._head("◇", "Checking for updates")
+        self._text(f"Asking GitHub whether anything newer than v{APP_VERSION} "
+                   f"has been released.", "muted")
+        RoundedButton(self._buttons(), text="Cancel", height=32, width=120,
+                      font=FONT_B, command=self._close).pack(side="right")
+        self._resize()
+
+    def _show_current(self):
+        self._clear()
+        self._state = "current"
+        self._head("✓", "You are up to date", tone="good")
+        self._text(f"v{APP_VERSION} is the latest release.")
+        RoundedButton(self._buttons(), text="Close", height=32, width=120,
+                      font=FONT_B, command=self._close).pack(side="right")
+        self._resize()
+
+    def _show_available(self, rel):
+        self._clear()
+        self._state = "available"
+        self._release = rel
+        self._head("↑", f"PRISM v{rel.version} is available")
+        self._text(f"You are running v{APP_VERSION}.", "muted")
+        notes = (rel.notes or "").strip()
+        if notes:
+            box = tk.Frame(self.body, bg=PAL["log_bg"])
+            box.pack(fill="both", expand=True, pady=(10, 0))
+            txt = tk.Text(box, height=7, width=54, font=FONT_S, wrap="word",
+                          bg=PAL["log_bg"], fg=PAL["log_fg"], relief="flat",
+                          highlightthickness=0, borderwidth=0, padx=8, pady=6)
+            bar = ThinScrollbar(box, command=txt.yview, bg_key="log_bg")
+            txt.configure(yscrollcommand=bar.set)
+            txt.pack(side="left", fill="both", expand=True)
+            bar.pack(side="right", fill="y")
+            # The notes are Markdown - GitHub generates them that way - and
+            # the screen already knows how to draw Markdown.
+            style_markdown(txt)
+            render_markdown(txt, notes)
+        row = self._buttons()
+        RoundedButton(row, text="Not now", height=32, width=110, font=FONT_B,
+                      command=self._close).pack(side="right")
+        if rel.has_asset_for_this_platform:
+            RoundedButton(row, text="Download and install", height=32, width=180,
+                          font=FONT_B, style="primary",
+                          command=self._start_install).pack(side="right", padx=(0, 8))
+        else:
+            self._text(f"\nNo build for {U.platform_key()} in this release.", "warn")
+            RoundedButton(row, text="Open releases", height=32, width=140,
+                          font=FONT_B, command=self._open_page).pack(side="right",
+                                                                     padx=(0, 8))
+        self._resize()
+
+    def _show_downloading(self):
+        self._clear()
+        self._state = "downloading"
+        self._head("↓", f"Downloading v{self._release.version}")
+        self._note = tk.Label(self.body, text="Starting…", font=FONT_S,
+                              bg=PAL["card"], fg=PAL["muted"], anchor="w")
+        self._note.pack(fill="x")
+        self._bar = _Bar(self.body)
+        self._bar.pack(fill="x", pady=(10, 0))
+        RoundedButton(self._buttons(), text="Cancel", height=32, width=120,
+                      font=FONT_B, command=self._cancel).pack(side="right")
+        self._resize()
+
+    def _show_installed(self, verified):
+        self._clear()
+        self._state = "installed"
+        self._head("✓", f"Updated to v{self._release.version}", tone="good")
+        note = ("The download matched its published checksum."
+                if verified else
+                "This release published no checksum, so the download could "
+                "not be verified beyond its size.")
+        self._text(f"{note}\n\nPRISM has to restart to run the new version. "
+                   f"It keeps nothing on disk, so anything still on screen is "
+                   f"lost when it does.")
+        row = self._buttons()
+        RoundedButton(row, text="Later", height=32, width=110, font=FONT_B,
+                      command=self._close).pack(side="right")
+        RoundedButton(row, text="Restart now", height=32, width=150, font=FONT_B,
+                      style="primary", command=self._restart).pack(side="right",
+                                                                   padx=(0, 8))
+        self._resize()
+
+    def _show_error(self, message, tone="bad", title="Update failed"):
+        self._clear()
+        self._state = "error"
+        self._head("⚠", title, tone=tone)
+        self._text(message)
+        row = self._buttons()
+        RoundedButton(row, text="Close", height=32, width=110, font=FONT_B,
+                      command=self._close).pack(side="right")
+        RoundedButton(row, text="Open releases", height=32, width=140,
+                      font=FONT_B,
+                      command=self._open_page).pack(side="right", padx=(0, 8))
+        self._resize()
+
+    # ----- worker side -----
+    def _spawn(self, fn):
+        threading.Thread(target=fn, daemon=True).start()
+
+    def _work_check(self):
+        try:
+            rel = U.check()
+            self._q.put(("release", rel))
+        except U.UpdateError as exc:
+            self._q.put(("error", str(exc)))
+        except Exception as exc:  # noqa: BLE001
+            self._q.put(("error", f"Unexpected problem checking: {exc}"))
+
+    def _work_install(self):
+        try:
+            root, verified = U.apply_update(
+                self._release,
+                progress=lambda d, t: self._q.put(("progress", (d, t))),
+                cancel=self._stop.is_set)
+            self._q.put(("installed", (root, verified)))
+        except U.Cancelled:
+            self._q.put(("cancelled", None))
+        except U.UpdateError as exc:
+            self._q.put(("error", str(exc)))
+        except Exception as exc:  # noqa: BLE001
+            self._q.put(("error", f"Unexpected problem installing: {exc}"))
+
+    def _pump(self):
+        try:
+            while True:
+                kind, payload = self._q.get_nowait()
+                if kind == "release":
+                    self._show_current() if payload is None else self._show_available(payload)
+                elif kind == "progress":
+                    self._on_progress(*payload)
+                elif kind == "installed":
+                    self._installed_root, verified = payload
+                    self._show_installed(verified)
+                elif kind == "cancelled":
+                    self._close()
+                    return
+                elif kind == "error":
+                    self._show_error(payload)
+        except queue.Empty:
+            pass
+        if self._state == "checking":
+            self._frame += 1
+            self._glyph.config(text="◇◈◆◈"[self._frame % 4])
+        try:
+            self.after(80, self._pump)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _on_progress(self, done, total):
+        if total:
+            self._bar.set(done / total)
+            self._note.config(text=f"{done / 1048576:.1f} MB of "
+                                   f"{total / 1048576:.1f} MB")
+        else:
+            self._note.config(text=f"{done / 1048576:.1f} MB")
+
+    # ----- actions -----
+    def _start_install(self):
+        busy = [j for j in self.app.manager.jobs.values() if j.is_active]
+        if busy:
+            self._show_error(
+                f"{_plural(len(busy), 'job is', 'jobs are')} still running or "
+                f"queued. Installing an update restarts PRISM, and it keeps "
+                f"nothing on disk, so their verdicts would be lost."
+                f"\n\nFinish or stop them first, then check again.",
+                tone="warn", title="Not while jobs are running")
+            return
+        ok, reason = U.can_self_update()
+        if not ok:
+            self._show_error(reason, tone="warn", title="Cannot update in place")
+            return
+        self._show_downloading()
+        self._spawn(self._work_install)
+
+    def _cancel(self):
+        self._stop.set()
+        self._note.config(text="Cancelling…")
+
+    def _open_page(self):
+        import webbrowser
+        page = self._release.page_url if self._release else U.RELEASES_URL
+        try:
+            webbrowser.open(page)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _restart(self):
+        try:
+            U.relaunch(self._installed_root)
+        except Exception as exc:  # noqa: BLE001
+            self._show_error(f"Installed, but could not start the new copy: "
+                             f"{exc}\n\nLaunch PRISM again yourself.")
+            return
+        self.app.destroy()
+
+    def _close(self):
+        self._stop.set()
+        try:
+            self.grab_release()
+        except Exception:  # noqa: BLE001
+            pass
+        self.destroy()
+
+
 class App(tk.Tk):
-    """Controller. Owns the jobs, the queue pump, and three sibling screens.
+    """Controller. Owns the jobs, the queue pump, and four sibling screens.
 
     Only one set of run-output widgets exists: the detail screen renders
     whichever job is selected rather than there being one screen per job.
@@ -1152,6 +1642,10 @@ class App(tk.Tk):
         self._build()
         self._drain_job = self.after(80, self._drain_logs)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        # If the last run of PRISM updated itself, the copy it replaced is
+        # still sitting next to this one. It could not be deleted then - on
+        # Windows it was the running process - but it can be now.
+        U.cleanup_previous()
 
     # ----- themed primitives -----
     def _lab(self, parent, text, font=None, fg="muted", bg="card"):
@@ -1193,9 +1687,22 @@ class App(tk.Tk):
         self.pill = StatusPill(h)
         self.pill.pack(side="right")
         self.pill.set("Idle", "muted")
+        self.help_btn = RoundedButton(h, text="?  Help", style="outline", height=30,
+                                      width=92, font=FONT_S, command=self.show_help)
+        self.help_btn.pack(side="right", padx=(0, 10))
         self.back_btn = RoundedButton(h, text="←  Jobs", style="outline", height=30,
                                       width=100, font=FONT_S, command=self.show_jobs)
         # packed/unpacked by the router
+
+        # ---- footer: the version, quiet, out of the way ----
+        foot = tk.Frame(root, bg=PAL["page"])
+        foot.pack(side="bottom", fill="x", pady=(4, 0))
+        self.version_lb = tk.Label(foot, text=f"v{APP_VERSION}", font=FONT_XS,
+                                   bg=PAL["page"], fg=PAL["muted"], cursor="hand2")
+        self.version_lb.pack(side="right")
+        self.version_lb.bind("<Button-1>", lambda _e: self.show_help())
+        self.version_lb.bind("<Enter>", lambda e: e.widget.config(fg=PAL["accent"]))
+        self.version_lb.bind("<Leave>", lambda e: e.widget.config(fg=PAL["muted"]))
 
         # ---- one container, three sibling screens, one mapped at a time ----
         self.container = tk.Frame(root, bg=PAL["page"])
@@ -1204,10 +1711,12 @@ class App(tk.Tk):
         self.jobs_screen = tk.Frame(self.container, bg=PAL["page"])
         self.new_screen = tk.Frame(self.container, bg=PAL["page"])
         self.detail_screen = tk.Frame(self.container, bg=PAL["page"])
+        self.help_screen = tk.Frame(self.container, bg=PAL["page"])
 
         self._build_jobs_screen(self.jobs_screen)
         self._build_new_screen(self.new_screen)
         self._build_detail_screen(self.detail_screen)
+        self._build_help_screen(self.help_screen)
 
         self._draw_badge()
         self._refresh_detection()
@@ -1232,6 +1741,53 @@ class App(tk.Tk):
             text="No jobs yet.\n\nStart one with “New job” — each pull request "
                  "runs as its own job,\nand several can run at the same time.",
             font=FONT_S, bg=PAL["page"], fg=PAL["muted"], justify="center")
+
+    # ---------------- screen 4: the manual, built in ----------------
+    def _build_help_screen(self, parent):
+        head = tk.Frame(parent, bg=PAL["page"])
+        head.pack(fill="x", pady=(0, 8))
+        tk.Label(head, text="HELP", font=FONT_XS, bg=PAL["page"],
+                 fg=PAL["muted"]).pack(side="left")
+        self.update_btn = RoundedButton(head, text="Check for updates",
+                                        command=self._check_updates,
+                                        style="outline", height=32, width=170,
+                                        font=FONT_B)
+        self.update_btn.pack(side="right")
+        tk.Label(head, text=f"Version {APP_VERSION}", font=FONT_XS,
+                 bg=PAL["page"], fg=PAL["muted"]).pack(side="right", padx=(0, 12))
+
+        card = RoundedCard(parent, stretch=True)
+        card.pack(fill="both", expand=True)
+        inner = card.inner
+        inner.config(padx=14, pady=10)
+        body = tk.Frame(inner, bg=PAL["card"])
+        body.pack(fill="both", expand=True)
+        # Read-only, but still a Text: the manual is long enough to need
+        # scrolling and varied enough to need tags.
+        self.manual = tk.Text(body, font=FONT_S, bg=PAL["card"], fg=PAL["log_fg"],
+                              relief="flat", wrap="word", highlightthickness=0,
+                              borderwidth=0, padx=4, pady=2, cursor="arrow",
+                              height=10)
+        bar = ThinScrollbar(body, command=self.manual.yview, bg_key="card")
+        self.manual.configure(yscrollcommand=bar.set)
+        self.manual.pack(side="left", fill="both", expand=True)
+        bar.pack(side="right", fill="y", padx=(6, 0))
+        style_markdown(self.manual)
+        render_markdown(self.manual, load_manual())
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.manual.bind(seq, self._manual_wheel)
+
+    def _manual_wheel(self, e):
+        step = -1 if (getattr(e, "delta", 0) > 0 or getattr(e, "num", 0) == 4) else 1
+        self.manual.yview_scroll(step * 3, "units")
+        return "break"
+
+    def _check_updates(self):
+        UpdateDialog(self, self)
+
+    def show_help(self):
+        self._close_pickers()
+        self._show_screen(self.help_screen)
 
     # ---------------- screen 2: set up a new job ----------------
     def _build_new_screen(self, parent):
@@ -1707,7 +2263,8 @@ class App(tk.Tk):
     # ----- run -----
     # ---------------- navigation ----------------
     def _show_screen(self, screen):
-        for s in (self.jobs_screen, self.new_screen, self.detail_screen):
+        for s in (self.jobs_screen, self.new_screen, self.detail_screen,
+                  self.help_screen):
             if s is not screen and s.winfo_manager():
                 s.pack_forget()
         if not screen.winfo_manager():
