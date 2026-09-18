@@ -319,5 +319,75 @@ class NothingPublishedYet(unittest.TestCase):
                     self.assertNotIn("GitHub", line, f"in {fn.__name__}: {line.strip()}")
 
 
+class VersionSequence(unittest.TestCase):
+    """One tenth per release, carrying into the whole number at .9."""
+
+    def setUp(self):
+        import version
+        self.v = version
+
+    def test_the_documented_sequence(self):
+        seq, cur = [], "2.0"
+        for _ in range(12):
+            cur = self.v.next_version(cur)
+            seq.append(cur)
+        self.assertEqual(seq, ["2.1", "2.2", "2.3", "2.4", "2.5", "2.6", "2.7",
+                               "2.8", "2.9", "3.0", "3.1", "3.2"])
+
+    def test_the_carry_happens_at_nine_on_every_whole_number(self):
+        for before, after in (("2.9", "3.0"), ("3.9", "4.0"), ("9.9", "10.0"),
+                              ("0.9", "1.0")):
+            with self.subTest(before=before):
+                self.assertEqual(self.v.next_version(before), after)
+
+    def test_a_tenth_minor_is_never_produced(self):
+        """The scheme is a counter with one decimal place, so x.10 would both
+        sort wrong as text and break the every-release-is-0.1 promise."""
+        cur = "1.0"
+        for _ in range(40):
+            cur = self.v.next_version(cur)
+            self.assertLessEqual(int(cur.split(".")[1]), 9, cur)
+
+    def test_the_highest_candidate_wins(self):
+        self.assertEqual(self.v.next_version("v2.3", "2.7", "v1.9"), "2.8")
+
+    def test_junk_and_blanks_are_ignored_rather_than_fatal(self):
+        self.assertEqual(self.v.next_version("", "2.4", "not-a-tag", None), "2.5")
+
+    def test_tag_prefix_is_accepted_either_way(self):
+        self.assertEqual(self.v.next_version("v2.4"), self.v.next_version("2.4"))
+
+    def test_each_new_version_reads_as_newer_to_the_updater(self):
+        """The two modules parse versions independently; if they ever
+        disagreed, a release would ship that no installed copy would take."""
+        cur = "1.8"
+        for _ in range(15):
+            nxt = self.v.next_version(cur)
+            self.assertTrue(u.is_newer(nxt, cur), f"{nxt} not newer than {cur}")
+            cur = nxt
+
+
+class AutoTagWorkflow(unittest.TestCase):
+    """The tagging is automation, so its wiring is worth pinning down."""
+
+    def setUp(self):
+        self.wf = (ROOT / ".github" / "workflows" / "build-desktop.yml").read_text(
+            encoding="utf-8")
+
+    def test_it_only_tags_from_main(self):
+        self.assertIn("github.ref == 'refs/heads/main'", self.wf)
+
+    def test_the_build_runs_from_the_bumped_commit(self):
+        """Building the merge commit instead would ship a binary whose
+        version.py still held the previous number."""
+        self.assertIn("ref: ${{ needs.version.outputs.sha || github.sha }}", self.wf)
+
+    def test_tagging_and_releasing_happen_in_one_run(self):
+        """A push made with GITHUB_TOKEN starts no new workflow, so a tag that
+        was expected to trigger the release would publish nothing."""
+        self.assertIn("tag_name:", self.wf)
+        self.assertIn("needs: [build, version]", self.wf)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
