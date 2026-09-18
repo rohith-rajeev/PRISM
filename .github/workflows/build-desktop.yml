@@ -48,8 +48,8 @@ jobs:
 
       - name: Sanity-check the sources before packaging
         run: |
-          python -m compileall -q app.py orchestrator.py jobs.py desktop/
-          python -c "import ast; [ast.parse(open(f, encoding='utf-8').read()) for f in ('app.py','orchestrator.py','jobs.py')]"
+          python -m compileall -q app.py orchestrator.py jobs.py updater.py version.py desktop/
+          python -c "import ast; [ast.parse(open(f, encoding='utf-8').read()) for f in ('app.py','orchestrator.py','jobs.py','updater.py','version.py')]"
 
       - name: Unit tests
         # Model, scheduler and engine-protocol tests. No Tk and no network, so
@@ -145,11 +145,40 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - name: Flatten artifact tree
+      - uses: actions/checkout@v4
+        with:
+          path: src
+
+      - name: Refuse a tag that disagrees with version.py
+        # The updater compares the running build against a release tag, so a
+        # build labelled differently from the tag it ships under would either
+        # offer an update that is already installed or hide one that is not.
         run: |
+          set -e
+          TAG="${GITHUB_REF_NAME#v}"
+          SRC=$(python -c "import sys; sys.path.insert(0, 'src'); import version; print(version.__version__)")
+          echo "tag=$TAG version.py=$SRC"
+          test "$TAG" = "$SRC" || {
+            echo "::error::tag $GITHUB_REF_NAME does not match version.py ($SRC)"; exit 1; }
+
+      - name: Build the release assets
+        # One archive per platform, named for the platform, so the in-app
+        # updater can pick the right one by name alone. The loose files the CI
+        # artifacts carry are convenient to click through but ambiguous to
+        # match against - two of them are just called PRISM.
+        run: |
+          set -e
           mkdir -p release
-          find artifacts -type f ! -name README.md -exec cp {} release/ \;
+          cp artifacts/PRISM-macos-arm64/PRISM-macos-arm64.zip release/
+          (cd artifacts/PRISM-windows-x86_64 && zip -q -r ../../release/PRISM-windows-x86_64.zip PRISM.exe)
+          tar -czf release/PRISM-linux-x86_64.tar.gz \
+              -C artifacts/PRISM-linux-x86_64 PRISM PRISM.desktop PRISM.png
+          # Checksums the updater verifies the download against before it
+          # replaces anything on disk.
+          (cd release && sha256sum PRISM-* > SHA256SUMS)
+          cat release/SHA256SUMS
           ls -la release
+
       - uses: softprops/action-gh-release@v2
         with:
           files: release/*
