@@ -131,8 +131,13 @@ class SafetyGates(unittest.TestCase):
     def setUp(self):
         importlib.reload(o)
         self.merged = []
+        # A directory that exists on every platform: the pipeline checks the
+        # clone path before anything else, and Windows has no /tmp.
+        self._tmp = tempfile.TemporaryDirectory()
+        self.clone = self._tmp.name
+        self.addCleanup(self._tmp.cleanup)
         o.ensure_bundled_agents = lambda *a, **k: ["pr-reviewer"]
-        o.resolve_repo = lambda r, p, l: (r, "/tmp")
+        o.resolve_repo = lambda r, p, l: (r, self.clone)
         o.run_opencode_review = lambda *a, **k: (REPORT, "ses_x")
         o.run_agent = lambda *a, **k: ("", {"decision": "go", "reason": "looks fine"})
         o.check_ff_mergeable = lambda *a, **k: (True, "ok")
@@ -145,7 +150,7 @@ class SafetyGates(unittest.TestCase):
         o.get_pr = lambda *a, **k: {"status": status, "repositoryName": "repo",
                                     "destinationReference": "main",
                                     "sourceReference": "feat", "description": ""}
-        return o.full_pipeline("/tmp", "repo", "7", local_repo="/tmp",
+        return o.full_pipeline(self.clone, "repo", "7", local_repo=self.clone,
                                emit=lambda *a, **k: None, **kw)
 
     def test_go_does_not_merge_a_request_changes_verdict(self):
