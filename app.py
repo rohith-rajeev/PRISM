@@ -60,7 +60,7 @@ def _ui_family(available=None):
     if sys.platform == "darwin":
         prefer = ("SF Pro Text", ".AppleSystemUIFont", "Helvetica Neue", "Lucida Grande")
     elif sys.platform == "win32":
-        prefer = (_FAMILY, "Tahoma", "Arial")
+        prefer = ("Segoe UI", "Tahoma", "Arial")
     else:
         prefer = ("Ubuntu", "Cantarell", "DejaVu Sans", "Liberation Sans", "Arial")
     if available:
@@ -877,7 +877,7 @@ class Picker(tk.Frame):
         self._search_var = tk.StringVar()
         search = tk.Entry(top, textvariable=self._search_var, font=FONT_S,
                           bg=PAL["card"], fg=PAL["text"], insertbackground=PAL["text"],
-                          relief="flat")
+                          relief="flat", highlightthickness=0, borderwidth=0)
         search.pack(fill="x", padx=6, pady=6, ipady=5)
 
         body = tk.Frame(top, bg=PAL["card"])
@@ -1265,7 +1265,11 @@ class App(tk.Tk):
         lbody.pack(fill="both", expand=True, pady=(4, 0))
         self.log = tk.Text(lbody, height=4, font=_mono(), bg=PAL["log_bg"],
                            fg=PAL["log_fg"], insertbackground=PAL["log_fg"],
-                           relief="flat", wrap="word")
+                           relief="flat", wrap="word",
+                           # Tk draws a focus ring by default. It blends into
+                           # the background on X11 but renders as a hard white
+                           # rectangle around the console on macOS.
+                           highlightthickness=0, borderwidth=0)
         scroll = tk.Scrollbar(lbody, command=self.log.yview)
         self.log.configure(yscrollcommand=scroll.set)
         self.log.pack(side="left", fill="both", expand=True)
