@@ -131,10 +131,36 @@ beside it, unpacked and swapped in, then PRISM offers to restart.
 - From a source checkout there is nothing to replace; it says to `git pull`.
 - Checking happens only when asked. There is no background polling.
 
-Releases are made by pushing a `v*` tag, which builds all three platforms and
-attaches `PRISM-linux-x86_64.tar.gz`, `PRISM-macos-arm64.zip`,
+## Releasing
+**A merge into `main` is a release.** The workflow works out the next version,
+writes it to `version.py`, commits that, tags it and publishes — no manual
+step.
+
+Versions move a tenth at a time and carry into the whole number at `.9`:
+
+    2.0 → 2.1 → … → 2.8 → 2.9 → 3.0 → 3.1 → …
+
+There is deliberately no `2.10`. The rule lives in `version.next_version()`
+beside the version it governs, so it is importable and unit-tested rather than
+buried in YAML. The highest of the existing tags and `version.py` is the base,
+so a tag made by hand is never handed out twice.
+
+Each release attaches `PRISM-linux-x86_64.tar.gz`, `PRISM-macos-arm64.zip`,
 `PRISM-windows-x86_64.zip` and `SHA256SUMS`. Workflow artifacts are not used:
 they need a token even on a public repository and expire on a retention clock.
+
+Two details that are easy to get wrong and are deliberate here:
+
+- **The build runs from the bumped commit**, not from the merge that triggered
+  it. Building the merge would ship a binary whose `version.py` still held the
+  previous number, so it would announce itself as out of date the moment it
+  started.
+- **Tagging and publishing happen in one workflow run.** A push made with
+  `GITHUB_TOKEN` does not start a new workflow, so tagging and waiting for the
+  tag to trigger the release would publish nothing at all.
+
+Pushing a `v*` tag by hand still works and still publishes; CI refuses it if it
+disagrees with `version.py`.
 
 ## Prerequisites
 - `opencode` on PATH (provides the agent runtime + model list). PRISM also
@@ -147,7 +173,7 @@ they need a token even on a public repository and expire on a retention clock.
 - `jobs.py` — job model and scheduler (no Tkinter, unit-tested)
 - `orchestrator.py` — backend: reviewer runs, verdict parsing, CodeCommit merge/sync
 - `updater.py` — release check, download, checksum and in-place swap (no Tkinter, unit-tested)
-- `version.py` — the version, in one place; CI refuses a tag that disagrees with it
+- `version.py` — the version, in one place, plus the rule for what comes next
 - `tests/` — `python3 -m unittest discover -s tests`
 - `agents/` — one agent per pipeline step, plus `_shared-contract.md`
 - `desktop/` — packaging into a standalone executable (build-time only)
