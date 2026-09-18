@@ -30,6 +30,9 @@ is not a git repository, say exactly what is missing and stop.
 
 ## What to do
 
+0. If the local clone has a `graphify-out/` directory at its root, skim
+   `graphify-out/manifest.json` for the repo's module map before exploring by
+   hand — it is cheaper than discovering the same structure via git.
 1. `aws codecommit get-pull-request --pull-request-id <ID> --region <region>`.
    From `pullRequestTargets[0]` take `repositoryName`, `sourceReference`,
    `destinationReference`, `sourceCommit`, `destinationCommit`. Also note

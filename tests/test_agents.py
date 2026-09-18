@@ -130,6 +130,11 @@ class SafetyGates(unittest.TestCase):
 
     def setUp(self):
         importlib.reload(o)
+        # These monkeypatches must not survive this test: reload() only
+        # resets *before* each SafetyGates test runs, so without this any
+        # later test file in the same `unittest discover` process would
+        # inherit whichever lambda the last SafetyGates test here installed.
+        self.addCleanup(importlib.reload, o)
         self.merged = []
         # A directory that exists on every platform: the pipeline checks the
         # clone path before anything else, and Windows has no /tmp.

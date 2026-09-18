@@ -39,6 +39,25 @@ The prompt gives you the repository name, PR id, AWS region, local clone path,
 and the source and destination branches (already resolved for you). If
 something essential is missing, ask for it and stop — do not guess a PR id.
 
+## Step 0 — Check for a codebase map before scanning by hand
+
+Before grepping around or opening files at random, check whether the local
+clone has a `graphify-out/` directory at its root (a knowledge-graph export
+some repos keep checked in — god nodes, communities, file/symbol
+relationships). If it exists:
+
+- Read `graphify-out/manifest.json` and `graphify-out/GRAPH_REPORT.md` first
+  for the repo's module map and its most-connected ("god") nodes.
+- Use `graphify-out/graph.json` to find which other files/symbols relate to
+  the ones touched in this diff — callers, callees, shared modules — instead
+  of opening files one at a time to build that picture yourself.
+
+This is a lookup to decide *which* surrounding files are worth reading for
+context, not a replacement for the diff — the actual change still comes from
+`git diff`/`git log` below, and every finding must still be grounded in code
+you actually read. If `graphify-out/` does not exist, skip this step and
+scan as usual; do not go looking for one in any other location.
+
 ## Step 1 — Get the diff and commit history
 
 ```

@@ -58,13 +58,17 @@ def build(root):
     root.manager = J.JobManager(root.log_q, runner=lambda **k: {})
     pump(root, 0.8)
     spec = lambda pr, repo: J.JobSpec(project_dir=".", repo_name=repo, pr_id=pr)  # noqa: E731
-    rows = (("12948", "example-service-be", J.RUNNING, "⚠️ Approve with comments", "6/10"),
-            ("12951", "example-service-be", J.RUNNING, "", ""),
-            ("884", "example-portal-fe", J.DONE, "✅ Approve", "2/10"),
-            ("885", "example-portal-fe", J.QUEUED, "", ""))
-    for pr, repo, status, verdict, impact in rows:
+    # Token totals are real numbers from a live run that hit millions of
+    # reasoning tokens on a single review — the formatting has to hold up at
+    # that scale, not just for a tidy round number.
+    rows = (("12948", "example-service-be", J.RUNNING, "⚠️ Approve with comments", "6/10",
+             {"total": 3921713}),
+            ("12951", "example-service-be", J.RUNNING, "", "", {}),
+            ("884", "example-portal-fe", J.DONE, "✅ Approve", "2/10", {"total": 342}),
+            ("885", "example-portal-fe", J.QUEUED, "", "", {}))
+    for pr, repo, status, verdict, impact, tokens in rows:
         job = root.manager.create(spec(pr, repo))
-        job.status, job.verdict_raw, job.impact = status, verdict, impact
+        job.status, job.verdict_raw, job.impact, job.tokens = status, verdict, impact, tokens
         job.verdict_key = A._verdict_key_of(verdict)
     return root.manager
 
