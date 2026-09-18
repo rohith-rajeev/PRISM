@@ -112,6 +112,13 @@ on with your answer.
 
 Click **`Skip`** if you'd rather not answer — the job finishes with what it has.
 
+**Merge conflicts appear here too.** If syncing your branch with its base hits a
+conflict, PRISM does not resolve it. It undoes the merge, leaves your clone
+exactly as it found it, and shows you each conflict in turn with both versions
+and three buttons: **`Keep current`** (your branch), **`Take incoming`** (the
+base branch), or **`Abort sync`**. Once you have chosen for every conflict,
+PRISM replays the merge with your answers.
+
 If this happens while you're looking at a different job, that job shows
 **Needs input** in the list, and the header says so too. Nothing is missed.
 
@@ -190,7 +197,8 @@ PRISM is deliberately cautious:
 
 - It merges **only** on ✅ or ⚠️ verdicts, and only if the PR is still open.
 - It uses **fast-forward merges only** and never force-pushes.
-- If a sync hits conflicts, it backs out cleanly and tells you — nothing is forced.
+- If a sync hits conflicts, PRISM never picks a side for you. It backs the
+  merge out, shows you each conflict, and asks which version to keep.
 - It refuses to sync when your working copy has uncommitted changes, and it puts
   you back on your original branch when it's done.
 - AWS errors are shown exactly as AWS reported them. PRISM never tries to fix
@@ -206,7 +214,7 @@ PRISM is deliberately cautious:
 | `AccessDenied` or an expired token | Log in to AWS again, then re-run the job |
 | `Could not parse a verdict` | The reviewer didn't produce a clear verdict. Check the conversation, try a different model, run it again |
 | `Backend and Frontend point to the same clone` | Pick two different clones in Repository mapping |
-| `Sync merge hit conflicts … Aborted` | Merge the base branch into your PR branch by hand, then re-run |
+| A conflict appears in the question panel | Choose `Keep current` or `Take incoming` for each one, or `Abort sync` to stop and leave your clone untouched |
 | `… is already being reviewed` | That PR already has a job. Open it from the list |
 | Working clone has uncommitted changes | Commit or stash them, then re-run |
 | Model list is empty | PRISM couldn't list models; runs will use the default |

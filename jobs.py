@@ -96,10 +96,16 @@ class AskBridge:
         self._event = threading.Event()
         self._answer = None
 
-    def ask(self, question):
+    def ask(self, question, choices=None):
+        """Ask the user. `choices` turns the panel into buttons.
+
+        Used for merge conflicts, where a free-text answer would be ambiguous
+        and the user must pick one side per hunk.
+        """
         self._event.clear()
         self._answer = None
-        self.job.emit_event("ask", question)
+        payload = {"text": question, "choices": choices} if choices else question
+        self.job.emit_event("ask", payload)
         while not self._event.wait(0.2):
             if self.job.control.cancelled():
                 return None

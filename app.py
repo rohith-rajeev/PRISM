@@ -569,12 +569,16 @@ class AgentPanel(RoundedCard):
         lb = tk.Label(head, text="💬  Reviewer needs your input", font=FONT_B,
                       bg=PAL["card"], fg=PAL["accent_text"])
         lb.pack(side="left")
-        RoundedButton(head, text="Send  ▸", command=self._send, style="primary",
-                      height=26, width=104, font=FONT_S).pack(side="right")
-        RoundedButton(head, text="Skip", command=self._skip, style="outline",
-                      height=26, width=74, font=FONT_S).pack(side="right", padx=(0, 6))
+        self.send_btn = RoundedButton(head, text="Send  ▸", command=self._send,
+                                      style="primary", height=26, width=104,
+                                      font=FONT_S)
+        self.send_btn.pack(side="right")
+        self.skip_btn = RoundedButton(head, text="Skip", command=self._skip,
+                                      style="outline", height=26, width=74,
+                                      font=FONT_S)
+        self.skip_btn.pack(side="right", padx=(0, 6))
 
-        self.question = tk.Text(inner, height=3, font=FONT_S, bg=PAL["card"],
+        self.question = tk.Text(inner, height=8, font=_mono(), bg=PAL["card"],
                                 fg=PAL["text"], relief="flat", wrap="word",
                                 highlightthickness=0, cursor="arrow")
         self.question.pack(fill="x", pady=(5, 5))
@@ -588,11 +592,47 @@ class AgentPanel(RoundedCard):
         self.entry.pack(fill="x")
         self.entry.bind("<Return>", self._enter)
         self.entry.bind("<Shift-Return>", lambda _e: None)
-        hint = tk.Label(inner, text="Enter to send · Shift+Enter for a new line",
-                        font=FONT_XS, bg=PAL["card"], fg=PAL["muted"], anchor="w")
-        hint.pack(fill="x", pady=(3, 0))
+        self.hint = tk.Label(inner, text="Enter to send · Shift+Enter for a new line",
+                             font=FONT_XS, bg=PAL["card"], fg=PAL["muted"], anchor="w")
+        self.hint.pack(fill="x", pady=(3, 0))
+        # Populated by present_choice(); stays unpacked for ordinary questions.
+        self.choice_row = tk.Frame(inner, bg=PAL["card"])
+
+    def present_choice(self, question, choices):
+        """Show a question answerable only by one of `choices`.
+
+        Each choice is a (token, label) pair; clicking resolves the same
+        AskBridge a typed answer would, so cancellation, the "needs input"
+        badge and the job routing all behave identically.
+        """
+        self.present(question)
+        self.entry.pack_forget()
+        self.hint.pack_forget()
+        # Send and Skip would resolve to nothing meaningful here — the answer
+        # has to be one of the choices, and Abort is among them.
+        self.send_btn.pack_forget()
+        self.skip_btn.pack_forget()
+        for w in self.choice_row.winfo_children():
+            w.destroy()
+        for token, label in choices:
+            RoundedButton(self.choice_row, text=label, height=30,
+                          width=max(110, 9 * len(label)), font=FONT_S,
+                          style="primary" if token == choices[0][0] else "outline",
+                          command=lambda tk_=token: self._on_send(tk_)
+                          ).pack(side="left", padx=(0, 8))
+        if not self.choice_row.winfo_manager():
+            self.choice_row.pack(fill="x", pady=(6, 0))
 
     def present(self, question):
+        # Back to the free-text form unless a caller asks for choices.
+        if self.choice_row.winfo_manager():
+            self.choice_row.pack_forget()
+        if not self.entry.winfo_manager():
+            self.entry.pack(fill="x")
+            self.hint.pack(fill="x", pady=(3, 0))
+        if not self.send_btn.winfo_manager():
+            self.skip_btn.pack(side="right", padx=(0, 6))
+            self.send_btn.pack(side="right")
         self.question.config(state="normal")
         self.question.delete("1.0", "end")
         self.question.insert("1.0", question)
@@ -2488,7 +2528,7 @@ class App(tk.Tk):
         if job.pending_question:
             # The ask event already fired while this job was unselected, so the
             # panel has to be driven from stored state, not from the event.
-            self.agent_panel.present(job.pending_question)
+            self._present_question(job.pending_question)
             if not self.agent_panel.winfo_manager():
                 self.agent_panel.pack(fill="x", pady=(0, 6), before=self._log_card)
                 self._repaint(self.agent_panel)
@@ -2515,6 +2555,14 @@ class App(tk.Tk):
         self.log.see("end")
 
     # ---------------- agent conversation ----------------
+    def _present_question(self, payload):
+        """A question is either plain text or {text, choices}."""
+        if isinstance(payload, dict):
+            self.agent_panel.present_choice(payload.get("text", ""),
+                                            payload.get("choices") or [])
+        else:
+            self.agent_panel.present(payload)
+
     def _hide_agent(self):
         if self.agent_panel.winfo_manager():
             self.agent_panel.pack_forget()
@@ -2680,7 +2728,7 @@ class App(tk.Tk):
             job.pending_question = payload
             job.status = J.NEEDS_INPUT
             if shown:
-                self.agent_panel.present(payload)
+                self._present_question(payload)
                 if not self.agent_panel.winfo_manager():
                     self.agent_panel.pack(fill="x", pady=(0, 6), before=self._log_card)
                     self._repaint(self.agent_panel)

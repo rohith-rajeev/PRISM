@@ -27,11 +27,15 @@ pre-filled from the last job (usually only the PR id changes).
      confirm which clone is **Backend** vs **Frontend** (pre-guessed from
      generic `-be`/`-fe`/`backend`/`frontend` naming — no project names are
      hardcoded), then pick the review target, PR id, and region.
-2. A bundled reviewer agent runs behind the scenes and reports a
+2. A specialised agent runs each step — `pr-context-resolver`, `pr-reviewer`,
+   `review-comments-poster`, `fast-forward-merge-checker`, `pr-sync`,
+   `conflict-analyst`, `pr-merger` — each with its own prompt and its own
+   permissions. Agents decide; PRISM performs every write behind gates in code.
+   The reviewer reports a
    **Verdict** (Approve / Approve with comments / Request changes / Block)
    plus an **impact score**.
-3. PRISM asks the reviewer to append its findings to the **PR description**
-   (marked block, stale blocks replaced), with a direct AWS-CLI fallback.
+3. `review-comments-poster` composes the findings block; PRISM writes it to
+   the **PR description** (markers preserved, stale blocks replaced).
 4. On ✅ Approve / ⚠️ Approve with comments it merges with
    **fast-forward only** (`merge-pull-request-by-fast-forward`).
 5. If the PR is not fast-forward mergeable, it **syncs destination →
@@ -100,13 +104,18 @@ stretches full-width); the live count sits inline next to it. Leave it empty
 to use the default model. The choice is passed as `--model …` to both
 reviewer runs (review + description update).
 
-## Self-contained reviewer bundle
-The tool ships its own copy of the reviewer agent at
-`agents/pr-reviewer.md` — a project-agnostic version that takes the repo
-name, PR id, region, and clone path from each run's prompt. Before every run
-PRISM installs that file into `<project>/.opencode/agents/pr-reviewer.md`,
-so it works on any machine with the engine + `aws` installed — no dependency
-on any other skill, agent, or checkout outside this folder.
+## Self-contained agent bundle
+The tool ships every agent it uses in `agents/`, one per pipeline step, each
+project-agnostic and each with its own `permission:` block. Before every run
+PRISM installs the whole folder into `<project>/.opencode/agents/`, so it works
+on any machine with the engine + `aws` installed — no dependency on any other
+skill, agent, or checkout outside this folder.
+
+Only `review-comments-poster` produces text destined for the pull request, and
+even it hands that text back for PRISM to write. Every agent denies `edit`,
+`task`, `webfetch`, and — where it has a shell at all — the specific `git push`
+and `aws codecommit merge/update` commands. `agents/_shared-contract.md`
+documents the decision block they all answer with.
 
 ## Updating
 `?  Help` → `Check for updates` asks GitHub for the latest release. If it is
@@ -140,7 +149,7 @@ they need a token even on a public repository and expire on a retention clock.
 - `updater.py` — release check, download, checksum and in-place swap (no Tkinter, unit-tested)
 - `version.py` — the version, in one place; CI refuses a tag that disagrees with it
 - `tests/` — `python3 -m unittest discover -s tests`
-- `agents/pr-reviewer.md` — bundled project-agnostic reviewer agent
+- `agents/` — one agent per pipeline step, plus `_shared-contract.md`
 - `desktop/` — packaging into a standalone executable (build-time only)
 - `docs/MANUAL.md` — the user manual, also shipped as the in-app Help screen
 - `docs/requirements/PRISM.md` — full tool documentation
@@ -153,7 +162,11 @@ they need a token even on a public repository and expire on a retention clock.
 ## Safety
 - Dry-run toggle previews without any writes/merges.
 - Merge only on Approve verdicts + PR status OPEN.
-- Sync conflicts abort cleanly (`git merge --abort`) and are reported, never forced.
+- Sync conflicts are never resolved by PRISM: they are captured, the clone is
+  restored, and each hunk is put to you — keep current, take incoming, or
+  abort — before the merge is replayed with your answers.
+- No agent can merge, push or write. Agents decide; PRISM acts, behind gates in
+  code that a prompt cannot reach.
 - Closing the window asks first whenever any job exists — PRISM keeps nothing
   on disk, so that is the only copy of your verdicts — and defaults to *No*.
 - A sync refuses to start on a dirty working tree, refuses to push commits that
