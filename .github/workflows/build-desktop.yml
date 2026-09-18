@@ -12,9 +12,84 @@ on:
 permissions:
   contents: read
 
+# Two merges landing on main at once would otherwise race for the same number
+# and one of them would lose its tag.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  # A merge into main is a release. Everything below happens in this one run
+  # on purpose: a push made with GITHUB_TOKEN does not start a new workflow,
+  # so tagging in one run and hoping the tag triggers another would publish
+  # nothing at all.
+  version:
+    name: Tag the next version
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      tag: ${{ steps.bump.outputs.tag }}
+      sha: ${{ steps.bump.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Work out the next version
+        id: plan
+        run: |
+          set -e
+          git fetch --tags --force --quiet
+          TAGS=$(git tag -l 'v*' | tr '\n' ' ')
+          NEXT=$(TAGS="$TAGS" python -c "
+          import os, version
+          print(version.next_version(*os.environ['TAGS'].split(), version.__version__))
+          ")
+          echo "Tags so far: ${TAGS:-none}"
+          echo "next=$NEXT" >> "$GITHUB_OUTPUT"
+
+      - name: Record it, commit it, tag it
+        id: bump
+        env:
+          NEXT: ${{ steps.plan.outputs.next }}
+        run: |
+          set -e
+          python - <<'PY'
+          import os, pathlib, re
+          nxt = os.environ["NEXT"]
+          p = pathlib.Path("version.py")
+          s = p.read_text(encoding="utf-8")
+          s, n = re.subn(r'^__version__ = ".*"$', f'__version__ = "{nxt}"', s,
+                         flags=re.MULTILINE)
+          assert n == 1, f"could not rewrite __version__ ({n} matches)"
+          p.write_text(s, encoding="utf-8")
+          PY
+          # The build below runs from this commit, so what the application
+          # reports about itself and what the tag says are the same thing.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add version.py
+          git commit -m "Release v$NEXT"
+          git tag -a "v$NEXT" -m "PRISM v$NEXT"
+          git push origin HEAD:main
+          git push origin "v$NEXT"
+          echo "version=$NEXT" >> "$GITHUB_OUTPUT"
+          echo "tag=v$NEXT" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
   build:
     name: ${{ matrix.label }}
+    needs: [version]
+    # `version` is skipped for develop, pull requests and hand-pushed tags,
+    # and a skipped dependency would otherwise skip this too.
+    if: ${{ always() && (needs.version.result == 'success' || needs.version.result == 'skipped') }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -32,6 +107,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha || github.sha }}
 
       - uses: actions/setup-python@v5
         with:
@@ -48,8 +125,8 @@ jobs:
 
       - name: Sanity-check the sources before packaging
         run: |
-          python -m compileall -q app.py orchestrator.py jobs.py desktop/
-          python -c "import ast; [ast.parse(open(f, encoding='utf-8').read()) for f in ('app.py','orchestrator.py','jobs.py')]"
+          python -m compileall -q app.py orchestrator.py jobs.py updater.py version.py desktop/
+          python -c "import ast; [ast.parse(open(f, encoding='utf-8').read()) for f in ('app.py','orchestrator.py','jobs.py','updater.py','version.py')]"
 
       - name: Unit tests
         # Model, scheduler and engine-protocol tests. No Tk and no network, so
@@ -136,21 +213,59 @@ jobs:
 
   release:
     name: Attach builds to the release
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, version]
+    # Either a tag pushed by hand, or the one the version job just made.
+    if: ${{ always() && needs.build.result == 'success'
+            && (startsWith(github.ref, 'refs/tags/v') || needs.version.outputs.tag != '') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      TAG: ${{ needs.version.outputs.tag || github.ref_name }}
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - name: Flatten artifact tree
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.tag || github.ref_name }}
+          path: src
+
+      - name: Refuse a tag that disagrees with version.py
+        # The updater compares the running build against a release tag, so a
+        # build labelled differently from the tag it ships under would either
+        # offer an update that is already installed or hide one that is not.
         run: |
+          set -e
+          WANT="${TAG#v}"
+          SRC=$(python -c "import sys; sys.path.insert(0, 'src'); import version; print(version.__version__)")
+          echo "tag=$WANT version.py=$SRC"
+          test "$WANT" = "$SRC" || {
+            echo "::error::tag $TAG does not match version.py ($SRC)"; exit 1; }
+
+      - name: Build the release assets
+        # One archive per platform, named for the platform, so the in-app
+        # updater can pick the right one by name alone. The loose files the CI
+        # artifacts carry are convenient to click through but ambiguous to
+        # match against - two of them are just called PRISM.
+        run: |
+          set -e
           mkdir -p release
-          find artifacts -type f ! -name README.md -exec cp {} release/ \;
+          cp artifacts/PRISM-macos-arm64/PRISM-macos-arm64.zip release/
+          (cd artifacts/PRISM-windows-x86_64 && zip -q -r ../../release/PRISM-windows-x86_64.zip PRISM.exe)
+          tar -czf release/PRISM-linux-x86_64.tar.gz \
+              -C artifacts/PRISM-linux-x86_64 PRISM PRISM.desktop PRISM.png
+          # Checksums the updater verifies the download against before it
+          # replaces anything on disk.
+          (cd release && sha256sum PRISM-* > SHA256SUMS)
+          cat release/SHA256SUMS
           ls -la release
+
       - uses: softprops/action-gh-release@v2
         with:
+          # Named explicitly: on a merge into main this run is not on a tag
+          # ref, so the action cannot infer which tag to publish against.
+          tag_name: ${{ env.TAG }}
+          name: PRISM ${{ env.TAG }}
           files: release/*
           generate_release_notes: true

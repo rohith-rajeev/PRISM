@@ -27,11 +27,15 @@ pre-filled from the last job (usually only the PR id changes).
      confirm which clone is **Backend** vs **Frontend** (pre-guessed from
      generic `-be`/`-fe`/`backend`/`frontend` naming — no project names are
      hardcoded), then pick the review target, PR id, and region.
-2. A bundled reviewer agent runs behind the scenes and reports a
+2. A specialised agent runs each step — `pr-context-resolver`, `pr-reviewer`,
+   `review-comments-poster`, `fast-forward-merge-checker`, `pr-sync`,
+   `conflict-analyst`, `pr-merger` — each with its own prompt and its own
+   permissions. Agents decide; PRISM performs every write behind gates in code.
+   The reviewer reports a
    **Verdict** (Approve / Approve with comments / Request changes / Block)
    plus an **impact score**.
-3. PRISM asks the reviewer to append its findings to the **PR description**
-   (marked block, stale blocks replaced), with a direct AWS-CLI fallback.
+3. `review-comments-poster` composes the findings block; PRISM writes it to
+   the **PR description** (markers preserved, stale blocks replaced).
 4. On ✅ Approve / ⚠️ Approve with comments it merges with
    **fast-forward only** (`merge-pull-request-by-fast-forward`).
 5. If the PR is not fast-forward mergeable, it **syncs destination →
@@ -74,7 +78,7 @@ PyInstaller can't cross-compile, so each OS builds on its own machine — push t
 uploads them as artifacts. See [`desktop/README.md`](desktop/README.md).
 
 ## UI
-Three screens behind one header (badge, live job tally, back to the list):
+Four screens behind one header (badge, live job tally, Help, back to the list):
 
 - **Jobs** — one row per job: status, target, verdict, impact, Stop, dismiss.
 - **New job** — Project card plus a two-column row pairing Repository mapping
@@ -82,7 +86,12 @@ Three screens behind one header (badge, live job tally, back to the list):
   projects), then `Start Prisming`.
 - **Job detail** — a one-line target header with `Stop`, a progress bar, a
   compact Verdict + Impact row, the conditional reviewer-question panel, and
-  the conversation console with an inline Clear. The shipped theme is dark only — there is no
+  the conversation console with an inline Clear.
+- **Help** — the user manual, rendered from `docs/MANUAL.md` into the app's own
+  palette, plus `Check for updates`.
+
+The version sits quietly in the bottom-right corner and opens Help when
+clicked. The shipped theme is dark only — there is no
 theme toggle. All custom widgets are hand-drawn stdlib Tkinter canvas — still
 zero dependencies.
 
@@ -95,13 +104,63 @@ stretches full-width); the live count sits inline next to it. Leave it empty
 to use the default model. The choice is passed as `--model …` to both
 reviewer runs (review + description update).
 
-## Self-contained reviewer bundle
-The tool ships its own copy of the reviewer agent at
-`agents/pr-reviewer.md` — a project-agnostic version that takes the repo
-name, PR id, region, and clone path from each run's prompt. Before every run
-PRISM installs that file into `<project>/.opencode/agents/pr-reviewer.md`,
-so it works on any machine with the engine + `aws` installed — no dependency
-on any other skill, agent, or checkout outside this folder.
+## Self-contained agent bundle
+The tool ships every agent it uses in `agents/`, one per pipeline step, each
+project-agnostic and each with its own `permission:` block. Before every run
+PRISM installs the whole folder into `<project>/.opencode/agents/`, so it works
+on any machine with the engine + `aws` installed — no dependency on any other
+skill, agent, or checkout outside this folder.
+
+Only `review-comments-poster` produces text destined for the pull request, and
+even it hands that text back for PRISM to write. Every agent denies `edit`,
+`task`, `webfetch`, and — where it has a shell at all — the specific `git push`
+and `aws codecommit merge/update` commands. `agents/_shared-contract.md`
+documents the decision block they all answer with.
+
+## Updating
+`?  Help` → `Check for updates` asks GitHub for the latest release. If it is
+newer, PRISM shows the version and its notes, and can install it: the asset for
+the running platform is downloaded, checked against the `SHA256SUMS` published
+beside it, unpacked and swapped in, then PRISM offers to restart.
+
+- The previous copy is renamed rather than deleted, so a failed swap rolls back
+  and a locked executable on Windows still updates. It is removed at the next
+  launch.
+- It refuses while any job is running or queued — updating restarts a program
+  that keeps nothing on disk.
+- From a source checkout there is nothing to replace; it says to `git pull`.
+- Checking happens only when asked. There is no background polling.
+
+## Releasing
+**A merge into `main` is a release.** The workflow works out the next version,
+writes it to `version.py`, commits that, tags it and publishes — no manual
+step.
+
+Versions move a tenth at a time and carry into the whole number at `.9`:
+
+    2.0 → 2.1 → … → 2.8 → 2.9 → 3.0 → 3.1 → …
+
+There is deliberately no `2.10`. The rule lives in `version.next_version()`
+beside the version it governs, so it is importable and unit-tested rather than
+buried in YAML. The highest of the existing tags and `version.py` is the base,
+so a tag made by hand is never handed out twice.
+
+Each release attaches `PRISM-linux-x86_64.tar.gz`, `PRISM-macos-arm64.zip`,
+`PRISM-windows-x86_64.zip` and `SHA256SUMS`. Workflow artifacts are not used:
+they need a token even on a public repository and expire on a retention clock.
+
+Two details that are easy to get wrong and are deliberate here:
+
+- **The build runs from the bumped commit**, not from the merge that triggered
+  it. Building the merge would ship a binary whose `version.py` still held the
+  previous number, so it would announce itself as out of date the moment it
+  started.
+- **Tagging and publishing happen in one workflow run.** A push made with
+  `GITHUB_TOKEN` does not start a new workflow, so tagging and waiting for the
+  tag to trigger the release would publish nothing at all.
+
+Pushing a `v*` tag by hand still works and still publishes; CI refuses it if it
+disagrees with `version.py`.
 
 ## Prerequisites
 - `opencode` on PATH (provides the agent runtime + model list). PRISM also
@@ -110,12 +169,15 @@ on any other skill, agent, or checkout outside this folder.
 - `aws` CLI (CodeCommit access) + `git`
 
 ## Files
-- `app.py` — PRISM UI (three screens, threaded, live log, dry-run toggle)
+- `app.py` — PRISM UI (four screens, threaded, live log, dry-run toggle)
 - `jobs.py` — job model and scheduler (no Tkinter, unit-tested)
 - `orchestrator.py` — backend: reviewer runs, verdict parsing, CodeCommit merge/sync
+- `updater.py` — release check, download, checksum and in-place swap (no Tkinter, unit-tested)
+- `version.py` — the version, in one place, plus the rule for what comes next
 - `tests/` — `python3 -m unittest discover -s tests`
-- `agents/pr-reviewer.md` — bundled project-agnostic reviewer agent
+- `agents/` — one agent per pipeline step, plus `_shared-contract.md`
 - `desktop/` — packaging into a standalone executable (build-time only)
+- `docs/MANUAL.md` — the user manual, also shipped as the in-app Help screen
 - `docs/requirements/PRISM.md` — full tool documentation
 - No runtime dependencies: `requirements.txt` intentionally empty.
 
@@ -126,7 +188,11 @@ on any other skill, agent, or checkout outside this folder.
 ## Safety
 - Dry-run toggle previews without any writes/merges.
 - Merge only on Approve verdicts + PR status OPEN.
-- Sync conflicts abort cleanly (`git merge --abort`) and are reported, never forced.
+- Sync conflicts are never resolved by PRISM: they are captured, the clone is
+  restored, and each hunk is put to you — keep current, take incoming, or
+  abort — before the merge is replayed with your answers.
+- No agent can merge, push or write. Agents decide; PRISM acts, behind gates in
+  code that a prompt cannot reach.
 - Closing the window asks first whenever any job exists — PRISM keeps nothing
   on disk, so that is the only copy of your verdicts — and defaults to *No*.
 - A sync refuses to start on a dirty working tree, refuses to push commits that

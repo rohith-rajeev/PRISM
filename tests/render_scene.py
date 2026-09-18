@@ -95,6 +95,11 @@ def main(out_dir):
     pump(root, 1.0)
     ok &= grab(root, out / f"newjob-{sys.platform}.png")
 
+    # The manual, rendered from Markdown into the app's own palette.
+    root.show_help()
+    pump(root, 1.0)
+    ok &= grab(root, out / f"help-{sys.platform}.png")
+
     # Switch screens and capture with the bare minimum of event processing.
     # Hand-drawn widgets paint from their <Configure> handler, and macOS defers
     # those on re-map — which left screens blank until an unrelated event
@@ -106,6 +111,7 @@ def main(out_dir):
                      ("fastswitch-jobs", root.show_jobs),
                      ("fastswitch-new2", root.show_new),
                      ("fastswitch-jobs2", root.show_jobs),
+                     ("fastswitch-help", root.show_help),
                      ("fastswitch-detail", lambda: root.show_detail(1))):
         go()
         root.update_idletasks()      # geometry only — no redraw events pumped

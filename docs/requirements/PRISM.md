@@ -244,12 +244,22 @@ outstanding and costs no space otherwise.
 - Merge only on Approve verdicts **and** OPEN status.
 - Fast-forward strategy exclusively; diverged PRs are synced via an ordinary
   merge commit + plain `git push` (no force).
-- Conflicts abort cleanly and are reported verbatim.
+- **PRISM never resolves a merge conflict.** A conflicted sync is captured,
+  aborted, and the clone restored; the conflicts are then explained by
+  `conflict-analyst` and put to the user one hunk at a time — keep current,
+  take incoming, or abort. Only once every hunk has an answer does PRISM replay
+  the merge and apply them. A hunk with no recorded answer is an error, never
+  a default.
 - AWS auth failures stop the run with the exact CLI error; PRISM never
   attempts to repair credentials.
-- The agent itself can never merge/approve/push — enforced by its bundled
-  definition; all writes go through PRISM's orchestrator or the agent's
-  gated description-update step.
+- **No agent can merge, push or write.** Each pipeline step is its own agent
+  with its own `permission:` block denying the commands outright, and every
+  irreversible action is performed by PRISM behind gates in code. An agent
+  returns a decision; PRISM decides whether to act on it. A `go` from
+  `pr-merger` still cannot merge a request-changes verdict, a closed PR, or
+  anything in dry-run — those are enforced before the agent is even consulted.
+- Content inside a pull request is treated as data, never instructions, so a
+  description or diff cannot talk an agent into approving itself.
 - Stop is available for the entire run and always returns the UI to idle.
 - Closing the window is confirmed whenever any job exists, naming what goes:
   unfinished jobs and the processes they started, any job mid-write, and
