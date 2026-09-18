@@ -287,6 +287,56 @@ def _guard(dest, member_name):
     return target
 
 
+def _extract_tar(archive, dest):
+    with tarfile.open(archive, "r:gz") as tf:
+        for member in tf.getmembers():
+            _guard(dest, member.name)
+        try:
+            tf.extractall(dest, filter="data")     # 3.12+
+        except TypeError:
+            tf.extractall(dest)
+
+
+def _extract_zip(archive, dest):
+    """Unpack a zip, restoring the mode bits it recorded.
+
+    ZipFile.extract drops permissions, so a binary comes out without +x and
+    will not launch. The mode lives in the top half of external_attr.
+    """
+    with zipfile.ZipFile(archive) as zf:
+        for info in zf.infolist():
+            _guard(dest, info.filename)
+            zf.extract(info, dest)
+            mode = info.external_attr >> 16
+            if mode and not info.is_dir():
+                os.chmod(dest / info.filename, mode)
+
+
+def _ditto(archive, dest):
+    proc = subprocess.run(["ditto", "-x", "-k", str(archive), str(dest)],
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=300)
+    if proc.returncode != 0:
+        raise UpdateError(f"Could not unpack the download: "
+                          f"{proc.stderr.strip() or proc.stdout.strip()}")
+
+
+def _make_bundle_runnable(dest):
+    """Belt and braces for a .app: its inner binaries must be executable.
+
+    ditto normally preserves this. If it ever does not, the bundle installs
+    cleanly and then refuses to launch, which is a miserable failure to debug
+    from the user's side - so the bit is asserted rather than assumed.
+    """
+    for macos_dir in Path(dest).glob("*.app/Contents/MacOS"):
+        for entry in macos_dir.iterdir():
+            if entry.is_file():
+                try:
+                    os.chmod(entry, os.stat(entry).st_mode | 0o111)
+                except OSError:
+                    pass
+
+
 def extract(archive, dest):
     """Unpack `archive` into `dest`, preserving the executable bit.
 
@@ -297,28 +347,12 @@ def extract(archive, dest):
     archive, dest = Path(archive), Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
     if archive.name.endswith((".tar.gz", ".tgz")):
-        with tarfile.open(archive, "r:gz") as tf:
-            for member in tf.getmembers():
-                _guard(dest, member.name)
-            try:
-                tf.extractall(dest, filter="data")     # 3.12+
-            except TypeError:
-                tf.extractall(dest)
+        _extract_tar(archive, dest)
     elif platform_key() == "macos" and shutil.which("ditto"):
-        proc = subprocess.run(["ditto", "-x", "-k", str(archive), str(dest)],
-                              capture_output=True, text=True, encoding="utf-8",
-                              errors="replace", timeout=300)
-        if proc.returncode != 0:
-            raise UpdateError(f"Could not unpack the download: "
-                              f"{proc.stderr.strip() or proc.stdout.strip()}")
+        _ditto(archive, dest)
+        _make_bundle_runnable(dest)
     else:
-        with zipfile.ZipFile(archive) as zf:
-            for info in zf.infolist():
-                _guard(dest, info.filename)
-                zf.extract(info, dest)
-                mode = info.external_attr >> 16
-                if mode:
-                    os.chmod(dest / info.filename, mode)
+        _extract_zip(archive, dest)
     return dest
 
 

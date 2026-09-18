@@ -107,12 +107,18 @@ class Checksums(unittest.TestCase):
                          {"PRISM-linux-x86_64.tar.gz": self.digest})
 
 
+needs_exec_bit = unittest.skipIf(
+    os.name == "nt",
+    "Windows has no POSIX executable bit - st_mode only carries read-only")
+
+
 class Archives(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.d = Path(self.tmp.name)
 
+    @needs_exec_bit
     def test_tar_keeps_the_executable_bit(self):
         exe = self.d / "PRISM"
         exe.write_bytes(b"#!/bin/sh\necho hi\n")
@@ -125,14 +131,19 @@ class Archives(unittest.TestCase):
         self.assertTrue(os.stat(out / "PRISM").st_mode & stat.S_IXUSR,
                         "an unpacked build that cannot be executed is useless")
 
+    @needs_exec_bit
     def test_zip_restores_the_executable_bit(self):
+        """Calls the zip path directly: on macOS `extract` delegates to ditto,
+        so going through it would test a different unpacker on each runner."""
         archive = self.d / "PRISM-windows-x86_64.zip"
         with zipfile.ZipFile(archive, "w") as zf:
             info = zipfile.ZipInfo("PRISM")
             info.external_attr = 0o755 << 16
             zf.writestr(info, "#!/bin/sh\n")
-        out = u.extract(archive, self.d / "unpacked")
-        self.assertTrue(os.stat(out / "PRISM").st_mode & stat.S_IXUSR)
+        dest = self.d / "unpacked"
+        dest.mkdir()
+        u._extract_zip(archive, dest)
+        self.assertTrue(os.stat(dest / "PRISM").st_mode & stat.S_IXUSR)
 
     def test_an_archive_escaping_its_folder_is_refused(self):
         """A downloaded archive is untrusted input like any other."""
@@ -178,6 +189,10 @@ class Swap(unittest.TestCase):
         self.assertEqual(self.installed.read_text(encoding="utf-8"), "new build")
         self.assertEqual(u.backup_path(self.installed).read_text(encoding="utf-8"),
                          "old build")
+
+    @needs_exec_bit
+    def test_the_installed_copy_is_executable(self):
+        u.install(self.new, self.installed)
         self.assertTrue(os.stat(self.installed).st_mode & stat.S_IXUSR)
 
     def test_cleanup_removes_the_previous_copy(self):
