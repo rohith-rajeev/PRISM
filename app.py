@@ -1645,6 +1645,38 @@ class App(tk.Tk):
                 self.back_btn.pack_forget()
         elif not self.back_btn.winfo_manager():
             self.back_btn.pack(side="right", padx=(0, 10))
+        self._repaint(screen)
+
+    def _repaint(self, widget):
+        """Settle geometry, then redraw every hand-drawn widget underneath.
+
+        Everything custom in this UI paints only from its <Configure> handler,
+        and bails out until it has a real size. Packing a frame relies on Tk
+        delivering those events to each descendant — which X11 does on map, but
+        macOS defers when the widget's size has not changed since it was
+        unmapped. The result was a screen that stayed blank until some
+        unrelated event forced an expose, such as switching apps and back.
+
+        update_idletasks() gives the children their real geometry; drawing then
+        explicitly removes the dependency on an event that may never arrive.
+        """
+        try:
+            self.update_idletasks()
+        except Exception:  # noqa: BLE001
+            return
+        stack = [widget]
+        while stack:
+            w = stack.pop()
+            draw = getattr(w, "_draw", None)
+            if callable(draw):
+                try:
+                    draw()
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                stack.extend(w.winfo_children())
+            except Exception:  # noqa: BLE001
+                pass
 
     def show_jobs(self):
         # Popups are position-anchored Toplevels; left open they would float
@@ -1680,6 +1712,7 @@ class App(tk.Tk):
     # ---------------- jobs list ----------------
     def _refresh_jobs_list(self):
         inner = self.jobs_list.inner
+        created = False
         for job_id, row in list(self.rows.items()):
             if job_id not in self.manager.jobs:
                 row.destroy()
@@ -1690,6 +1723,7 @@ class App(tk.Tk):
                 row = JobRow(inner, job, on_open=self.show_detail,
                              on_stop=self._stop_job, on_remove=self._remove_job)
                 self.rows[job.id] = row
+                created = True
             if not row.winfo_manager():
                 row.pack(fill="x", pady=(0, 6))
             row.refresh()
@@ -1698,6 +1732,10 @@ class App(tk.Tk):
                 self.jobs_empty.pack_forget()
         elif not self.jobs_empty.winfo_manager():
             self.jobs_empty.pack(pady=40)
+        if created and self.screen is self.jobs_screen:
+            # Newly built rows have never had a <Configure>; draw them now
+            # rather than wait for one.
+            self._repaint(self.jobs_list.inner)
 
     def _refresh_pill(self):
         """Header tally — app-level, since no single job owns the header."""
@@ -1853,6 +1891,7 @@ class App(tk.Tk):
             self.agent_panel.present(job.pending_question)
             if not self.agent_panel.winfo_manager():
                 self.agent_panel.pack(fill="x", pady=(0, 6), before=self._log_card)
+                self._repaint(self.agent_panel)
         else:
             self._hide_agent()
 
@@ -2044,6 +2083,7 @@ class App(tk.Tk):
                 self.agent_panel.present(payload)
                 if not self.agent_panel.winfo_manager():
                     self.agent_panel.pack(fill="x", pady=(0, 6), before=self._log_card)
+                    self._repaint(self.agent_panel)
             return True
         if kind in ("done", "stopped", "error"):
             if kind == "done":

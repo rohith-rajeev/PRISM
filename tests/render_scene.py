@@ -95,6 +95,19 @@ def main(out_dir):
     pump(root, 1.0)
     ok &= grab(root, out / f"newjob-{sys.platform}.png")
 
+    # Switch screens and capture with the bare minimum of event processing.
+    # Hand-drawn widgets paint from their <Configure> handler, and macOS defers
+    # those on re-map — which left screens blank until an unrelated event
+    # forced an expose. This is the condition that exposed it; a correct build
+    # shows a fully drawn screen here.
+    for name, go in (("fastswitch-jobs", root.show_jobs),
+                     ("fastswitch-detail", lambda: root.show_detail(1)),
+                     ("fastswitch-new", root.show_new)):
+        go()
+        root.update_idletasks()      # geometry only — no redraw events pumped
+        time.sleep(0.35)
+        ok &= grab(root, out / f"{name}-{sys.platform}.png")
+
     print("RENDER OK" if ok else "RENDER INCOMPLETE")
     sys.stdout.flush()
     os._exit(0 if ok else 1)
