@@ -669,6 +669,85 @@ def show_warning(parent, title, message):
     Dialog(parent, title, message, confirm=None, cancel="OK", tone="warn")
 
 
+class ThinScrollbar(tk.Canvas):
+    """Slim scrollbar drawn in the app's palette.
+
+    Tk's own scrollbar is rendered natively on macOS and ignores colour
+    options, so it appeared as a bright strip down the side of the dark
+    console. Everything else in this UI is hand-drawn already; this keeps the
+    one remaining native control from standing out.
+
+    Implements the standard scrollbar protocol — set(first, last) as the
+    widget's yscrollcommand, and calls command("moveto", f) on drag — so it is
+    a drop-in for tk.Scrollbar.
+    """
+
+    def __init__(self, parent, command, width=10, bg_key="log_bg"):
+        super().__init__(parent, width=width, highlightthickness=0, bd=0,
+                         bg=PAL[bg_key])
+        self._command = command
+        self._bg_key = bg_key
+        self._first, self._last = 0.0, 1.0
+        self._grab = None
+        self.bind("<Configure>", lambda _e: self._draw())
+        self.bind("<Button-1>", self._press)
+        self.bind("<B1-Motion>", self._drag)
+        self.bind("<ButtonRelease-1>", lambda _e: setattr(self, "_grab", None))
+        self.bind("<Enter>", lambda _e: self._draw(hover=True))
+        self.bind("<Leave>", lambda _e: self._draw())
+
+    def set(self, first, last):
+        self._first, self._last = float(first), float(last)
+        self._draw()
+
+    def get(self):
+        return self._first, self._last
+
+    def _span(self):
+        h = self.winfo_height()
+        top = self._first * h
+        bottom = self._last * h
+        if bottom - top < 24:               # keep a grabbable thumb
+            mid = (top + bottom) / 2
+            top, bottom = mid - 12, mid + 12
+        return max(0, top), min(h, bottom)
+
+    def _draw(self, hover=False):
+        self.delete("all")
+        self.config(bg=PAL[self._bg_key])
+        h = self.winfo_height()
+        w = self.winfo_width()
+        if h <= 4 or w <= 2:
+            return
+        if self._first <= 0.0 and self._last >= 1.0:
+            return                          # nothing to scroll: draw nothing
+        top, bottom = self._span()
+        _rr(self, 2, top, w - 2, bottom, (w - 4) // 2,
+            PAL["accent"] if hover else PAL["border"], None)
+
+    def _press(self, e):
+        top, bottom = self._span()
+        if top <= e.y <= bottom:
+            self._grab = e.y - top          # drag from where it was grabbed
+        else:
+            self._grab = (bottom - top) / 2
+            self._move(e.y)
+
+    def _drag(self, e):
+        if self._grab is not None:
+            self._move(e.y)
+
+    def _move(self, y):
+        h = max(1, self.winfo_height())
+        span = self._last - self._first
+        frac = (y - (self._grab or 0)) / h
+        frac = max(0.0, min(1.0 - span, frac))
+        try:
+            self._command("moveto", frac)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 class ScrollFrame(tk.Frame):
     """Scrollable container in pure Tk (canvas + inner frame + scrollbar).
 
@@ -682,7 +761,7 @@ class ScrollFrame(tk.Frame):
         super().__init__(parent, bg=PAL[bg_key])
         self._bg = bg_key
         self.canvas = tk.Canvas(self, bg=PAL[bg_key], highlightthickness=0, bd=0)
-        self.scroll = tk.Scrollbar(self, command=self.canvas.yview)
+        self.scroll = ThinScrollbar(self, command=self.canvas.yview, bg_key=bg_key)
         self.canvas.configure(yscrollcommand=self.scroll.set)
         self.canvas.pack(side="left", fill="both", expand=True)
         self.inner = tk.Frame(self.canvas, bg=PAL[bg_key])
@@ -883,7 +962,7 @@ class Picker(tk.Frame):
         body = tk.Frame(top, bg=PAL["card"])
         body.pack(fill="both", expand=True, padx=1, pady=(0, 1))
         canvas = tk.Canvas(body, bg=PAL["card"], highlightthickness=0)
-        scroll = tk.Scrollbar(body, command=canvas.yview)
+        scroll = ThinScrollbar(body, command=canvas.yview, bg_key="card")
         canvas.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
         canvas.pack(side="left", fill="both", expand=True)
@@ -1270,10 +1349,10 @@ class App(tk.Tk):
                            # the background on X11 but renders as a hard white
                            # rectangle around the console on macOS.
                            highlightthickness=0, borderwidth=0)
-        scroll = tk.Scrollbar(lbody, command=self.log.yview)
+        scroll = ThinScrollbar(lbody, command=self.log.yview, bg_key="log_bg")
         self.log.configure(yscrollcommand=scroll.set)
         self.log.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
+        scroll.pack(side="right", fill="y", padx=(4, 0))
         # Agent prose gets the logo blue; it is neither PRISM's own output nor
         # an error, and colouring it red on a stray word like "error handling"
         # made ordinary commentary look like a failure.
