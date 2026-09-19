@@ -51,6 +51,7 @@ class JobSpec:
     do_merge: bool = True
     do_sync: bool = True
     dry_run: bool = False
+    webhook_url: str = None
 
     @property
     def label(self):
@@ -81,7 +82,8 @@ class JobSpec:
                     pr_id=self.pr_id, local_repo=self.local_repo,
                     region=self.region, model=self.model,
                     do_review=self.do_review, do_update_desc=self.do_update_desc,
-                    do_merge=self.do_merge, do_sync=self.do_sync, dry_run=self.dry_run)
+                    do_merge=self.do_merge, do_sync=self.do_sync, dry_run=self.dry_run,
+                    webhook_url=self.webhook_url)
 
 
 class AskBridge:

@@ -211,6 +211,87 @@ class SafetyGates(unittest.TestCase):
         self.assertEqual(res["stopped"], "merger-no-go")
 
 
+class ChatNotification(unittest.TestCase):
+    """The webhook post is a courtesy layered on top of the pipeline in
+    full_pipeline() itself — these prove it never changes what the pipeline
+    does, only reports on it, and stays silent with nothing configured."""
+
+    def setUp(self):
+        importlib.reload(o)
+        self.addCleanup(importlib.reload, o)
+        self.merged = []
+        self._tmp = tempfile.TemporaryDirectory()
+        self.clone = self._tmp.name
+        self.addCleanup(self._tmp.cleanup)
+        o.ensure_bundled_agents = lambda *a, **k: ["pr-reviewer"]
+        o.resolve_repo = lambda r, p, l: (r, self.clone)
+        o.run_opencode_review = lambda *a, **k: (REPORT, "ses_x")
+        o.run_agent = lambda *a, **k: ("", {"decision": "go", "reason": "looks fine"})
+        o.check_ff_mergeable = lambda *a, **k: (True, "ok")
+        o.try_fast_forward_merge = lambda *a, **k: self.merged.append(1) or {}
+        o.update_description_direct = lambda *a, **k: ""
+        o.get_pr = lambda *a, **k: {"status": "OPEN", "repositoryName": "repo",
+                                    "destinationReference": "main",
+                                    "sourceReference": "feat", "description": ""}
+        # notifier is a *different* module: reloading `o` re-imports it (a
+        # no-op against an already-loaded module) but never re-executes it,
+        # so this monkeypatch would otherwise leak into every test file that
+        # runs after this one in the same `unittest discover` process.
+        self._orig_post_summary = o.notifier.post_summary
+        self.addCleanup(setattr, o.notifier, "post_summary", self._orig_post_summary)
+        self.posted = []
+        o.notifier.post_summary = lambda url, **kw: self.posted.append((url, kw)) or True
+
+    def _run(self, **kw):
+        return o.full_pipeline(self.clone, "repo", "7", local_repo=self.clone,
+                               emit=lambda *a, **k: None, **kw)
+
+    def test_no_webhook_configured_posts_nothing(self):
+        self._run()
+        self.assertEqual(self.posted, [])
+
+    def test_a_merge_posts_the_verdict_and_merged_true(self):
+        self._run(webhook_url="https://example.invalid/hook")
+        self.assertEqual(len(self.posted), 1)
+        url, kw = self.posted[0]
+        self.assertEqual(url, "https://example.invalid/hook")
+        self.assertTrue(kw["merged"])
+        self.assertIn("Approve", kw["verdict_raw"])
+
+    def test_a_blocked_merge_posts_merged_false_with_a_reason(self):
+        o.run_agent = lambda *a, **k: ("", {"decision": "no-go", "reason": "changed"})
+        self._run(webhook_url="https://example.invalid/hook")
+        self.assertEqual(len(self.posted), 1)
+        _url, kw = self.posted[0]
+        self.assertFalse(kw["merged"])
+        self.assertEqual(kw["reason"], "merge check said no")
+
+    def test_review_skipped_is_reported_as_such_not_as_a_verdict(self):
+        self._run(webhook_url="https://example.invalid/hook", do_review=False)
+        _url, kw = self.posted[0]
+        self.assertFalse(kw["do_review"])
+        self.assertTrue(kw["merged"])
+
+    def test_a_hard_failure_still_posts_before_reraising(self):
+        def boom(*a, **k):
+            raise RuntimeError("kaboom")
+        o.ensure_bundled_agents = boom
+        with self.assertRaises(RuntimeError):
+            self._run(webhook_url="https://example.invalid/hook")
+        self.assertEqual(len(self.posted), 1)
+        _url, kw = self.posted[0]
+        self.assertFalse(kw["merged"])
+        self.assertIn("kaboom", kw["reason"])
+
+    def test_a_user_initiated_cancel_posts_nothing(self):
+        def cancelled(*a, **k):
+            raise o.Cancelled("stopped")
+        o.ensure_bundled_agents = cancelled
+        with self.assertRaises(o.Cancelled):
+            self._run(webhook_url="https://example.invalid/hook")
+        self.assertEqual(self.posted, [], "the user's own action is not a notable outcome")
+
+
 class LocaleIndependence(unittest.TestCase):
     """Windows decodes with cp1252 unless told otherwise.
 

@@ -23,6 +23,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+import notifier
+
 REGION_DEFAULT = "us-east-1"
 
 # CodeCommit rejects descriptions longer than this.
@@ -1380,7 +1382,7 @@ def resolve_conflicts_with_user(conflict, project_dir, ask, emit=_emit_plain,
 MAX_CLARIFY_ROUNDS = 4
 
 
-def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
+def _run_pipeline(project_dir, repo_name, pr_id, local_repo=None,
                   region=REGION_DEFAULT, do_review=True,
                   do_update_desc=True, do_merge=True, do_sync=True,
                   dry_run=False, model=None, progress=None, emit=_emit_plain,
@@ -1701,3 +1703,68 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
             pg(STAGE_MERGE, "error")
             raise
         return _sync_then_merge()
+
+
+# Friendlier text for a chat notification than the bare "stopped" code the
+# UI itself is happy to show as-is. Anything not listed here (including any
+# future code) falls back to a de-hyphenated version of the code itself
+# rather than needing a matching entry added here every time.
+_STOPPED_LABEL = {
+    "unparsed-verdict": "couldn't parse a verdict",
+    "merge-disabled": "auto-merge disabled",
+    "verdict-blocks-merge": "verdict blocks merge",
+    "dry-run": "dry run",
+    "merger-no-go": "merge check said no",
+    "needs-manual-merge": "needs manual merge",
+    "not-fast-forwardable": "not fast-forwardable",
+}
+
+
+def _stopped_reason(stopped):
+    if not stopped:
+        return None
+    if stopped.startswith("status-"):
+        return f"PR status is {stopped.split('-', 1)[1]}"
+    return _STOPPED_LABEL.get(stopped, stopped.replace("-", " "))
+
+
+def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
+                  region=REGION_DEFAULT, do_review=True,
+                  do_update_desc=True, do_merge=True, do_sync=True,
+                  dry_run=False, model=None, webhook_url=None, progress=None,
+                  emit=_emit_plain, control=None, ask=None):
+    """Run the pipeline (see _run_pipeline), then post a brief outcome
+    summary to Google Chat if a webhook is configured.
+
+    Split out from _run_pipeline so that every exit path — success, a
+    blocked merge, a hard failure — gets exactly one notification from one
+    place, rather than a post call threaded through every one of that
+    function's return points. A webhook is a courtesy: posting to it (or
+    failing to) never changes what the pipeline itself does or returns, and
+    with no webhook configured this is a no-op wrapper.
+    """
+    try:
+        result = _run_pipeline(
+            project_dir, repo_name, pr_id, local_repo=local_repo, region=region,
+            do_review=do_review, do_update_desc=do_update_desc, do_merge=do_merge,
+            do_sync=do_sync, dry_run=dry_run, model=model, progress=progress,
+            emit=emit, control=control, ask=ask)
+    except Cancelled:
+        raise  # the user's own action; nothing worth telling anyone about
+    except Exception as e:  # noqa: BLE001
+        if webhook_url:
+            notifier.post_summary(
+                webhook_url, emit=emit, repo_name=repo_name, pr_id=pr_id,
+                do_review=do_review, merged=False, reason=str(e)[:80])
+        raise
+    if webhook_url:
+        review = result.get("review")
+        notifier.post_summary(
+            webhook_url, emit=emit, repo_name=repo_name, pr_id=pr_id,
+            do_review=do_review,
+            verdict_raw=getattr(review, "verdict_raw", None),
+            verdict_key=getattr(review, "verdict_key", None),
+            impact_score=getattr(review, "impact_score", None),
+            merged=result.get("merged"),
+            reason=_stopped_reason(result.get("stopped")))
+    return result
