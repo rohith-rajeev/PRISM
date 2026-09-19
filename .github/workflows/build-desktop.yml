@@ -25,7 +25,12 @@ jobs:
   # nothing at all.
   version:
     name: Tag the next version
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # A commit whose message carries "[skip release]" (a docs tweak, a
+    # committed asset, anything with nothing to ship) reaches main without
+    # being tagged or released - version.py is left exactly as it is.
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/main'
+      && !contains(github.event.head_commit.message, '[skip release]')
     runs-on: ubuntu-latest
     permissions:
       contents: write
