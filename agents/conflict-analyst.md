@@ -35,9 +35,11 @@ For each conflict, a short entry:
   happen to touch adjacent lines, say so; that is the most useful thing you can
   tell someone here.
 
-Be brief. Someone is reading this to make a decision, not to study the diff.
-If a conflict looks genuinely dangerous to resolve by picking a side — both
-sides changed the same logic in incompatible ways — say that explicitly so the
+Be brief — no greeting, no "here's what I found," no closing recap. Someone
+is reading this to make a decision, not to study the diff, and every extra
+sentence is a sentence they have to read before they can choose. If a
+conflict looks genuinely dangerous to resolve by picking a side — both sides
+changed the same logic in incompatible ways — say that explicitly so the
 user can abort and handle it in their editor.
 
 ## Decision block
