@@ -490,25 +490,47 @@ class TokenMeter:
             return self._total_locked()
 
 
-def list_available_models(timeout=60):
-    """Return `provider/model` ids from `opencode models` (empty list on failure)."""
+_MODELS_CACHE = None
+_MODELS_CACHE_GUARD = threading.Lock()
+
+
+def list_available_models(timeout=60, force=False):
+    """Return `provider/model` ids from `opencode models` (empty list on failure).
+
+    Cached for the life of the process after the first successful call:
+    answering this means the engine enumerates every configured provider,
+    which can itself take several seconds, and the list doesn't change
+    between one job and the next in the same session — there is no reason
+    to pay that cost more than once. Pass force=True (the picker's refresh
+    button) to bypass the cache and ask again.
+    """
+    global _MODELS_CACHE
+    if not force:
+        with _MODELS_CACHE_GUARD:
+            if _MODELS_CACHE is not None:
+                return _MODELS_CACHE
     exe = engine_path()
     if exe is None:
-        return []
+        return _MODELS_CACHE or []
     try:
         proc = subprocess.run([exe, "models"], capture_output=True,
                               text=True, encoding="utf-8", errors="replace",
                               timeout=timeout)
         if proc.returncode != 0:
-            return []
+            return _MODELS_CACHE or []
         models = []
         for line in (proc.stdout or "").splitlines():
             line = line.strip()
             if line and "/" in line and not line.startswith(("#", "-", " ")):
                 models.append(line.split()[0])
-        return sorted(set(models))
+        result = sorted(set(models))
     except Exception:  # noqa: BLE001
-        return []
+        return _MODELS_CACHE or []
+    if result:
+        # Never let a transient empty result blank an already-good cache.
+        with _MODELS_CACHE_GUARD:
+            _MODELS_CACHE = result
+    return result or (_MODELS_CACHE or [])
 
 
 def detect_local_repos(project_dir):

@@ -1932,7 +1932,8 @@ class App(tk.Tk):
         mhead = tk.Frame(mi, bg=PAL["card"])
         mhead.pack(fill="x")
         self._lab(mhead, "Model and behavior", font=FONT_B, fg="text").pack(side="left")
-        self.model_refresh = RoundedButton(mhead, text="↻", command=self._load_models_async,
+        self.model_refresh = RoundedButton(mhead, text="↻",
+                                           command=lambda: self._load_models_async(force=True),
                                            style="ghost", height=22, radius=11,
                                            font=FONT_S, width=30)
         self.model_refresh.pack(side="right")
@@ -2100,15 +2101,19 @@ class App(tk.Tk):
         self.log.see("end")
 
     # ----- models -----
-    def _load_models_async(self):
+    def _load_models_async(self, force=False):
         """Feed the picker from the engine's model list without freezing the UI.
 
         The worker thread never touches Tk (not thread-safe) — it posts the
-        list to the main-thread queue consumed by _drain_logs.
+        list to the main-thread queue consumed by _drain_logs. Cached at the
+        orchestrator level after the first call, so every job created in this
+        session reuses the same list instead of re-asking the engine — that
+        enumeration is what made the picker feel slow to even open. Only the
+        refresh button (↻) forces a fresh ask.
         """
         self.model_count.config(text="loading…")
         def work():
-            models = list_available_models()
+            models = list_available_models(force=force)
             # App-level message, not a job's: the drain unpacks three
             # fields, so carry a null job id rather than a short tuple.
             self.log_q.put((None, "models", models))

@@ -34,3 +34,16 @@ earlier run, or because this run's description-update step failed) is
 historical noise, not a reason to re-review the diff. Re-deriving what
 pr-reviewer already decided burns a second full review's worth of tokens for
 no gain.
+
+**Say only what's useful.** Every agent narrates as little as possible: no
+greeting, no "I'll start by..." before a command, no restating a tool's
+output in prose before acting on it, no closing recap beyond whatever
+structured output the agent's file asks for. A one-line note earns its keep
+only when it flags something the person reading the transcript actually
+needs — a genuine surprise, a risk, a dead end being abandoned — never as a
+preamble to work that's about to happen anyway. This is not a style
+preference: real usage has seen a single review run into the hundreds of
+thousands of tokens, and narration between tool calls is pure overhead on
+every single run, paid whether or not anyone reads it. Depth of
+investigation is the job; prose describing that investigation as it happens
+is not.

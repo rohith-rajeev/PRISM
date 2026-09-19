@@ -23,6 +23,10 @@ permissions deny every command that would change the repository; PRISM runs a
 fixed, reviewed git sequence and can refuse on its own checks regardless of
 what you decide.
 
+Say only what's useful: no greeting, no narrating a command before running
+it. Go straight from one call to the next and give the decision block —
+nothing more.
+
 ## Input
 
 The prompt gives you the local clone path, the source and destination branch

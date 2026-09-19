@@ -246,6 +246,55 @@ class FreeTierRetry(unittest.TestCase):
         self.assertEqual(len(calls), 1, "an unrelated failure must not retry")
 
 
+class ModelListCaching(unittest.TestCase):
+    """Enumerating every configured provider is what made the picker feel
+    slow to even open — this is what stops it from happening more than once
+    a session."""
+
+    def setUp(self):
+        self.orig_cache = o._MODELS_CACHE
+        self.addCleanup(setattr, o, "_MODELS_CACHE", self.orig_cache)
+        o._MODELS_CACHE = None
+        self.orig_engine_path = o.engine_path
+        self.addCleanup(setattr, o, "engine_path", self.orig_engine_path)
+        self.calls = []
+
+        def fake_run(cmd, **kwargs):
+            self.calls.append(cmd)
+            class _Proc:
+                returncode = 0
+                stdout = "opencode/big-pickle\ngithub-copilot/gpt-5\n"
+            return _Proc()
+
+        o.engine_path = lambda: "/usr/bin/fake-opencode"
+        self.orig_subprocess_run = o.subprocess.run
+        self.addCleanup(setattr, o.subprocess, "run", self.orig_subprocess_run)
+        o.subprocess.run = fake_run
+
+    def test_second_call_reuses_the_cache(self):
+        first = o.list_available_models()
+        second = o.list_available_models()
+        self.assertEqual(first, second)
+        self.assertEqual(len(self.calls), 1, "a second call must not re-ask the engine")
+
+    def test_force_bypasses_the_cache(self):
+        o.list_available_models()
+        o.list_available_models(force=True)
+        self.assertEqual(len(self.calls), 2)
+
+    def test_a_failed_refresh_keeps_the_previous_good_list(self):
+        good = o.list_available_models()
+        self.assertTrue(good)
+
+        def failing_run(cmd, **kwargs):
+            class _Proc:
+                returncode = 1
+                stdout = ""
+            return _Proc()
+        o.subprocess.run = failing_run
+        self.assertEqual(o.list_available_models(force=True), good)
+
+
 class TokenMeterTests(unittest.TestCase):
     """A session in progress overwrites its own entry each tick — it's
     already cumulative for that conversation — while different sessions add

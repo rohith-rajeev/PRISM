@@ -28,6 +28,10 @@ whether a sync would conflict. The review verdict is not yours to check or
 re-derive, and the PR description (including any review write-up on it, fresh
 or stale) is not relevant to this decision — ignore it.
 
+Say only what's useful: no greeting, no narrating a command before running
+it. Go straight from one call to the next and give the decision block —
+nothing more.
+
 ## Input
 
 The prompt gives you the repository, PR id, region, the two branches, the
