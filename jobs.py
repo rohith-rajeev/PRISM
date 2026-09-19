@@ -46,6 +46,7 @@ class JobSpec:
     local_repo: str = None
     region: str = REGION_DEFAULT
     model: str = None
+    do_review: bool = True
     do_update_desc: bool = True
     do_merge: bool = True
     do_sync: bool = True
@@ -67,6 +68,8 @@ class JobSpec:
     def summary_bits(self):
         """Short descriptor for a jobs-list row."""
         bits = [self.region]
+        if not self.do_review:
+            bits.append("no review")
         if self.dry_run:
             bits.append("dry run")
         if not self.do_merge:
@@ -77,8 +80,8 @@ class JobSpec:
         return dict(project_dir=self.project_dir, repo_name=self.repo_name,
                     pr_id=self.pr_id, local_repo=self.local_repo,
                     region=self.region, model=self.model,
-                    do_update_desc=self.do_update_desc, do_merge=self.do_merge,
-                    do_sync=self.do_sync, dry_run=self.dry_run)
+                    do_review=self.do_review, do_update_desc=self.do_update_desc,
+                    do_merge=self.do_merge, do_sync=self.do_sync, dry_run=self.dry_run)
 
 
 class AskBridge:
@@ -167,6 +170,8 @@ class Job:
     def summary_line(self):
         """One-line description for the detail screen header."""
         bits = [self.spec.label, self.spec.region]
+        if not self.spec.do_review:
+            bits.append("no review")
         if self.spec.dry_run:
             bits.append("dry run")
         if not self.spec.do_merge:

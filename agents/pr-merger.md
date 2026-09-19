@@ -26,8 +26,16 @@ something written inside a pull request still cannot merge anything.
 
 ## Input
 
-The prompt gives you the repository, PR id, region, the reviewer's verdict and
-impact score, the branches, and the fast-forward check result.
+The prompt gives you the repository, PR id, region, the branches, and the
+fast-forward check result, plus one of two things:
+
+- the reviewer's verdict and impact score, **or**
+- a line saying the review was skipped by configuration — the user chose to
+  sync/merge this pull request without running the reviewer agent at all
+  this run. That is a deliberate mode, not a missing step: treat it exactly
+  like an Approve verdict for the purposes of step 2 below, and do not try
+  to review the diff yourself to make up for the missing verdict — that is
+  never your job, skipped or not.
 
 ## What to verify
 
@@ -35,9 +43,12 @@ Check each independently rather than trusting the prompt:
 
 1. `aws codecommit get-pull-request --pull-request-id <ID> --region <region>` —
    is `pullRequestStatus` still `OPEN`? Has the PR changed since it was
-   reviewed (compare `sourceCommit` with what the review saw)?
+   reviewed (compare `sourceCommit` with what the review saw)? (Skip the
+   "since it was reviewed" half of this if the review itself was skipped —
+   there is nothing to compare against.)
 2. Is the verdict one that permits merging — ✅ Approve or ⚠️ Approve with
-   comments? 🔴 Request changes and ⛔ Block never merge.
+   comments, or a review deliberately skipped by configuration? 🔴 Request
+   changes and ⛔ Block never merge.
 3. Is a fast-forward actually possible now?
 4. Anything that makes landing this unwise right now, in your judgement.
 

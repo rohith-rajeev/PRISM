@@ -246,8 +246,11 @@ def extract_question(text):
 
 @dataclass
 class ReviewResult:
+    # approve | approve-with-comments | request-changes | block | skipped | unknown
+    # "skipped" is PRISM's own sentinel for a run configured to bypass the
+    # review agent entirely — never something an agent reports.
     verdict_raw: str = ""
-    verdict_key: str = ""      # approve | approve-with-comments | request-changes | block | unknown
+    verdict_key: str = ""
     impact_score: str = ""
     impact_reason: str = ""
     summary: str = ""
@@ -256,7 +259,7 @@ class ReviewResult:
 
     def merge_allowed(self) -> bool:
         v = self.verdict_key
-        return v in ("approve", "approve-with-comments")
+        return v in ("approve", "approve-with-comments", "skipped")
 
 
 def normalise_verdict(raw: str) -> str:
@@ -1378,7 +1381,7 @@ MAX_CLARIFY_ROUNDS = 4
 
 
 def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
-                  region=REGION_DEFAULT,
+                  region=REGION_DEFAULT, do_review=True,
                   do_update_desc=True, do_merge=True, do_sync=True,
                   dry_run=False, model=None, progress=None, emit=_emit_plain,
                   control=None, ask=None):
@@ -1390,7 +1393,15 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
     the live stage and what's still pending — the stage set is dynamic
     (describe/merge stages are skipped when disabled, blocked by verdict,
     or dry-run; a sync stage appears only when a fast-forward needs it).
+
+    `do_review=False` bypasses the reviewer agent entirely — this is a
+    deliberate "just sync and merge" mode, not a failure path, so it is
+    treated as an explicit approval rather than an unparsed verdict.
+    `do_update_desc` has nothing to describe without a review and is
+    forced off in that case regardless of what was asked for.
     """
+    if not do_review:
+        do_update_desc = False
     def pg(stage, state):
         if progress:
             try:
@@ -1418,56 +1429,63 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
 
     # ---- Step 1: review ----
     ck()
-    pg(STAGE_REVIEW, "active")
-    emit("\n═══ STEP 1 — AI review ═══")
-    raw, session_id = run_opencode_review(pr_id, repo_name, local_clone, project_dir,
-                                          region=region, emit=emit, model=model,
-                                          control=control, meter=meter)
-    review = parse_review_output(raw)
-
-    # The agent stops and asks when something is missing or ambiguous. Rather
-    # than dead-ending on "no verdict", hand the question to the UI and feed
-    # the answer back into the same session.
-    rounds = 0
-    while ask is not None and rounds < MAX_CLARIFY_ROUNDS:
-        if review.verdict_key and review.verdict_key != "unknown":
-            break
-        question = extract_question(raw)
-        if not question:
-            break
-        ck()
-        emit("\n💬 The reviewer is asking a question — waiting for your reply …")
-        answer = ask(question)
-        ck()
-        if not answer:
-            emit("▸ No reply given; continuing without one.")
-            break
-        rounds += 1
-        emit(f"▸ You: {answer[:300]}")
-        _rc, raw, session_id = _continue_turn(answer, project_dir, session_id,
-                                              emit, model, control, what="reply",
-                                              meter=meter)
+    source_commit_at_review = ""
+    if not do_review:
+        emit("\n═══ STEP 1 — AI review (skipped by option) ═══")
+        emit("\n◆ Verdict: Skipped — agentic review disabled   Impact: —")
+        review = ReviewResult(verdict_key="skipped",
+                              verdict_raw="Skipped (agentic review disabled)")
+    else:
+        pg(STAGE_REVIEW, "active")
+        emit("\n═══ STEP 1 — AI review ═══")
+        raw, session_id = run_opencode_review(pr_id, repo_name, local_clone, project_dir,
+                                              region=region, emit=emit, model=model,
+                                              control=control, meter=meter)
         review = parse_review_output(raw)
 
-    emit(f"\n◆ Verdict: {review.verdict_raw or review.verdict_key}   "
-         f"Impact: {review.impact_score or '?'}/10 {review.impact_reason}")
-    pg(STAGE_REVIEW, "done")
-    if not review.verdict_key or review.verdict_key == "unknown":
-        emit("⚠ Could not parse a verdict — stopping before any write/merge.")
-        pg(STAGE_DESCRIBE, "skipped")
-        pg(STAGE_MERGE_CHECK, "skipped")
-        pg(STAGE_MERGE, "skipped")
-        return {"review": review, "merged": False, "stopped": "unparsed-verdict",
-                "tokens": meter.total()}
+        # The agent stops and asks when something is missing or ambiguous. Rather
+        # than dead-ending on "no verdict", hand the question to the UI and feed
+        # the answer back into the same session.
+        rounds = 0
+        while ask is not None and rounds < MAX_CLARIFY_ROUNDS:
+            if review.verdict_key and review.verdict_key != "unknown":
+                break
+            question = extract_question(raw)
+            if not question:
+                break
+            ck()
+            emit("\n💬 The reviewer is asking a question — waiting for your reply …")
+            answer = ask(question)
+            ck()
+            if not answer:
+                emit("▸ No reply given; continuing without one.")
+                break
+            rounds += 1
+            emit(f"▸ You: {answer[:300]}")
+            _rc, raw, session_id = _continue_turn(answer, project_dir, session_id,
+                                                  emit, model, control, what="reply",
+                                                  meter=meter)
+            review = parse_review_output(raw)
 
-    # The commit this review actually saw, embedded in the block PRISM writes
-    # below so a later run (or a human reading the PR) can tell which review
-    # it reflects. Best-effort: a failure here only costs that provenance,
-    # never the run itself.
-    try:
-        source_commit_at_review = get_pr(pr_id, region=region).get("sourceCommit", "")
-    except Exception:  # noqa: BLE001
-        source_commit_at_review = ""
+        emit(f"\n◆ Verdict: {review.verdict_raw or review.verdict_key}   "
+             f"Impact: {review.impact_score or '?'}/10 {review.impact_reason}")
+        pg(STAGE_REVIEW, "done")
+        if not review.verdict_key or review.verdict_key == "unknown":
+            emit("⚠ Could not parse a verdict — stopping before any write/merge.")
+            pg(STAGE_DESCRIBE, "skipped")
+            pg(STAGE_MERGE_CHECK, "skipped")
+            pg(STAGE_MERGE, "skipped")
+            return {"review": review, "merged": False, "stopped": "unparsed-verdict",
+                    "tokens": meter.total()}
+
+        # The commit this review actually saw, embedded in the block PRISM
+        # writes below so a later run (or a human reading the PR) can tell
+        # which review it reflects. Best-effort: a failure here only costs
+        # that provenance, never the run itself.
+        try:
+            source_commit_at_review = get_pr(pr_id, region=region).get("sourceCommit", "")
+        except Exception:  # noqa: BLE001
+            source_commit_at_review = ""
     desc_updated = False
 
     # ---- Step 2: description ----
@@ -1601,24 +1619,34 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
     # Every precondition below was already enforced in code above; this is a
     # second, independent opinion. A "go" cannot merge anything on its own —
     # PRISM has already decided it is allowed to be here.
-    stale_desc_note = (
-        "" if desc_updated else
-        "Note: the PR description could not be refreshed with this run's "
-        "findings (the update step failed or was skipped this run). If it "
-        "still shows an older review write-up, that is stale — trust the "
-        "verdict and impact score given above, which are this run's fresh "
-        "result, and do not re-review the diff yourself to double-check "
-        "them; that is the reviewer's job, not yours.\n")
+    if not do_review:
+        review_section = (
+            "Review: skipped by configuration. The user explicitly chose to "
+            "sync/merge this pull request without an agentic review this run "
+            "— treat that choice as the approval to merge, the same as an "
+            "Approve verdict. Ignore any review write-up you find on the PR "
+            "description; it is unrelated history from a previous run, not a "
+            "reason to hold this one.\n")
+    else:
+        review_section = (
+            f"Reviewer verdict: {review.verdict_raw or review.verdict_key}\n"
+            f"Impact: {review.impact_score or '?'}/10\n")
+        if not desc_updated:
+            review_section += (
+                "Note: the PR description could not be refreshed with this run's "
+                "findings (the update step failed or was skipped this run). If it "
+                "still shows an older review write-up, that is stale — trust the "
+                "verdict and impact score given above, which are this run's fresh "
+                "result, and do not re-review the diff yourself to double-check "
+                "them; that is the reviewer's job, not yours.\n")
     try:
         _out, call = run_agent(
             AGENT_MERGER,
             f"Final check before merging pull request {pr_id} in CodeCommit "
             f"repository '{repo_name}' (region {region}).\n"
-            f"Reviewer verdict: {review.verdict_raw or review.verdict_key}\n"
-            f"Impact: {review.impact_score or '?'}/10\n"
+            + review_section +
             f"Source: {src}  Destination: {dest}\n"
             f"Fast-forward possible: {mergeable}\n"
-            + stale_desc_note +
             "Confirm independently whether this should be merged now.",
             project_dir, emit=emit, model=model, control=control, meter=meter,
             label="pr-merger")
