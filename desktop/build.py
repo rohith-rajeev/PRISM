@@ -166,6 +166,8 @@ def main():
         "--hidden-import", "jobs",
         "--hidden-import", "updater",
         "--hidden-import", "version",
+        "--hidden-import", "config",
+        "--hidden-import", "notifier",
         # Tkinter is the whole UI; everything else the stdlib drags in is dead
         # weight in a GUI binary.
         "--exclude-module", "test",

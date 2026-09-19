@@ -132,6 +132,19 @@ all — the specific `git push` and `aws codecommit merge/update` commands.
 `agents/_shared-contract.md` documents the decision block they all answer
 with.
 
+## Google Chat notifications
+Optional and off by default. Paste a Google Chat webhook URL into **Help**
+and click **Save** — it's a machine-wide setting stored once in
+`~/.prism/config.json`, not a per-job option, and every job created from
+then on picks it up automatically. When a job finishes it posts one small
+card: the verdict and impact score (only when review actually ran —
+skipped review shows as "Skipped by configuration", never a fabricated
+verdict) and whether it was merged, with a short reason when it wasn't.
+Posting is entirely PRISM's own HTTP call, no agent involved, and it never
+affects the job it's reporting on: a slow, misconfigured, or unreachable
+webhook is swallowed and logged as a warning, not a failure. Leave the field
+empty to turn it off — nothing else about PRISM changes.
+
 ## Updating
 `?  Help` → `Check for updates` asks GitHub for the latest release. If it is
 newer, PRISM shows the version and its notes, and can install it: the asset for

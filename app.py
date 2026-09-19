@@ -24,6 +24,7 @@ from orchestrator import (  # noqa: E402
     list_available_models, detect_local_repos, normalise_verdict, REGION_DEFAULT,
     STAGE_REVIEW, STAGE_DESCRIBE, STAGE_MERGE_CHECK, STAGE_SYNC, STAGE_MERGE,
 )
+import config as CFG  # noqa: E402
 import jobs as J  # noqa: E402
 import updater as U  # noqa: E402
 from orchestrator import TOOL_DIR  # noqa: E402
@@ -1873,6 +1874,28 @@ class App(tk.Tk):
         tk.Label(head, text=f"Version {APP_VERSION}", font=FONT_XS,
                  bg=PAL["page"], fg=PAL["muted"]).pack(side="right", padx=(0, 12))
 
+        # A machine-wide setting, not a per-job one — saved once here, read
+        # fresh into every job's own frozen spec when it's created.
+        notif = RoundedCard(parent)
+        notif.pack(fill="x", pady=(0, 6))
+        ni = notif.inner
+        ni.config(padx=12, pady=8)
+        self._lab(ni, "Google Chat notifications", font=FONT_B, fg="text").pack(anchor="w")
+        self._lab(ni, "Posts a brief verdict / impact / merged card to this "
+                      "webhook when a job finishes. Leave empty to turn it "
+                      "off — nothing else changes.").pack(anchor="w", pady=(0, 6))
+        wrow = tk.Frame(ni, bg=PAL["card"])
+        wrow.pack(fill="x")
+        self.webhook_var = tk.StringVar(value=CFG.get_webhook_url())
+        self.webhook_entry = self._entry(wrow, self.webhook_var)
+        self.webhook_entry.pack(side="left", fill="x", expand=True, ipady=3)
+        RoundedButton(wrow, text="Save", command=self._save_webhook,
+                     style="outline", height=30, width=70,
+                     font=FONT_S).pack(side="left", padx=(8, 0))
+        self.webhook_status = self._lab(ni, "", font=FONT_XS)
+        self.webhook_status.pack(anchor="w", pady=(6, 0))
+        self._refresh_webhook_status()
+
         card = RoundedCard(parent, stretch=True)
         card.pack(fill="both", expand=True)
         inner = card.inner
@@ -1901,6 +1924,16 @@ class App(tk.Tk):
 
     def _check_updates(self):
         UpdateDialog(self, self)
+
+    def _save_webhook(self):
+        CFG.set_webhook_url(self.webhook_var.get())
+        self._refresh_webhook_status()
+
+    def _refresh_webhook_status(self):
+        configured = bool(CFG.get_webhook_url())
+        self.webhook_status.config(
+            text="✓ Notifications on" if configured else "Notifications off — nothing saved yet",
+            fg=PAL["good"] if configured else PAL["muted"])
 
     def show_help(self):
         self._close_pickers()
@@ -2581,7 +2614,13 @@ class App(tk.Tk):
             # forces and greys it out, this just holds regardless.
             do_update_desc=self.rev_var.get() and self.upd_var.get(),
             do_merge=self.mrg_var.get(),
-            do_sync=self.syn_var.get(), dry_run=self.dry_var.get())
+            do_sync=self.syn_var.get(), dry_run=self.dry_var.get(),
+            # Read fresh at job-creation time rather than cached at app
+            # startup, so saving a webhook in Help takes effect on the very
+            # next job without needing a restart — and still gets frozen
+            # into this one job's own spec once created, same as everything
+            # else here.
+            webhook_url=CFG.get_webhook_url() or None)
 
     def _populate_form(self, spec):
         """Seed the form from a previous job — usually only the PR id changes."""
