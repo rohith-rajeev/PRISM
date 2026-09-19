@@ -1689,6 +1689,12 @@ class UpdateDialog(tk.Toplevel):
             return
         self._show_downloading()
         self._spawn(self._work_install)
+        # The poll loop stops itself once it lands on a resting state (see
+        # _pump) — "available" was exactly that, so nothing was left running
+        # to pick up "downloading"'s progress messages without this. Without
+        # it the dialog sat on "Starting…" forever: the queue was filling up,
+        # nothing was ever draining it.
+        self._pump()
 
     def _cancel(self):
         self._stop.set()
