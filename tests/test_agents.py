@@ -188,6 +188,28 @@ class SafetyGates(unittest.TestCase):
         self.assertEqual(len(self.merged), 1)
         self.assertTrue(res["merged"])
 
+    def test_skipping_review_still_merges_a_clean_fast_forward(self):
+        """The whole point of do_review=False: sync-and-merge with no
+        reviewer call, treated as an approval rather than a missing verdict."""
+        res = self._run(do_review=False)
+        self.assertEqual(len(self.merged), 1)
+        self.assertTrue(res["merged"])
+        self.assertEqual(res["review"].verdict_key, "skipped")
+
+    def test_skipping_review_forces_the_description_update_off_too(self):
+        """There is nothing to describe without a review having run."""
+        calls = []
+        o.update_description_direct = lambda *a, **k: calls.append(1) or ""
+        self._run(do_review=False, do_update_desc=True)
+        self.assertEqual(calls, [], "description update ran with no review to draw from")
+
+    def test_no_go_still_holds_even_with_review_skipped(self):
+        """pr-merger's veto is independent of whether a review happened."""
+        o.run_agent = lambda *a, **k: ("", {"decision": "no-go", "reason": "changed"})
+        res = self._run(do_review=False)
+        self.assertEqual(self.merged, [])
+        self.assertEqual(res["stopped"], "merger-no-go")
+
 
 class LocaleIndependence(unittest.TestCase):
     """Windows decodes with cp1252 unless told otherwise.

@@ -55,11 +55,15 @@ That's it. PRISM opens the job's detail view and starts working.
 
 ## Watching it work
 
-The **progress bar** fills through four stages:
+The **progress bar** fills through up to four stages:
 
 ```
 Review  →  Describe  →  Merge check  →  Merge
 ```
+
+Only the stages this job could actually reach are shown — a job with
+**Agentic PR review** off shows just `Merge check → Merge`, one with
+**Merge PR** off shows just `Review → Describe`, and so on.
 
 The **CONVERSATION** panel shows what the reviewer is doing:
 
@@ -164,14 +168,19 @@ one repo usually means changing only the PR id.
 
 ## Settings
 
-Four checkboxes on the new-job screen:
+Five checkboxes on the new-job screen, top to bottom:
 
 | Setting | On means | Turn it off when |
 |---|---|---|
-| **Update PR description after review** | Findings are written onto the PR for other reviewers to see | You want the review kept to yourself |
-| **Auto-merge once approved** | An approving verdict merges the PR | You want to merge by hand |
+| **Agentic PR review** | The reviewer agent runs and produces a verdict | You've already reviewed the PR yourself and just want PRISM to sync/merge it — the merge step then treats that as an explicit approval, same as an Approve verdict |
+| **Update PR description after review** | Findings are written onto the PR for other reviewers to see | You want the review kept to yourself. Greyed out and forced off automatically when Agentic PR review is off — there's nothing to describe without one |
 | **Sync with base branch when diverged** | If a fast-forward isn't possible, PRISM merges the base branch in and retries | You'd rather resolve that yourself |
+| **Merge PR** | An approving (or skipped) verdict merges the PR | You want to merge by hand |
 | **Dry run — skip writes and merges** | Nothing is written or merged; you just get the verdict | — |
+
+Skipping the review never skips the final independent check before merging —
+PRISM always confirms the PR is still open, unchanged, and fast-forwardable
+right before it merges, review or no review.
 
 **Use Dry run for your first go.** It gives you the full review with zero risk.
 

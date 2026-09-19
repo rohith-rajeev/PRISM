@@ -43,14 +43,25 @@ pre-filled from the last job (usually only the PR id changes).
    source** (`git fetch + merge origin/<dest> + push`) and retries the merge.
 6. 🔴 Request-changes / ⛔ Block verdicts are **never merged**.
 
+Five checkboxes configure what a job actually does, top to bottom:
+**Agentic PR review** (turn it off to just sync and merge a PR you've already
+reviewed some other way — the merge step then treats that as an explicit
+approval rather than a missing verdict, and the independent pr-merger check
+still runs), **Update PR description after review** (gated on the first —
+there is nothing to describe without a review having run, so it's forced off
+and greyed out while review is off), **Sync with base branch when diverged**,
+**Merge PR**, and **Dry run** (skips writes and merges entirely).
+
 The conversation pane shows the reviewer's prose in blue and the tools it runs
 in grey, so you can watch it work; anything running carries a spinner so a long
 step never looks like a hang. A progress bar under the **Start Prisming**
-button tracks the run: the fill
-stops on the stage in flight, with a marker and caption per stage. The plan is
-dynamic per PR — describe/merge stages show as skipped when disabled, blocked
-by verdict, or dry-run, and the Merge caption switches to "Syncing…" when a
-fast-forward needs a destination→source sync first.
+button tracks the run: the fill stops on the stage in flight, with a marker
+and caption per stage. The stage set itself is dynamic per job, not just
+each stage's state — a job with review off shows only Merge check/Merge, one
+with auto-merge off shows only Review/Describe, and so on; a step the job's
+own configuration was never going to touch does not appear on the bar at
+all. The Merge caption switches to "Syncing…" when a fast-forward needs a
+destination→source sync first.
 
 **Stop** cancels at any point — it terminates the running child process and
 returns to idle. If the reviewer asks a question (missing PR id, ambiguous

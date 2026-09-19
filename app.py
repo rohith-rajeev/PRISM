@@ -137,6 +137,23 @@ STAGE_DEFS = [
 STAGE_LABEL = dict(STAGE_DEFS)
 
 
+def _relevant_stages(spec):
+    """Which of STAGE_DEFS this job's own configuration could ever touch —
+    a job that skips review has nothing to show for Review or Describe
+    (which depends on it), and one that skips merge has nothing for Merge
+    check or Merge. Shown for a specific job, not the fixed set every run
+    used to render regardless of what it was actually going to do."""
+    stages = []
+    if spec.do_review:
+        stages.append(STAGE_REVIEW)
+        if spec.do_update_desc:
+            stages.append(STAGE_DESCRIBE)
+    if spec.do_merge:
+        stages.append(STAGE_MERGE_CHECK)
+        stages.append(STAGE_MERGE)
+    return stages
+
+
 def _rr(canvas, x1, y1, x2, y2, r, fill, outline, tags="rr", width=1):
     """Rounded rectangle as a *single* smoothed polygon.
 
@@ -401,8 +418,16 @@ class ProgressBar(tk.Canvas):
         self.reset()
         self.bind("<Configure>", lambda _e: self._draw())
 
-    def reset(self):
-        self.states = {sid: "pending" for sid, _ in STAGE_DEFS}
+    def reset(self, stages=None):
+        """`stages` restricts the bar to just those stage ids, in STAGE_DEFS
+        order — a job configured to skip review, say, has nothing meaningful
+        to show for Review (or Describe, which depends on it), and one job's
+        dots should not include a step it was never going to run. None (or
+        an empty result) falls back to the full set, so the placeholder
+        shown before any job exists still reads as a normal-looking bar.
+        """
+        self._defs = [d for d in STAGE_DEFS if d[0] in stages] if stages else list(STAGE_DEFS)
+        self.states = {sid: "pending" for sid, _ in self._defs}
         self.notes = {}
         self._draw()
 
@@ -422,8 +447,10 @@ class ProgressBar(tk.Canvas):
 
     def _fraction(self):
         """How full the track is: resolved stages, plus half for one in flight."""
-        n = len(STAGE_DEFS)
-        states = [self.states.get(sid, "pending") for sid, _ in STAGE_DEFS]
+        n = len(self._defs)
+        if n == 0:
+            return 0.0
+        states = [self.states.get(sid, "pending") for sid, _ in self._defs]
         if all(s in ("done", "skipped") for s in states):
             return 1.0
         for i, s in enumerate(states):
@@ -435,7 +462,8 @@ class ProgressBar(tk.Canvas):
     def _fill_colour(self):
         if any(s == "error" for s in self.states.values()):
             return PAL["bad"]
-        if all(self.states.get(sid) in ("done", "skipped") for sid, _ in STAGE_DEFS):
+        if self._defs and all(self.states.get(sid) in ("done", "skipped")
+                              for sid, _ in self._defs):
             return PAL["good"]
         return PAL["accent"]
 
@@ -445,7 +473,9 @@ class ProgressBar(tk.Canvas):
         if w <= 10 or h <= 10:
             return
         self.config(bg=PAL["page"])
-        n = len(STAGE_DEFS)
+        n = len(self._defs)
+        if n == 0:
+            return
         y0, y1 = self.TRACK_TOP, self.TRACK_TOP + self.TRACK_H
         r = self.TRACK_H / 2
 
@@ -454,7 +484,7 @@ class ProgressBar(tk.Canvas):
         if frac > 0:
             _rr(self, 0, y0, max(self.TRACK_H, w * frac), y1, r, self._fill_colour(), None)
 
-        for i, (sid, label) in enumerate(STAGE_DEFS):
+        for i, (sid, label) in enumerate(self._defs):
             state = self.states.get(sid, "pending")
             cx = w * (i + 0.5) / n
             mx = min(max(cx, r + 1), w - r - 1)   # clamped so end dots stay on the track
@@ -519,10 +549,12 @@ class StatusPill(tk.Canvas):
 class CheckRow(tk.Frame):
     """Rounded-square custom checkbox + label."""
 
-    def __init__(self, parent, text, var, muted=False):
+    def __init__(self, parent, text, var, muted=False, on_change=None):
         super().__init__(parent, bg=PAL["card"])
         self.var = var
         self._muted = muted
+        self._enabled = True
+        self._on_change = on_change
         self.box = tk.Canvas(self, width=20, height=20, highlightthickness=0, bd=0)
         self.box.pack(side="left")
         self.label = tk.Label(self, text=text, font=FONT_S,
@@ -533,23 +565,44 @@ class CheckRow(tk.Frame):
         self.refresh_theme()
 
     def toggle(self):
+        if not self._enabled:
+            return
         self.var.set(not self.var.get())
+        self._draw()
+        if self._on_change:
+            self._on_change()
+
+    def set_enabled(self, enabled):
+        """Grey out and stop responding to clicks — for a checkbox whose
+        setting has no effect while another one is off (e.g. there is
+        nothing to describe without a review having run)."""
+        self._enabled = enabled
+        cursor = "hand2" if enabled else "arrow"
+        self.box.config(cursor=cursor)
+        self.label.config(cursor=cursor)
         self._draw()
 
     def refresh_theme(self):
         self.config(bg=PAL["card"])
-        self.label.config(bg=PAL["card"],
-                          fg=PAL["muted"] if self._muted else PAL["text"])
+        self.label.config(bg=PAL["card"])
         self.box.config(bg=PAL["card"])
         self._draw()
 
     def _draw(self):
         self.box.delete("all")
         on = bool(self.var.get())
-        fill = PAL["accent"] if on else PAL["card"]
-        _rr(self.box, 2, 2, 18, 18, 5, fill, PAL["accent"] if on else PAL["muted"])
+        if not self._enabled:
+            fill = PAL["disabled_bg"] if on else PAL["card"]
+            outline = PAL["disabled_bg"] if not on else PAL["disabled_bg"]
+            self.label.config(fg=PAL["disabled_fg"])
+        else:
+            fill = PAL["accent"] if on else PAL["card"]
+            outline = PAL["accent"] if on else PAL["muted"]
+            self.label.config(fg=PAL["muted"] if self._muted else PAL["text"])
+        _rr(self.box, 2, 2, 18, 18, 5, fill, outline)
         if on:
-            self.box.create_text(10, 10, text="✓", fill="white", font=(_FAMILY, 9, "bold"))
+            self.box.create_text(10, 10, text="✓", fill="white" if self._enabled
+                                 else PAL["disabled_fg"], font=(_FAMILY, 9, "bold"))
 
 
 class AgentPanel(RoundedCard):
@@ -1943,15 +1996,21 @@ class App(tk.Tk):
                                    group_key=None, empty_hint="Loading models…")
         self.model_picker.pack(fill="x", pady=(6, 4))
         self.model_picker.set_custom(DEFAULT_MODEL)
+        self.rev_var = tk.BooleanVar(value=True)
         self.upd_var = tk.BooleanVar(value=True)
-        self.mrg_var = tk.BooleanVar(value=True)
         self.syn_var = tk.BooleanVar(value=True)
+        self.mrg_var = tk.BooleanVar(value=True)
         self.dry_var = tk.BooleanVar(value=False)
-        for txt, var, muted in (("Update PR description after review", self.upd_var, False),
-                                ("Auto-merge once approved", self.mrg_var, False),
-                                ("Sync with base branch when diverged", self.syn_var, False),
+        self.rev_row = CheckRow(mi, "Agentic PR review", self.rev_var,
+                                on_change=self._sync_review_dependency)
+        self.rev_row.pack(anchor="w")
+        self.upd_row = CheckRow(mi, "Update PR description after review", self.upd_var)
+        self.upd_row.pack(anchor="w")
+        for txt, var, muted in (("Sync with base branch when diverged", self.syn_var, False),
+                                ("Merge PR", self.mrg_var, False),
                                 ("Dry run — skip writes and merges", self.dry_var, True)):
             CheckRow(mi, txt, var, muted=muted).pack(anchor="w")
+        self._sync_review_dependency()
         self._place_midrow()
 
 
@@ -2075,6 +2134,20 @@ class App(tk.Tk):
         # problem as a screen switch, so size and paint them now.
         if getattr(self, "midrow", None) is not None:
             self._repaint(self.midrow)
+
+    def _sync_review_dependency(self):
+        """"Update PR description" has nothing to draw from without a review
+        having run, so it's forced off and greyed out while "Agentic PR
+        review" is off — restoring whatever it was set to once review comes
+        back on, rather than losing the user's choice.
+        """
+        reviewing = self.rev_var.get()
+        if not reviewing:
+            self._upd_before_review_off = self.upd_var.get()
+            self.upd_var.set(False)
+        else:
+            self.upd_var.set(getattr(self, "_upd_before_review_off", True))
+        self.upd_row.set_enabled(reviewing)
 
     # ----- badge -----
     def _draw_badge(self):
@@ -2496,14 +2569,25 @@ class App(tk.Tk):
             project_dir=proj, repo_name=repo, pr_id=pr, local_repo=local_repo,
             region=self.region_var.get().strip() or REGION_DEFAULT,
             model=self.model_picker.get() or None,
-            do_update_desc=self.upd_var.get(), do_merge=self.mrg_var.get(),
+            do_review=self.rev_var.get(),
+            # There is nothing to describe without a review having run, no
+            # matter what the checkbox happens to show — the UI already
+            # forces and greys it out, this just holds regardless.
+            do_update_desc=self.rev_var.get() and self.upd_var.get(),
+            do_merge=self.mrg_var.get(),
             do_sync=self.syn_var.get(), dry_run=self.dry_var.get())
 
     def _populate_form(self, spec):
         """Seed the form from a previous job — usually only the PR id changes."""
         self.proj_var.set(spec.project_dir)
         self.region_var.set(spec.region)
+        self.rev_var.set(spec.do_review)
         self.upd_var.set(spec.do_update_desc)
+        # Not _sync_review_dependency(): its restore-the-previous-value
+        # behaviour is for interactive toggling, and here would clobber the
+        # value just set above with a stale cached one. Just match the spec.
+        self._upd_before_review_off = spec.do_update_desc
+        self.upd_row.set_enabled(spec.do_review)
         self.mrg_var.set(spec.do_merge)
         self.syn_var.set(spec.do_sync)
         self.dry_var.set(spec.dry_run)
@@ -2580,7 +2664,7 @@ class App(tk.Tk):
         """
         self.detail_title.config(text=job.summary_line())
         self.stage_state = dict(job.stages)
-        self.seg.reset()
+        self.seg.reset(stages=_relevant_stages(job.spec))
         for sid, state in job.stages.items():
             if sid == STAGE_SYNC:
                 continue
