@@ -269,45 +269,44 @@ class TokenMeterTests(unittest.TestCase):
         self.assertAlmostEqual(total["cost"], 0.03)
 
 
-class DescriptionFreshness(unittest.TestCase):
-    """A block merely existing on the PR proves nothing about which run
-    wrote it — this is what stops a stale block from a failed/older run
-    reading as this run's successful description update."""
+class DirectDescriptionUpdate(unittest.TestCase):
+    """Step 2 writes the PR description itself now (no poster agent), so
+    this is the only thing that has to get the block right."""
 
     def setUp(self):
         self.orig_get_pr = o.get_pr
+        self.orig_aws_cli = o.aws_cli
         self.addCleanup(setattr, o, "get_pr", self.orig_get_pr)
+        self.addCleanup(setattr, o, "aws_cli", self.orig_aws_cli)
+        self.written = {}
 
-    def test_stamped_embeds_a_matching_meta_comment(self):
-        block = "<!-- pr-reviewer:start -->\n---\nbody\n<!-- pr-reviewer:end -->"
-        out = o._stamped(block, "approve", "abc123")
-        self.assertIn("<!-- pr-reviewer:meta verdict=approve commit=abc123 -->", out)
+        def fake_aws_cli(*args, **kwargs):
+            self.written["description"] = args[args.index("--description") + 1]
+            return {}
 
-    def test_fresh_block_matches_this_runs_verdict_and_commit(self):
-        block = o._stamped("<!-- pr-reviewer:start -->\nbody\n<!-- pr-reviewer:end -->",
-                           "approve", "abc123")
-        o.get_pr = lambda *a, **k: {"description": block}
-        self.assertTrue(o.description_has_review_block(
-            "7", verdict_key="approve", source_commit="abc123"))
+        o.aws_cli = fake_aws_cli
 
-    def test_stale_block_from_an_earlier_run_is_not_current(self):
-        block = o._stamped("<!-- pr-reviewer:start -->\nbody\n<!-- pr-reviewer:end -->",
-                           "request-changes", "old-commit")
-        o.get_pr = lambda *a, **k: {"description": block}
-        self.assertFalse(o.description_has_review_block(
-            "7", verdict_key="approve", source_commit="new-commit"))
+    def test_embeds_a_provenance_stamp(self):
+        o.get_pr = lambda *a, **k: {"description": ""}
+        o.update_description_direct(
+            "7", "Approve", "3", ["- **[Low] nit** cosmetic"],
+            verdict_key="approve", source_commit="abc123")
+        self.assertIn("<!-- pr-reviewer:meta verdict=approve commit=abc123 -->",
+                     self.written["description"])
 
-    def test_presence_only_check_ignores_freshness_when_not_asked(self):
-        """Callers that don't pass a verdict/commit keep the old behaviour."""
-        block = o._stamped("<!-- pr-reviewer:start -->\nbody\n<!-- pr-reviewer:end -->",
-                           "request-changes", "old-commit")
-        o.get_pr = lambda *a, **k: {"description": block}
-        self.assertTrue(o.description_has_review_block("7"))
-
-    def test_no_block_at_all_is_never_current(self):
-        o.get_pr = lambda *a, **k: {"description": "just a regular PR description"}
-        self.assertFalse(o.description_has_review_block(
-            "7", verdict_key="approve", source_commit="abc123"))
+    def test_replaces_a_stale_block_from_an_earlier_run(self):
+        stale = ("<!-- pr-reviewer:start -->\n"
+                 "<!-- pr-reviewer:meta verdict=request-changes commit=old -->\n"
+                 "old findings\n<!-- pr-reviewer:end -->")
+        o.get_pr = lambda *a, **k: {"description": stale}
+        o.update_description_direct(
+            "7", "Approve", "3", ["- new finding"],
+            verdict_key="approve", source_commit="new-commit")
+        desc = self.written["description"]
+        self.assertNotIn("old findings", desc)
+        self.assertIn("commit=new-commit", desc)
+        self.assertEqual(desc.count("pr-reviewer:start"), 1,
+                         "the stale block must be replaced, not appended to")
 
 
 class PathLocks(unittest.TestCase):

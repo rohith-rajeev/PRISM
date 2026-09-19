@@ -8,6 +8,7 @@ verification and swap code without a network or a published release.
 import io
 import os
 import re
+import ssl
 import stat
 import sys
 import tarfile
@@ -275,6 +276,67 @@ class VersionModule(unittest.TestCase):
     def test_the_version_is_parseable(self):
         import version
         self.assertGreater(u.parse_version(version.__version__), (0,))
+
+
+class SSLContextForFrozenBuilds(unittest.TestCase):
+    """A PyInstaller build has no access to whatever certificate-install
+    step a normal Python relies on, so it needs its own bundled CA file -
+    this is what made HTTPS update checks fail with CERTIFICATE_VERIFY_FAILED
+    on a fresh macOS install."""
+
+    def setUp(self):
+        u._SSL_CONTEXT = None
+        self.addCleanup(setattr, u, "_SSL_CONTEXT", None)
+        self.orig_frozen = getattr(sys, "frozen", None)
+        self.orig_meipass = getattr(sys, "_MEIPASS", None)
+        self.addCleanup(self._restore_sys)
+
+    def _restore_sys(self):
+        if self.orig_frozen is None:
+            if hasattr(sys, "frozen"):
+                del sys.frozen
+        else:
+            sys.frozen = self.orig_frozen
+        if self.orig_meipass is None:
+            if hasattr(sys, "_MEIPASS"):
+                del sys._MEIPASS
+        else:
+            sys._MEIPASS = self.orig_meipass
+
+    def test_not_frozen_uses_the_interpreters_own_defaults(self):
+        sys.frozen = False
+        ctx = u._ssl_context()
+        self.assertIsInstance(ctx, ssl.SSLContext)
+
+    def test_frozen_with_a_bundled_cacert_uses_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            certs = Path(d, "certs")
+            certs.mkdir()
+            cacert = certs / "cacert.pem"
+            cacert.write_text("not a real cert, just has to exist", encoding="utf-8")
+            sys.frozen = True
+            sys._MEIPASS = d
+            # A real cert file isn't required for this test - just that the
+            # bundled path is the one handed to create_default_context.
+            calls = []
+            real = u.ssl.create_default_context
+            u.ssl.create_default_context = lambda *a, **k: calls.append(k) or real()
+            try:
+                u._ssl_context()
+            finally:
+                u.ssl.create_default_context = real
+            self.assertEqual(calls[0].get("cafile"), str(cacert))
+
+    def test_frozen_without_a_bundled_cacert_falls_back(self):
+        with tempfile.TemporaryDirectory() as d:
+            sys.frozen = True
+            sys._MEIPASS = d      # no certs/ subfolder at all
+            ctx = u._ssl_context()
+            self.assertIsInstance(ctx, ssl.SSLContext)
+
+    def test_result_is_cached(self):
+        sys.frozen = False
+        self.assertIs(u._ssl_context(), u._ssl_context())
 
 
 class NothingPublishedYet(unittest.TestCase):

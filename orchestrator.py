@@ -46,7 +46,6 @@ BUNDLED_AGENT = AGENTS_DIR / "pr-reviewer.md"
 # every write in this module is performed by PRISM behind its own gates.
 AGENT_REVIEWER = "pr-reviewer"
 AGENT_CONTEXT = "pr-context-resolver"
-AGENT_POSTER = "review-comments-poster"
 AGENT_FF_CHECK = "fast-forward-merge-checker"
 AGENT_SYNC = "pr-sync"
 AGENT_CONFLICT = "conflict-analyst"
@@ -75,12 +74,6 @@ FINDING_RE = re.compile(r"^\s*-\s*\*\*\[(Critical|High|Medium|Low|Nit)\]", re.IG
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 DESC_BLOCK_RE = re.compile(r"<!-- pr-reviewer:start -->.*?<!-- pr-reviewer:end -->", re.DOTALL)
-
-# Embedded inside a description block by PRISM itself (never by an agent) so
-# a later run can tell *this* run's write apart from a stale block a previous
-# review left behind — presence of the start/end markers alone proves nothing
-# about which run wrote them.
-STAMP_RE = re.compile(r"<!--\s*pr-reviewer:meta\s+verdict=(\S+)\s+commit=(\S+)\s*-->")
 
 MERGEABLE_VERDICTS = ("approve", "approve with comments")
 
@@ -992,74 +985,13 @@ def get_pr(pr_id, region=REGION_DEFAULT):
     }
 
 
-def _stamped(block_text, verdict_key, source_commit):
-    """Embed a freshness marker right after a block's start comment.
-
-    PRISM writes this, never an agent — it is what lets a later run tell
-    *this* run's write apart from a stale block a previous review left
-    behind, instead of just checking that a block exists at all.
-    """
-    if not verdict_key and not source_commit:
-        return block_text
-    stamp = (f"<!-- pr-reviewer:meta verdict={verdict_key or 'unknown'} "
-             f"commit={source_commit or 'unknown'} -->")
-    if "<!-- pr-reviewer:start -->" in block_text:
-        return block_text.replace("<!-- pr-reviewer:start -->",
-                                  "<!-- pr-reviewer:start -->\n" + stamp, 1)
-    return stamp + "\n" + block_text
-
-
-def description_has_review_block(pr_id, verdict_key=None, source_commit=None,
-                                 region=REGION_DEFAULT):
-    """True when the PR description carries a pr-reviewer marker block.
-
-    Used to verify the agent actually performed the Step-2 write: the engine
-    exits 0 even when the agent declines to act, so a zero exit code alone is
-    not evidence that anything was written.
-
-    Pass `verdict_key`/`source_commit` (this run's own values) to additionally
-    require that the block matches *this* run rather than merely existing —
-    without it, a stale block a previous review left behind reads as success
-    for a run whose own write actually failed, which then hands the merge
-    check a description that contradicts the fresh verdict it was given.
-    """
-    try:
-        desc = get_pr(pr_id, region=region)["description"]
-    except Exception:  # noqa: BLE001
-        return False
-    m = DESC_BLOCK_RE.search(desc or "")
-    if not m:
-        return False
-    if verdict_key is None and source_commit is None:
-        return True
-    stamp = STAMP_RE.search(m.group(0))
-    return bool(stamp and stamp.group(1) == verdict_key
-               and stamp.group(2) == source_commit)
-
-
-def write_description_block(pr_id, block, region=REGION_DEFAULT,
-                            verdict_key=None, source_commit=None):
-    """Write an agent-composed block onto the PR, replacing any stale one.
-
-    The agent produced the text; this function is the only thing that talks to
-    CodeCommit, so the write stays deterministic, size-checked, and impossible
-    to reach from a prompt.
-    """
-    block = _stamped(block, verdict_key, source_commit)
-    pr = get_pr(pr_id, region=region)
-    desc = DESC_BLOCK_RE.sub("", pr["description"] or "").strip()
-    merged = (desc + "\n\n" + block.strip()).strip()
-    if len(merged) > PR_DESCRIPTION_MAX:
-        keep = PR_DESCRIPTION_MAX - len(block) - 2
-        merged = (desc[:max(0, keep)] + "\n\n" + block.strip()).strip()
-    aws_cli("update-pull-request-description", "--pull-request-id", str(pr_id),
-            "--description", merged, region=region)
-    return merged
-
-
 def update_description_direct(pr_id, verdict_text, impact, findings, region=REGION_DEFAULT,
                               verdict_key=None, source_commit=None):
-    """Fallback: replicate the agent's Step-2 marker block via AWS CLI directly."""
+    """Step 2: write the review's findings onto the PR description via AWS CLI.
+
+    No agent call — the findings are already one-line bullets straight from
+    the parsed review, so PRISM composes and writes this block itself.
+    """
     pr = get_pr(pr_id, region=region)
     desc = DESC_BLOCK_RE.sub("", pr["description"] or "").strip()  # drop stale block
     bullets = "\n".join(f"{b}" for b in (findings or [])[:20]) or "- (no discrete findings)"
@@ -1506,10 +1438,10 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
         return {"review": review, "merged": False, "stopped": "unparsed-verdict",
                 "tokens": meter.total()}
 
-    # The commit this review actually saw, so a later run can tell whether a
-    # description block reflects *this* review or a stale one from an
-    # earlier run (see description_has_review_block). Best-effort: a failure
-    # here only costs the freshness check, never the run itself.
+    # The commit this review actually saw, embedded in the block PRISM writes
+    # below so a later run (or a human reading the PR) can tell which review
+    # it reflects. Best-effort: a failure here only costs that provenance,
+    # never the run itself.
     try:
         source_commit_at_review = get_pr(pr_id, region=region).get("sourceCommit", "")
     except Exception:  # noqa: BLE001
@@ -1517,63 +1449,35 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
     desc_updated = False
 
     # ---- Step 2: description ----
+    # PRISM composes and writes this itself — no agent call. findings are
+    # already one-line bullets straight from the parsed review, and an LLM
+    # "condensing" pass added a call for no real benefit while being the
+    # one most likely to land on a free-tier model mid-sequence (see
+    # FREE_TIER_MARKER) for zero upside: this write is deterministic either
+    # way.
     ck()
     if do_update_desc:
         pg(STAGE_DESCRIBE, "active")
         emit("\n═══ STEP 2 — Update PR description ═══")
         if dry_run:
-            emit("(dry-run) would ask the reviewer to append findings + fallback direct update.")
+            emit("(dry-run) would update the PR description directly from the review.")
             pg(STAGE_DESCRIBE, "skipped")
         else:
             try:
-                # A separate agent composes the block; PRISM writes it. The
-                # agent that read the diff never gets to touch the PR.
-                out, decision = run_agent(
-                    AGENT_POSTER,
-                    "Condense this review into the PR description block.\n\n"
-                    + (review.raw_output or "")[:14000],
-                    project_dir, emit=emit, model=model, control=control,
-                    meter=meter, label="review-comments-poster")
-                block = DESC_BLOCK_RE.search(out or "")
-                if decision.get("decision") == "skip":
-                    emit(f"◆ Poster skipped: {decision.get('reason', 'no reason given')}")
-                elif block:
-                    write_description_block(pr_id, block.group(0), region=region,
-                                            verdict_key=review.verdict_key,
-                                            source_commit=source_commit_at_review)
-                    emit("◆ Description updated from the poster's block.")
-                else:
-                    emit("⚠ Poster returned no marker block.")
-            except Exception as e:  # noqa: BLE001
-                emit(f"⚠ Description poster failed ({e}).")
-            # A zero exit code only means the engine ran, not that the agent
-            # wrote anything — and a block already on the PR may be a stale
-            # one a previous run left behind, so require it to match this
-            # run's own verdict and commit before calling it done.
-            if description_has_review_block(pr_id, verdict_key=review.verdict_key,
-                                            source_commit=source_commit_at_review,
-                                            region=region):
-                emit("◆ Description update finished (marker block present on the PR).")
+                merged = update_description_direct(
+                    pr_id, review.verdict_raw or review.verdict_key,
+                    review.impact_score or "?", review.findings, region=region,
+                    verdict_key=review.verdict_key,
+                    source_commit=source_commit_at_review)
+                emit(f"◆ Description updated directly from the review ({len(merged)} chars).")
                 pg(STAGE_DESCRIBE, "done")
                 desc_updated = True
-            else:
-                emit("⚠ No fresh reviewer block on the PR for this run — "
-                     "falling back to direct AWS update …")
-                try:
-                    merged = update_description_direct(
-                        pr_id, review.verdict_raw or review.verdict_key,
-                        review.impact_score or "?", review.findings, region=region,
-                        verdict_key=review.verdict_key,
-                        source_commit=source_commit_at_review)
-                    emit(f"◆ Direct description update wrote {len(merged)} chars.")
-                    pg(STAGE_DESCRIBE, "done")
-                    desc_updated = True
-                except Exception as e:  # noqa: BLE001
-                    # A description is cosmetic — report loudly, but don't throw
-                    # away a completed review by aborting the whole run.
-                    emit(f"⚠ Direct description update failed too: {e}")
-                    emit("⚠ Continuing — the PR description was NOT updated.")
-                    pg(STAGE_DESCRIBE, "error")
+            except Exception as e:  # noqa: BLE001
+                # A description is cosmetic — report loudly, but don't throw
+                # away a completed review by aborting the whole run.
+                emit(f"⚠ Description update failed: {e}")
+                emit("⚠ Continuing — the PR description was NOT updated.")
+                pg(STAGE_DESCRIBE, "error")
     else:
         emit("\n═══ STEP 2 — Update PR description (skipped by option) ═══")
         pg(STAGE_DESCRIBE, "skipped")

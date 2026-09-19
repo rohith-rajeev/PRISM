@@ -1,3 +1,10 @@
 # Build-time only. PRISM itself has zero runtime dependencies (stdlib + Tkinter).
 # Install with:  python3 -m pip install -r desktop/requirements-build.txt
 pyinstaller>=5.13,<8
+# Not imported by any module — its CA bundle is embedded as a data file
+# (see desktop/build.py) so the frozen app has a trust store of its own.
+# Without this, HTTPS update checks fail on a fresh macOS install with
+# CERTIFICATE_VERIFY_FAILED: a normal Python gets its certs from wherever
+# python.org's installer or Homebrew put them, but a PyInstaller build has
+# none of that at run time.
+certifi
