@@ -33,6 +33,12 @@ from version import __version__ as APP_VERSION  # noqa: E402
 # found the same way the agent bundle is.
 MANUAL_PATH = TOOL_DIR / "docs" / "MANUAL.md"
 
+# Pre-selected so a first-time user gets a working run without having to
+# know which of the listed models to pick. Still just a starting point -
+# set_custom() lets the picker show it before the real list has even loaded,
+# and any model in that list remains one click away.
+DEFAULT_MODEL = "opencode/big-pickle"
+
 
 def load_manual():
     """The user manual, or a pointer to it if this build somehow lacks it."""
@@ -979,6 +985,12 @@ class Picker(tk.Frame):
     a flat list. Stdlib tkinter only.
     """
 
+    # Rebuilding every row is cheap for a handful of models but not for the
+    # hundred-plus a multi-provider setup can list; capping what's actually
+    # drawn keeps a keystroke fast regardless of list size, and nobody reads
+    # past the first screenful of matches anyway.
+    MAX_RESULTS = 60
+
     def __init__(self, parent, title="SELECT", empty_label="Select…",
                  field_chars=28, group_key=None, display_fn=None, empty_hint="",
                  field_height=30, field_width=None, on_change=None):
@@ -993,6 +1005,7 @@ class Picker(tk.Frame):
         self._value = ""
         self._popup = None
         self._outside_funcid = None
+        self._render_job = None
         self.field = RoundedButton(self, text=empty_label + "  ▾", command=self.toggle,
                                    style="field", height=field_height,
                                    font=FONT, anchor="w",
@@ -1069,7 +1082,7 @@ class Picker(tk.Frame):
 
         self._popup = top
         self._inner = inner
-        self._search_var.trace_add("write", lambda *_a: self._render())
+        self._search_var.trace_add("write", lambda *_a: self._schedule_render())
         top.bind("<Escape>", lambda _e: self.close())
         search.bind("<Escape>", lambda _e: self.close())
         self._render()
@@ -1077,7 +1090,19 @@ class Picker(tk.Frame):
         root = self.winfo_toplevel()
         self._outside_funcid = root.bind("<Button-1>", self._outside_click, add="+")
 
+    def _schedule_render(self):
+        """Debounced re-render: a burst of keystrokes rebuilds the popup
+        once, not once per character, which is what made typing feel stuck
+        on a long model list."""
+        if self._render_job is not None:
+            try:
+                self.after_cancel(self._render_job)
+            except Exception:  # noqa: BLE001
+                pass
+        self._render_job = self.after(120, self._render)
+
     def _render(self):
+        self._render_job = None
         if self._popup is None:
             return
         for w in self._inner.winfo_children():
@@ -1087,25 +1112,27 @@ class Picker(tk.Frame):
                      bg=PAL["card"], fg=PAL["muted"]).pack(anchor="w", padx=12, pady=12)
             return
         filt = self._search_var.get().strip().lower()
-        groups: dict = {}
+        matches = []
         for m in self._models:
             if filt and filt not in m.lower():
                 continue
             key = self._group_key(m) or ""
-            if key and "/" in m:
-                short = m.split("/", 1)[1]
-            else:
-                short = m
-            groups.setdefault(key, []).append((short, m))
-        if not groups:
+            short = m.split("/", 1)[1] if (key and "/" in m) else m
+            matches.append((key, short, m))
+        if not matches:
             tk.Label(self._inner, text="No matches", font=FONT_S,
                      bg=PAL["card"], fg=PAL["muted"]).pack(anchor="w", padx=12, pady=12)
             return
+        matches.sort(key=lambda t: (t[0], t[1]))
+        shown = matches[:self.MAX_RESULTS]
+        groups: dict = {}
+        for key, short, full in shown:
+            groups.setdefault(key, []).append((short, full))
         for key in sorted(groups):
             if key:
                 tk.Label(self._inner, text=f"  {key}", font=(_FAMILY, 8, "bold"),
                          bg=PAL["card"], fg=PAL["muted"]).pack(anchor="w", padx=4, pady=(8, 0))
-            for name, full in sorted(groups[key]):
+            for name, full in groups[key]:      # already sorted with `matches`
                 sel = full == self._value
                 b = tk.Label(self._inner, text=f"{'● ' if sel else '○ '}{name}",
                              font=FONT_S, bg=PAL["accent_tint"] if sel else PAL["card"],
@@ -1116,6 +1143,10 @@ class Picker(tk.Frame):
                 b.bind("<Enter>", lambda e: e.widget.config(bg=PAL["accent_tint"]))
                 b.bind("<Leave>", lambda e, f=full: e.widget.config(
                     bg=PAL["accent_tint"] if f == self._value else PAL["card"]))
+        if len(matches) > len(shown):
+            tk.Label(self._inner, text=f"  … {len(matches) - len(shown)} more — "
+                     f"keep typing to narrow it down", font=FONT_S,
+                     bg=PAL["card"], fg=PAL["muted"]).pack(anchor="w", padx=12, pady=(6, 8))
 
     def select(self, full):
         self._value = full
@@ -1135,6 +1166,12 @@ class Picker(tk.Frame):
         self.close()
 
     def close(self):
+        if self._render_job is not None:
+            try:
+                self.after_cancel(self._render_job)
+            except Exception:  # noqa: BLE001
+                pass
+            self._render_job = None
         if self._outside_funcid is not None:
             try:
                 self.winfo_toplevel().unbind("<Button-1>", self._outside_funcid)
@@ -1358,6 +1395,7 @@ class UpdateDialog(tk.Toplevel):
         self._release = None
         self._installed_root = None
         self._frame = 0
+        self._pump_job = None
 
         self.card = RoundedCard(self, outline_key="border")
         self.card.pack(fill="both", expand=True, padx=10, pady=10)
@@ -1563,10 +1601,15 @@ class UpdateDialog(tk.Toplevel):
         if self._state == "checking":
             self._frame += 1
             self._glyph.config(text="◇◈◆◈"[self._frame % 4])
-        try:
-            self.after(80, self._pump)
-        except Exception:  # noqa: BLE001
-            pass
+        # Only "checking"/"downloading" still expect a message; every other
+        # state is resting on a button and polling forever after landing
+        # there was pure waste (and, on some Tk/Cocoa builds, a source of
+        # visible redraw churn on an otherwise idle dialog).
+        if self._state in ("checking", "downloading"):
+            try:
+                self._pump_job = self.after(80, self._pump)
+            except Exception:  # noqa: BLE001
+                pass
 
     def _on_progress(self, done, total):
         if total:
@@ -1617,6 +1660,12 @@ class UpdateDialog(tk.Toplevel):
 
     def _close(self):
         self._stop.set()
+        if self._pump_job is not None:
+            try:
+                self.after_cancel(self._pump_job)
+            except Exception:  # noqa: BLE001
+                pass
+            self._pump_job = None
         try:
             self.grab_release()
         except Exception:  # noqa: BLE001
@@ -1892,6 +1941,7 @@ class App(tk.Tk):
         self.model_picker = Picker(mi, title="SELECT MODEL", empty_label="Default model",
                                    group_key=None, empty_hint="Loading models…")
         self.model_picker.pack(fill="x", pady=(6, 4))
+        self.model_picker.set_custom(DEFAULT_MODEL)
         self.upd_var = tk.BooleanVar(value=True)
         self.mrg_var = tk.BooleanVar(value=True)
         self.syn_var = tk.BooleanVar(value=True)
@@ -2005,14 +2055,7 @@ class App(tk.Tk):
         self._verdict_cache = ""
         self._log_placeholder = True
         self._show_placeholder()
-        self._draw_badge()
-        self._refresh_detection()
-        # Re-scan whenever the folder changes, typed as well as browsed —
-        # otherwise a hand-edited path runs against the previous folder's mode.
-        self._detect_job = None
-        self.proj_var.trace_add("write", self._on_proj_changed)
         self._reset_progress(silent=True)
-        self._load_models_async()
 
     def _place_midrow(self):
         """Grid the mapping and model cards for the current mode.
@@ -2823,22 +2866,35 @@ def _default_project_dir():
 
 
 def _add_placeholder(entry, text):
+    def clear_placeholder():
+        if getattr(entry, "_has_ph", False):
+            entry.delete(0, "end")
+            entry._has_ph = False
+            entry.config(fg=PAL["text"])
     entry._ph_text = text  # noqa: SLF001 - so it can be restored later
     entry.insert(0, text)
     entry._has_ph = True  # noqa: SLF001
     entry.config(fg=PAL["muted"])
     def on_in(_e):
-        if getattr(entry, "_has_ph", False):
-            entry.delete(0, "end")
-            entry._has_ph = False
-            entry.config(fg=PAL["text"])
+        clear_placeholder()
     def on_out(_e):
         if not entry.get():
             entry.insert(0, text)
             entry._has_ph = True
             entry.config(fg=PAL["muted"])
+    def on_key(e):
+        # <FocusIn> alone isn't enough: _restore_placeholder() can leave the
+        # field showing the placeholder while it still holds keyboard focus
+        # from before (e.g. a custom RoundedButton click doesn't take focus
+        # the way a real Tk button would, so FocusIn never re-fires) - the
+        # next keystroke would otherwise land inside "e.g. 214" instead of
+        # replacing it. Only real characters count; navigation/modifier keys
+        # produce no e.char and must not eat the placeholder.
+        if e.char and e.char.isprintable():
+            clear_placeholder()
     entry.bind("<FocusIn>", on_in)
     entry.bind("<FocusOut>", on_out)
+    entry.bind("<KeyPress>", on_key)
 
 
 def _restore_placeholder(entry):

@@ -135,6 +135,33 @@ def can_self_update():
 # talking to GitHub
 # --------------------------------------------------------------------------
 
+_SSL_CONTEXT = None
+
+
+def _ssl_context():
+    """The SSLContext to verify GitHub's certificate against.
+
+    A frozen build has no access to whatever certificate-install step (or,
+    on macOS, Keychain bridge) a normal Python install relies on, so
+    ssl.create_default_context() finds no trust store at all there and every
+    HTTPS call fails with CERTIFICATE_VERIFY_FAILED. desktop/build.py bundles
+    certifi's CA file next to the frozen executable for exactly this reason;
+    this just has to find it. A source checkout (not frozen) has no bundle
+    and doesn't need one — the interpreter's own default context works there
+    the same way it does for any other Python script.
+    """
+    global _SSL_CONTEXT
+    if _SSL_CONTEXT is not None:
+        return _SSL_CONTEXT
+    cafile = None
+    if getattr(sys, "frozen", False):
+        candidate = Path(getattr(sys, "_MEIPASS", "")) / "certs" / "cacert.pem"
+        if candidate.is_file():
+            cafile = str(candidate)
+    _SSL_CONTEXT = ssl.create_default_context(cafile=cafile)
+    return _SSL_CONTEXT
+
+
 def _open(url, timeout=CONNECT_TIMEOUT, accept="application/vnd.github+json"):
     # GitHub rejects requests without a User-Agent outright.
     req = urllib.request.Request(url, headers={
@@ -142,7 +169,7 @@ def _open(url, timeout=CONNECT_TIMEOUT, accept="application/vnd.github+json"):
         "Accept": accept,
     })
     try:
-        return urllib.request.urlopen(req, timeout=timeout)
+        return urllib.request.urlopen(req, timeout=timeout, context=_ssl_context())
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             raise NoRelease("Nothing published to update to yet.") from exc

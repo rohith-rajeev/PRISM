@@ -147,8 +147,7 @@ class SafetyGates(unittest.TestCase):
         o.run_agent = lambda *a, **k: ("", {"decision": "go", "reason": "looks fine"})
         o.check_ff_mergeable = lambda *a, **k: (True, "ok")
         o.try_fast_forward_merge = lambda *a, **k: self.merged.append(1) or {}
-        o.description_has_review_block = lambda *a, **k: True
-        o.write_description_block = lambda *a, **k: ""
+        o.update_description_direct = lambda *a, **k: ""
 
     def _run(self, report=REPORT, status="OPEN", **kw):
         o.run_opencode_review = lambda *a, **k: (report, "ses_x")

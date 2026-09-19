@@ -28,14 +28,15 @@ pre-filled from the last job (usually only the PR id changes).
      generic `-be`/`-fe`/`backend`/`frontend` naming — no project names are
      hardcoded), then pick the review target, PR id, and region.
 2. A specialised agent runs each step — `pr-context-resolver`, `pr-reviewer`,
-   `review-comments-poster`, `fast-forward-merge-checker`, `pr-sync`,
-   `conflict-analyst`, `pr-merger` — each with its own prompt and its own
-   permissions. Agents decide; PRISM performs every write behind gates in code.
-   The reviewer reports a
+   `fast-forward-merge-checker`, `pr-sync`, `conflict-analyst`, `pr-merger` —
+   each with its own prompt and its own permissions. Agents decide; PRISM
+   performs every write behind gates in code. The reviewer reports a
    **Verdict** (Approve / Approve with comments / Request changes / Block)
    plus an **impact score**.
-3. `review-comments-poster` composes the findings block; PRISM writes it to
-   the **PR description** (markers preserved, stale blocks replaced).
+3. PRISM composes the findings block itself from the review's own output —
+   no agent call, so nothing here can be bounced by a rate limit or a
+   provider outage — and writes it to the **PR description** (markers
+   preserved, stale blocks replaced).
 4. On ✅ Approve / ⚠️ Approve with comments it merges with
    **fast-forward only** (`merge-pull-request-by-fast-forward`).
 5. If the PR is not fast-forward mergeable, it **syncs destination →
@@ -98,11 +99,13 @@ zero dependencies.
 ## Model selection
 The Model field is a custom dark-themed picker (no native widget styling
 clashes). It lists the same `provider/model` ids the engine offers,
-**grouped under provider headers**, with type-to-filter search, mouse-wheel
-scrolling, and Esc / ✕ / click-outside to dismiss. It is fixed-width (never
-stretches full-width); the live count sits inline next to it. Leave it empty
-to use the default model. The choice is passed as `--model …` to both
-reviewer runs (review + description update).
+**grouped under provider headers**, with type-to-filter search (debounced and
+capped to the first 60 matches, so a long list stays fast to type into),
+mouse-wheel scrolling, and Esc / ✕ / click-outside to dismiss. It is
+fixed-width (never stretches full-width); the live count sits inline next to
+it. It defaults to `opencode/big-pickle`, so a first run works without having
+to pick from the list — change it to anything the engine offers. The choice is
+passed as `--model …` to every agent run in the pipeline.
 
 ## Self-contained agent bundle
 The tool ships every agent it uses in `agents/`, one per pipeline step, each
@@ -111,11 +114,12 @@ PRISM installs the whole folder into `<project>/.opencode/agents/`, so it works
 on any machine with the engine + `aws` installed — no dependency on any other
 skill, agent, or checkout outside this folder.
 
-Only `review-comments-poster` produces text destined for the pull request, and
-even it hands that text back for PRISM to write. Every agent denies `edit`,
-`task`, `webfetch`, and — where it has a shell at all — the specific `git push`
-and `aws codecommit merge/update` commands. `agents/_shared-contract.md`
-documents the decision block they all answer with.
+No agent's output goes to the pull request directly — PRISM parses the
+reviewer's own report and composes the PR description itself (see above).
+Every agent denies `edit`, `task`, `webfetch`, and — where it has a shell at
+all — the specific `git push` and `aws codecommit merge/update` commands.
+`agents/_shared-contract.md` documents the decision block they all answer
+with.
 
 ## Updating
 `?  Help` → `Check for updates` asks GitHub for the latest release. If it is

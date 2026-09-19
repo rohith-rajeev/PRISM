@@ -56,6 +56,23 @@ def preflight():
             fail(f"missing {rel} — run this from the PRISM checkout")
 
 
+def certifi_bundle():
+    """Path to certifi's CA bundle, or None if certifi isn't installed.
+
+    Bundled as data (see the --add-data below) so the frozen app carries its
+    own trust store: a normal Python gets its certs from wherever python.org's
+    installer or Homebrew put them, but a PyInstaller build has none of that
+    at run time, and without this every HTTPS call fails on a fresh macOS
+    install with CERTIFICATE_VERIFY_FAILED.
+    """
+    try:
+        import certifi
+    except ImportError:
+        return None
+    path = Path(certifi.where())
+    return path if path.is_file() else None
+
+
 def make_icon(enabled):
     """Return the platform's icon path, or None to let PyInstaller default."""
     if not enabled:
@@ -127,6 +144,12 @@ def main():
     agent_src = ROOT / "agents"
     # The manual is the in-app help, so it ships too and is found the same way.
     manual_src = ROOT / "docs" / "MANUAL.md"
+    cacert = certifi_bundle()
+    if not cacert:
+        print("warning: certifi not installed — this build will rely on the "
+              "OS's own certificate store for update checks, which is known "
+              "to be missing on a fresh macOS install "
+              f"(pip install -r {Path('desktop') / 'requirements-build.txt'})")
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--noconfirm", "--clean",
@@ -150,6 +173,9 @@ def main():
         "--exclude-module", "pydoc",
         "--exclude-module", "distutils",
     ]
+    if cacert:
+        # updater.py looks for it under this exact name relative to sys._MEIPASS.
+        cmd += ["--add-data", f"{cacert}{os.pathsep}certs"]
     if icon and sys.platform in ("win32", "darwin"):
         # PyInstaller only embeds icons on Windows and macOS; on Linux the icon
         # is carried by the .desktop entry written below instead.
