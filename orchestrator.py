@@ -1008,8 +1008,19 @@ def get_pr(pr_id, region=REGION_DEFAULT):
         "title": pr.get("title", ""),
         "description": pr.get("description", "") or "",
         "status": pr.get("pullRequestStatus", ""),
+        "authorArn": pr.get("authorArn", ""),
         "raw": data,
     }
+
+
+def get_pr_author(pr_id, region=REGION_DEFAULT):
+    """Best-effort author ARN lookup for the courtesy chat notification —
+    a failure here must never affect the pipeline itself.
+    """
+    try:
+        return get_pr(pr_id, region=region).get("authorArn", "")
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def update_description_direct(pr_id, verdict_text, impact, findings, region=REGION_DEFAULT,
@@ -1755,7 +1766,8 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
         if webhook_url:
             notifier.post_summary(
                 webhook_url, emit=emit, repo_name=repo_name, pr_id=pr_id,
-                do_review=do_review, merged=False, reason=str(e)[:80])
+                do_review=do_review, merged=False, reason=str(e)[:80],
+                author=get_pr_author(pr_id, region=region))
         raise
     if webhook_url:
         review = result.get("review")
@@ -1766,5 +1778,6 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
             verdict_key=getattr(review, "verdict_key", None),
             impact_score=getattr(review, "impact_score", None),
             merged=result.get("merged"),
-            reason=_stopped_reason(result.get("stopped")))
+            reason=_stopped_reason(result.get("stopped")),
+            author=get_pr_author(pr_id, region=region))
     return result

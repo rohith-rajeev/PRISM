@@ -189,8 +189,8 @@ The **Model** picker is optional — leave it alone to use the default.
 **Google Chat notifications**, on the Help screen, are also optional and off
 by default. Paste in a webhook URL and click Save once — it applies to
 every job from then on, not just the one you're about to run. Each finished
-job posts one small card: verdict + impact (when review ran), and whether
-it merged. Leave the field empty to turn it off again.
+job posts one small card: the PR author, verdict + impact (when review ran),
+and whether it merged. Leave the field empty to turn it off again.
 
 ---
 
