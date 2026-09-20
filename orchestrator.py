@@ -43,15 +43,16 @@ TOOL_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).parent)).resolve()
 AGENTS_DIR = TOOL_DIR / "agents"
 BUNDLED_AGENT = AGENTS_DIR / "pr-reviewer.md"
 
-# One agent per pipeline step, each with its own prompt and permission block.
-# The reviewer reads an untrusted diff; nothing it decides can write, because
-# every write in this module is performed by PRISM behind its own gates.
+# Agents are reserved for genuinely specialized judgment — reading and
+# explaining code. Everything mechanical (resolving PR context, checking
+# mergeability, syncing branches, the final pre-merge check) is a direct
+# CodeCommit/git call in this module instead: cheaper, deterministic, and
+# not one more chance to hit a rate limit for a decision PRISM can just
+# compute. The reviewer reads an untrusted diff; nothing it decides can
+# write, because every write in this module is performed by PRISM behind
+# its own gates.
 AGENT_REVIEWER = "pr-reviewer"
-AGENT_CONTEXT = "pr-context-resolver"
-AGENT_FF_CHECK = "fast-forward-merge-checker"
-AGENT_SYNC = "pr-sync"
 AGENT_CONFLICT = "conflict-analyst"
-AGENT_MERGER = "pr-merger"
 AGENT_NAME = AGENT_REVIEWER          # default for continuation turns
 
 # A decision block closes every agent reply except the reviewer's:
@@ -1499,7 +1500,6 @@ def _run_pipeline(project_dir, repo_name, pr_id, local_repo=None,
             source_commit_at_review = get_pr(pr_id, region=region).get("sourceCommit", "")
         except Exception:  # noqa: BLE001
             source_commit_at_review = ""
-    desc_updated = False
 
     # ---- Step 2: description ----
     # PRISM composes and writes this itself — no agent call. findings are
@@ -1524,7 +1524,6 @@ def _run_pipeline(project_dir, repo_name, pr_id, local_repo=None,
                     source_commit=source_commit_at_review)
                 emit(f"◆ Description updated directly from the review ({len(merged)} chars).")
                 pg(STAGE_DESCRIBE, "done")
-                desc_updated = True
             except Exception as e:  # noqa: BLE001
                 # A description is cosmetic — report loudly, but don't throw
                 # away a completed review by aborting the whole run.
@@ -1629,73 +1628,35 @@ def _run_pipeline(project_dir, repo_name, pr_id, local_repo=None,
     ck()
     pg(STAGE_MERGE, "active")
     emit("\n═══ STEP 4 — Merge ═══")
-    # Every precondition below was already enforced in code above; this is a
-    # second, independent opinion. A "go" cannot merge anything on its own —
-    # PRISM has already decided it is allowed to be here.
-    if not do_review:
-        review_section = (
-            "Review: skipped by configuration. The user explicitly chose to "
-            "sync/merge this pull request without an agentic review this run "
-            "— treat that choice as the approval to merge, the same as an "
-            "Approve verdict. Ignore any review write-up you find on the PR "
-            "description; it is unrelated history from a previous run, not a "
-            "reason to hold this one.\n")
-    else:
-        review_section = (
-            f"Reviewer verdict: {review.verdict_raw or review.verdict_key}\n"
-            f"Impact: {review.impact_score or '?'}/10\n")
-        if not desc_updated:
-            review_section += (
-                "Note: the PR description could not be refreshed with this run's "
-                "findings (the update step failed or was skipped this run). If it "
-                "still shows an older review write-up, that is stale — trust the "
-                "verdict and impact score given above, which are this run's fresh "
-                "result, and do not re-review the diff yourself to double-check "
-                "them; that is the reviewer's job, not yours.\n")
-    try:
-        _out, call = run_agent(
-            AGENT_MERGER,
-            f"Final check before merging pull request {pr_id} in CodeCommit "
-            f"repository '{repo_name}' (region {region}).\n"
-            + review_section +
-            f"Source: {src}  Destination: {dest}\n"
-            f"Fast-forward possible: {mergeable}\n"
-            "Confirm independently whether this should be merged now.",
-            project_dir, emit=emit, model=model, control=control, meter=meter,
-            label="pr-merger")
-    except Exception as e:  # noqa: BLE001
-        emit(f"⚠ Merge checker agent failed ({e}); holding rather than merging.")
-        call = {"decision": "no-go", "reason": str(e)[:200]}
-    if call.get("decision") == "no-go":
-        emit(f"⛔ pr-merger says no-go: {call.get('reason', 'no reason given')}")
+    # A final, fresh re-check right at the point of no return, rather than
+    # trusting state that may be stale by now — the merge-check step above
+    # runs first, and a conflict-resolution round can leave a real gap
+    # before we get here. Both facts are deterministic (an API call, a
+    # commit-id comparison), so PRISM checks them itself; no agent call earns
+    # its tokens re-confirming something PRISM can just look up.
+    fresh_pr = get_pr(pr_id, region=region)
+    if fresh_pr["status"] != "OPEN":
+        emit(f"⛔ PR status is now {fresh_pr['status']} (not OPEN) — will not merge.")
         pg(STAGE_MERGE, "skipped")
-        return {"review": review, "merged": False, "stopped": "merger-no-go",
-                "tokens": meter.total()}
+        return {"review": review, "merged": False,
+                "stopped": f"status-{fresh_pr['status']}", "tokens": meter.total()}
+    if do_review and source_commit_at_review and \
+            fresh_pr.get("sourceCommit") != source_commit_at_review:
+        emit(f"⛔ Source branch moved since the review "
+             f"({source_commit_at_review[:8]} → {fresh_pr.get('sourceCommit', '')[:8]}) "
+             f"— will not merge a verdict that no longer matches the code.")
+        pg(STAGE_MERGE, "error")
+        return {"review": review, "merged": False,
+                "stopped": "pr-changed-since-review", "tokens": meter.total()}
+
     if not mergeable:
-        # A fast-forward is not possible. This is the ambiguous case, so ask the
-        # checker how to land it — a clean fast-forward never reaches here and
-        # so never costs a model call.
-        try:
-            _out, call = run_agent(
-                AGENT_FF_CHECK,
-                f"Pull request {pr_id} in CodeCommit repository '{repo_name}' "
-                f"(region {region}) cannot be fast-forwarded.\n"
-                f"Source: {src}\nDestination: {dest}\n"
-                f"Local clone: {local_clone}\n"
-                f"Merge-conflict check said: {detail[:600]}\n"
-                f"Decide how it should be landed.",
-                project_dir, emit=emit, model=model, control=control, meter=meter,
-                label="fast-forward-merge-checker")
-        except Exception as e:  # noqa: BLE001
-            emit(f"⚠ Merge checker failed ({e}); falling back to sync-then-merge.")
-            call = {}
-        verdict_call = call.get("decision", "sync-then-merge")
-        if verdict_call == "manual":
-            emit(f"⛔ Checker says this needs a person: "
-                 f"{call.get('reason', 'no reason given')}")
-            pg(STAGE_MERGE, "error")
-            return {"review": review, "merged": False, "stopped": "needs-manual-merge",
-                    "tokens": meter.total()}
+        # A fast-forward is not possible up front. Same handling as a
+        # fast-forward attempt failing below: sync destination into source
+        # and retry, unless sync itself is disabled. `_sync_then_merge`
+        # already surfaces real trouble on its own — a conflict prompts the
+        # user hunk-by-hunk, and anything else (unrelated history, a
+        # force-pushed destination) fails loudly with the git error attached
+        # — so there is nothing here for an agent to predict in advance.
         if not do_sync:
             emit("⛔ Not fast-forward mergeable and sync is disabled — stopping.")
             pg(STAGE_MERGE, "error")
@@ -1725,8 +1686,7 @@ _STOPPED_LABEL = {
     "merge-disabled": "auto-merge disabled",
     "verdict-blocks-merge": "verdict blocks merge",
     "dry-run": "dry run",
-    "merger-no-go": "merge check said no",
-    "needs-manual-merge": "needs manual merge",
+    "pr-changed-since-review": "PR changed since review",
     "not-fast-forwardable": "not fast-forwardable",
 }
 

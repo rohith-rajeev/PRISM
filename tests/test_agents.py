@@ -2,8 +2,12 @@
 
 The design rests on one claim: an agent can *decide*, but only PRISM can act,
 and PRISM's gates are code that no prompt can reach. The SafetyGates tests are
-the ones that prove it — they feed a "go" from pr-merger into situations where
-merging is forbidden and assert nothing merges.
+the ones that prove it — they feed a "go" verdict from the reviewer into
+situations where merging is forbidden and assert nothing merges. Merge
+mechanics themselves (mergeability, the final pre-merge re-check) are no
+longer agent decisions at all — they're direct, deterministic checks in
+`orchestrator.py` — so these tests exercise those checks directly rather than
+an agent's "no-go".
 """
 import importlib
 import os
@@ -74,7 +78,7 @@ class AgentBundle(unittest.TestCase):
             names = o.ensure_bundled_agents(d, emit=lambda *a, **k: None)
             installed = {p.stem for p in Path(d, ".opencode", "agents").glob("*.md")}
             self.assertIn("pr-reviewer", installed)
-            self.assertGreaterEqual(len(installed), 6)
+            self.assertIn("conflict-analyst", installed)
             self.assertNotIn("_shared-contract", installed,
                              "reference docs must not install as agents")
             self.assertEqual(set(names), installed)
@@ -126,7 +130,9 @@ class Conflicts(unittest.TestCase):
 
 
 class SafetyGates(unittest.TestCase):
-    """A 'go' from an agent must never be sufficient on its own."""
+    """A reviewer 'go' verdict must never be sufficient on its own — PRISM's
+    own deterministic checks (status, verdict, fast-forward, PR-unchanged)
+    are what actually gate the merge."""
 
     def setUp(self):
         importlib.reload(o)
@@ -149,11 +155,12 @@ class SafetyGates(unittest.TestCase):
         o.try_fast_forward_merge = lambda *a, **k: self.merged.append(1) or {}
         o.update_description_direct = lambda *a, **k: ""
 
-    def _run(self, report=REPORT, status="OPEN", **kw):
+    def _run(self, report=REPORT, status="OPEN", get_pr=None, **kw):
         o.run_opencode_review = lambda *a, **k: (report, "ses_x")
-        o.get_pr = lambda *a, **k: {"status": status, "repositoryName": "repo",
-                                    "destinationReference": "main",
-                                    "sourceReference": "feat", "description": ""}
+        o.get_pr = get_pr or (lambda *a, **k: {
+            "status": status, "repositoryName": "repo",
+            "destinationReference": "main", "sourceReference": "feat",
+            "description": ""})
         return o.full_pipeline(self.clone, "repo", "7", local_repo=self.clone,
                                emit=lambda *a, **k: None, **kw)
 
@@ -177,11 +184,20 @@ class SafetyGates(unittest.TestCase):
         self.assertEqual(self.merged, [])
         self.assertEqual(res["stopped"], "merge-disabled")
 
-    def test_no_go_holds_even_though_prism_would_allow_it(self):
-        o.run_agent = lambda *a, **k: ("", {"decision": "no-go", "reason": "changed"})
-        res = self._run()
+    def test_final_check_holds_when_the_source_moved_since_review(self):
+        """The final pre-merge check is PRISM's own re-fetch, not an agent's
+        opinion — this proves it still catches a PR whose source branch
+        moved between the review and the merge landing."""
+        calls = {"n": 0}
+        def get_pr(*a, **k):
+            calls["n"] += 1
+            commit = "aaa111" if calls["n"] == 1 else "bbb222"
+            return {"status": "OPEN", "repositoryName": "repo",
+                    "destinationReference": "main", "sourceReference": "feat",
+                    "description": "", "sourceCommit": commit}
+        res = self._run(get_pr=get_pr)
         self.assertEqual(self.merged, [])
-        self.assertEqual(res["stopped"], "merger-no-go")
+        self.assertEqual(res["stopped"], "pr-changed-since-review")
 
     def test_clean_fast_forward_still_merges(self):
         res = self._run()
@@ -203,12 +219,20 @@ class SafetyGates(unittest.TestCase):
         self._run(do_review=False, do_update_desc=True)
         self.assertEqual(calls, [], "description update ran with no review to draw from")
 
-    def test_no_go_still_holds_even_with_review_skipped(self):
-        """pr-merger's veto is independent of whether a review happened."""
-        o.run_agent = lambda *a, **k: ("", {"decision": "no-go", "reason": "changed"})
-        res = self._run(do_review=False)
-        self.assertEqual(self.merged, [])
-        self.assertEqual(res["stopped"], "merger-no-go")
+    def test_source_moved_check_is_skipped_with_no_review_to_compare_against(self):
+        """do_review=False means there was never a reviewed commit to compare
+        against, so the final check has nothing to hold against — the PR
+        still merges rather than blocking on a comparison that can't be made."""
+        calls = {"n": 0}
+        def get_pr(*a, **k):
+            calls["n"] += 1
+            commit = "aaa111" if calls["n"] == 1 else "bbb222"
+            return {"status": "OPEN", "repositoryName": "repo",
+                    "destinationReference": "main", "sourceReference": "feat",
+                    "description": "", "sourceCommit": commit}
+        res = self._run(get_pr=get_pr, do_review=False)
+        self.assertEqual(len(self.merged), 1)
+        self.assertTrue(res["merged"])
 
 
 class ChatNotification(unittest.TestCase):
@@ -259,12 +283,12 @@ class ChatNotification(unittest.TestCase):
         self.assertIn("Approve", kw["verdict_raw"])
 
     def test_a_blocked_merge_posts_merged_false_with_a_reason(self):
-        o.run_agent = lambda *a, **k: ("", {"decision": "no-go", "reason": "changed"})
+        o.run_opencode_review = lambda *a, **k: ("**Verdict:** NO Request changes\n", "ses_x")
         self._run(webhook_url="https://example.invalid/hook")
         self.assertEqual(len(self.posted), 1)
         _url, kw = self.posted[0]
         self.assertFalse(kw["merged"])
-        self.assertEqual(kw["reason"], "merge check said no")
+        self.assertEqual(kw["reason"], "verdict blocks merge")
 
     def test_review_skipped_is_reported_as_such_not_as_a_verdict(self):
         self._run(webhook_url="https://example.invalid/hook", do_review=False)
