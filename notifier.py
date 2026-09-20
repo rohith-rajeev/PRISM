@@ -24,9 +24,16 @@ _VERDICT_GLYPH = {
 }
 
 
+def _display_author(author_arn):
+    """CodeCommit only gives us the author's IAM ARN — show the trailing
+    user/role name rather than the full `arn:aws:iam::...` noise.
+    """
+    return author_arn.rsplit("/", 1)[-1] if author_arn else author_arn
+
+
 def build_card(repo_name, pr_id, do_review, verdict_raw=None, verdict_key=None,
-              impact_score=None, merged=None, reason=None):
-    """A small Google Chat card: one header line, at most two widget rows.
+              impact_score=None, merged=None, reason=None, author=None):
+    """A small Google Chat card: one header line, a few widget rows.
 
     Kept to this shape deliberately — a card that scrolls off a phone screen
     defeats the point of a *brief* summary.
@@ -39,6 +46,9 @@ def build_card(repo_name, pr_id, do_review, verdict_raw=None, verdict_key=None,
         subtitle = "⚠️ Unknown outcome" + (f" — {reason}" if reason else "")
 
     widgets = []
+    if author:
+        widgets.append({"decoratedText": {
+            "topLabel": "Author", "text": _display_author(author)}})
     if not do_review:
         widgets.append({"decoratedText": {
             "topLabel": "Review", "text": "Skipped by configuration"}})

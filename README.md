@@ -27,12 +27,15 @@ pre-filled from the last job (usually only the PR id changes).
      confirm which clone is **Backend** vs **Frontend** (pre-guessed from
      generic `-be`/`-fe`/`backend`/`frontend` naming — no project names are
      hardcoded), then pick the review target, PR id, and region.
-2. A specialised agent runs each step — `pr-context-resolver`, `pr-reviewer`,
-   `fast-forward-merge-checker`, `pr-sync`, `conflict-analyst`, `pr-merger` —
-   each with its own prompt and its own permissions. Agents decide; PRISM
-   performs every write behind gates in code. The reviewer reports a
-   **Verdict** (Approve / Approve with comments / Request changes / Block)
-   plus an **impact score**.
+2. An agent is used only for genuinely specialized judgment: `pr-reviewer`
+   reads the diff and commit history and reports a **Verdict** (Approve /
+   Approve with comments / Request changes / Block) plus an **impact score**;
+   `conflict-analyst` explains a sync conflict's hunks in plain language when
+   one comes up. Everything mechanical — resolving PR context, checking
+   mergeability, syncing branches, the final pre-merge re-check, the merge
+   itself — is a direct CodeCommit/git call PRISM makes on its own, not an
+   agent decision. Agents decide (and only where deciding needs reading code);
+   PRISM performs every write behind gates in code.
 3. PRISM composes the findings block itself from the review's own output —
    no agent call, so nothing here can be bounced by a rate limit or a
    provider outage — and writes it to the **PR description** (markers
@@ -46,8 +49,8 @@ pre-filled from the last job (usually only the PR id changes).
 Five checkboxes configure what a job actually does, top to bottom:
 **Agentic PR review** (turn it off to just sync and merge a PR you've already
 reviewed some other way — the merge step then treats that as an explicit
-approval rather than a missing verdict, and the independent pr-merger check
-still runs), **Update PR description after review** (gated on the first —
+approval rather than a missing verdict, and PRISM's own pre-merge checks
+still run), **Update PR description after review** (gated on the first —
 there is nothing to describe without a review having run, so it's forced off
 and greyed out while review is off), **Sync with base branch when diverged**,
 **Merge PR**, and **Dry run** (skips writes and merges entirely).

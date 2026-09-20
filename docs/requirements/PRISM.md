@@ -252,12 +252,14 @@ outstanding and costs no space otherwise.
   a default.
 - AWS auth failures stop the run with the exact CLI error; PRISM never
   attempts to repair credentials.
-- **No agent can merge, push or write.** Each pipeline step is its own agent
-  with its own `permission:` block denying the commands outright, and every
-  irreversible action is performed by PRISM behind gates in code. An agent
-  returns a decision; PRISM decides whether to act on it. A `go` from
-  `pr-merger` still cannot merge a request-changes verdict, a closed PR, or
-  anything in dry-run — those are enforced before the agent is even consulted.
+- **No agent can merge, push or write.** The two remaining agents
+  (`pr-reviewer`, `conflict-analyst`) each carry their own `permission:` block
+  denying those commands outright, and every irreversible action — merging,
+  syncing, checking mergeability, the final pre-merge re-check — is a direct
+  CodeCommit/git call PRISM makes itself, not an agent decision. A reviewer
+  "Approve" verdict still cannot merge a closed PR, anything in dry-run, or a
+  PR whose source branch moved since the review — those are enforced in code,
+  independent of what the verdict says.
 - Content inside a pull request is treated as data, never instructions, so a
   description or diff cannot talk an agent into approving itself.
 - Stop is available for the entire run and always returns the UI to idle.

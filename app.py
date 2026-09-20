@@ -508,10 +508,20 @@ class ProgressBar(tk.Canvas):
 
 
 class StatusPill(tk.Canvas):
-    """Outlined status pill (Idle / Running / Merged / …)."""
+    """Outlined status pill (Idle / Running / Merged / …).
 
-    def __init__(self, parent, width=150, height=28):
-        super().__init__(parent, width=width, height=height, highlightthickness=0, bd=0)
+    Width tracks its own text instead of a fixed box, so "Idle" reads as a
+    snug little pill rather than a mostly-empty one sized for the longest
+    message ("N running · N queued") it might ever show.
+    """
+
+    _MIN_WIDTH = 90
+    _LEFT_INSET = 30    # dot/spinner plus the gap before the text starts
+    _RIGHT_PAD = 14
+
+    def __init__(self, parent, height=28):
+        super().__init__(parent, width=self._MIN_WIDTH, height=height,
+                         highlightthickness=0, bd=0)
         self._text = "Idle"
         self._color = PAL["muted"]
         self.bind("<Configure>", lambda _e: self._draw())
@@ -521,6 +531,8 @@ class StatusPill(tk.Canvas):
         self._color_key = color_key
         self._color = PAL[color_key]
         self._spin = spin
+        needed = self._LEFT_INSET + tkfont.Font(font=FONT_S).measure(text) + self._RIGHT_PAD
+        self.config(width=max(self._MIN_WIDTH, needed))
         self._draw()
 
     def tick(self, frame):
@@ -536,7 +548,7 @@ class StatusPill(tk.Canvas):
 
     def _draw(self):
         self.delete("all")
-        w = self.winfo_width() or 150
+        w = self.winfo_width() or self._MIN_WIDTH
         h = self.winfo_height() or 28
         self.config(bg=PAL["page"])
         _rr(self, 1, 1, w - 1, h - 1, (h - 2) // 2, PAL["card"], PAL["border"])
@@ -1272,11 +1284,15 @@ def _inline(widget, s, base):
 
 
 def _flush_table(widget, rows):
-    """Lay a Markdown pipe table out in aligned monospace.
+    """Lay a Markdown pipe table out as an actual grid, not padded text.
 
-    The source columns are not padded, so rendering the raw lines would give
-    ragged pipes. Measuring each column first is a few lines and makes the
-    verdict and status tables readable, which is most of why they are tables.
+    This used to `.ljust()` plain text into monospace columns — readable in
+    principle, but the padding was computed by character count, which drifts
+    out of alignment wherever a cell holds a wide glyph (the verdict/impact
+    emoji) or the platform substitutes a different monospace font for the
+    one this was measured against. Embedding a real `grid` of Label widgets
+    sizes each column from what actually rendered, so columns line up
+    regardless of font, glyph width or screen.
     """
     if not rows:
         return
@@ -1288,11 +1304,30 @@ def _flush_table(widget, rows):
         return
     width = max(len(r) for r in cells)
     cells = [r + [""] * (width - len(r)) for r in cells]
-    pads = [max(len(r[i]) for r in cells) for i in range(width)]
-    for n, row in enumerate(cells):
-        line = "  ".join(c.ljust(pads[i]) for i, c in enumerate(row)).rstrip()
-        widget.insert("end", "  " + line + "\n", "th" if n == 0 else "td")
-    widget.insert("end", "\n")
+
+    frame = tk.Frame(widget, bg=PAL["card"])
+    grid_row = 0
+    for r, row in enumerate(cells):
+        is_header = r == 0
+        for c, text in enumerate(row):
+            lb = tk.Label(
+                frame, text=text, bg=PAL["card"], justify="left", anchor="w",
+                fg=PAL["text"] if is_header else PAL["log_fg"],
+                font=(_FAMILY, 9, "bold") if is_header else FONT_S,
+                # Long explanatory cells (the troubleshooting table) wrap
+                # instead of stretching the whole table off-screen; short
+                # cells (everything else) size naturally.
+                wraplength=260 if len(text) > 40 else 0)
+            lb.grid(row=grid_row, column=c, sticky="w",
+                    padx=(12 if c == 0 else 0, 18), pady=2)
+        grid_row += 1
+        if is_header:
+            tk.Frame(frame, bg=PAL["border"], height=1).grid(
+                row=grid_row, column=0, columnspan=width, sticky="we",
+                padx=(12, 18), pady=(0, 4))
+            grid_row += 1
+    widget.window_create("end", window=frame)
+    widget.insert("end", "\n\n")
 
 
 def render_markdown(widget, md):
@@ -1396,8 +1431,6 @@ def style_markdown(widget):
                       spacing3=9, lmargin1=18, lmargin2=18)
     widget.tag_config("code", font=_mono(), foreground=PAL["accent_text"])
     widget.tag_config("mono", font=_mono(), foreground=PAL["accent_text"])
-    widget.tag_config("th", font=_mono(), foreground=PAL["text"])
-    widget.tag_config("td", font=_mono(), foreground=PAL["log_fg"])
     widget.tag_config("b", font=(_FAMILY, 10, "bold"), foreground=PAL["text"])
     widget.tag_config("i", font=(_FAMILY, 10, "italic"), foreground=PAL["text"])
     widget.tag_config("link", font=FONT_S, foreground=PAL["accent"])
