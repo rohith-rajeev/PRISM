@@ -7,7 +7,7 @@ is a **build-time** dependency, never a runtime one.
 | Platform | Output | How it's launched |
 |---|---|---|
 | Linux | `dist/PRISM` + `dist/PRISM.desktop` + `dist/PRISM.png` | double-click, or install the `.desktop` entry |
-| macOS | `dist/PRISM.app` (and a bare `dist/PRISM`) | double-click the `.app` |
+| macOS | `dist/PRISM.app` (and a bare `dist/PRISM` folder) | double-click the `.app` |
 | Windows | `dist/PRISM.exe` | double-click |
 
 ## Build
@@ -19,6 +19,14 @@ python3 desktop/build.py
 
 Flags: `--onedir` (folder layout — slower to copy, faster to start),
 `--no-icon`, `--keep-build` (keeps intermediates for debugging).
+
+macOS always builds `--onedir` regardless of this flag: a `--onefile` build
+re-extracts itself into a fresh `$TMPDIR` directory on every launch, and if
+that extraction is incomplete or gets swept mid-run (a disk-cleanup tool, low
+disk space, a cached extraction from days ago getting reaped), the app fails
+with errors like "bundled agents missing" that a user can't fix from inside
+it. An `.app` bundle from `--onedir` runs its files straight out of
+`Contents/`, with no such step. Linux and Windows keep `--onefile`.
 
 The build needs a Python with **Tkinter**. If `build.py` stops with a tkinter
 error: `sudo apt install python3-tk` on Debian/Ubuntu, `brew install python-tk`
