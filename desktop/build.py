@@ -10,10 +10,22 @@ build on Windows, a Linux build on Linux. To get all three from one push, use
 the GitHub Actions workflow in .github/workflows/build-desktop.yml, which runs
 this same script on each runner.
 
+macOS always builds --onedir, --onedir flag or not. A --onefile build
+re-extracts itself into a fresh temp directory under $TMPDIR on every launch
+and reads from it for the whole run; if that directory is incomplete or gets
+swept mid-run (a disk-cleanup tool, low disk space, macOS's own periodic
+temp-file reaper catching a cached extraction that sat untouched a few days),
+the app dies with "bundled agents missing" or similar, for no reason a user
+can fix from inside the app. An .app bundle from --onedir has no such step —
+it runs its files straight out of Contents/ — so this class of failure can't
+happen there. Linux and Windows keep --onefile (a portable single binary and
+a portable .exe) since neither platform's build has surfaced this.
+
 Output lands in dist/:
     Linux    dist/PRISM              (executable)
     Windows  dist/PRISM.exe
-    macOS    dist/PRISM.app          (bundle, plus a bare dist/PRISM)
+    macOS    dist/PRISM.app          (bundle; dist/PRISM alongside it is the
+                                      same onedir payload, unbundled)
 """
 import argparse
 import importlib
@@ -122,7 +134,8 @@ def write_linux_desktop_entry(dist, icon):
 def main():
     ap = argparse.ArgumentParser(description="Build the PRISM desktop executable.")
     ap.add_argument("--onedir", action="store_true",
-                    help="emit a folder instead of a single file (starts faster)")
+                    help="emit a folder instead of a single file (starts faster); "
+                         "implied on macOS regardless of this flag")
     ap.add_argument("--no-icon", action="store_true", help="skip icon generation")
     ap.add_argument("--keep-build", action="store_true",
                     help="keep intermediate build/ output for debugging")
@@ -150,10 +163,11 @@ def main():
               "OS's own certificate store for update checks, which is known "
               "to be missing on a fresh macOS install "
               f"(pip install -r {Path('desktop') / 'requirements-build.txt'})")
+    onedir = args.onedir or sys.platform == "darwin"
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--noconfirm", "--clean",
-        "--onedir" if args.onedir else "--onefile",
+        "--onedir" if onedir else "--onefile",
         "--windowed",                       # no console window; makes a .app on macOS
         "--name", APP_NAME,
         "--distpath", str(dist),
