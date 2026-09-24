@@ -87,6 +87,13 @@ DESC_META_RE = re.compile(r"<!-- (?:pr-reviewer|prism):meta\s+([^>]*?)-->")
 
 MERGEABLE_VERDICTS = ("approve", "approve with comments")
 
+# A verdict that would otherwise auto-merge still pauses for an explicit
+# human "go" when the reviewer's own impact score says the blast radius is
+# high — the review can be right about the code and still be the wrong
+# thing to merge unattended. See the high-impact confirmation gate in
+# _run_pipeline's STEP 4.
+HIGH_IMPACT_THRESHOLD = 7
+
 # A free-tier model occasionally bounces one call in a back-to-back sequence
 # with a 403 "can only be used from within OpenCode" while an identical call
 # moments earlier or later on the same account succeeds — transient, not a
@@ -1748,6 +1755,38 @@ def _run_pipeline(project_dir, repo_name, pr_id, local_repo=None,
         return {"review": review, "merged": False,
                 "stopped": "pr-changed-since-review", "tokens": meter.total()}
 
+    if do_review:
+        try:
+            impact_num = int(review.impact_score)
+        except (TypeError, ValueError):
+            impact_num = None
+        if impact_num is not None and impact_num >= HIGH_IMPACT_THRESHOLD:
+            ck()
+            emit(f"\n⚠ Impact score {impact_num}/10 — pausing for human "
+                 f"confirmation before merging.")
+            question = (
+                f"PR #{pr_id} scored {impact_num}/10 impact"
+                + (f" — {review.impact_reason}" if review.impact_reason else "")
+                + f".\nVerdict: {review.verdict_raw or review.verdict_key}\n\n"
+                + ("\n".join(review.findings) if review.findings
+                   else "(no discrete findings)")
+                + "\n\nProceed with merging this PR?"
+            )
+            # No `ask` available (shouldn't happen in the real app — jobs.py
+            # always supplies one) means no one to confirm with, so refuse
+            # rather than silently merging past a gate meant to require a
+            # human: never proceed on missing input.
+            answer = ask(question, choices=[
+                ("proceed", "Proceed with merge"),
+                ("abort", "Abort — I'll handle this manually"),
+            ]) if ask is not None else None
+            if answer != "proceed":
+                emit("■ Merge not confirmed — stopping without merging.")
+                pg(STAGE_MERGE, "skipped")
+                return {"review": review, "merged": False,
+                        "stopped": "high-impact-not-confirmed", "tokens": meter.total()}
+            emit("▸ Merge confirmed.")
+
     if not mergeable:
         # A fast-forward is not possible up front. Same handling as a
         # fast-forward attempt failing below: sync destination into source
@@ -1787,6 +1826,7 @@ _STOPPED_LABEL = {
     "dry-run": "dry run",
     "pr-changed-since-review": "PR changed since review",
     "not-fast-forwardable": "not fast-forwardable",
+    "high-impact-not-confirmed": "high-impact merge not confirmed",
 }
 
 
