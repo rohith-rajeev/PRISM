@@ -420,50 +420,95 @@ class IncrementalReview(unittest.TestCase):
         self.orig_run = o.subprocess.run
         self.addCleanup(setattr, o, "get_pr", self.orig_get_pr)
         self.addCleanup(setattr, o.subprocess, "run", self.orig_run)
+        # Isolate the local review-provenance store from the real
+        # ~/.prism/reviewed_commits.json and from other tests.
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.orig_store_path = o._REVIEWED_STORE_PATH
+        o._REVIEWED_STORE_PATH = Path(self._tmp.name) / "reviewed_commits.json"
+        self.addCleanup(setattr, o, "_REVIEWED_STORE_PATH", self.orig_store_path)
 
     def _pr(self, description, source_commit, source_ref="feat"):
         return lambda *a, **k: {"description": description,
                                 "sourceCommit": source_commit,
                                 "sourceReference": source_ref}
 
+    def _always_ancestor(self):
+        def fake_run(cmd, **k):
+            class R:
+                returncode = 0
+            return R()
+        o.subprocess.run = fake_run
+
     def test_no_previous_stamp_is_a_full_review(self):
         o.get_pr = self._pr("", "new456")
-        self.assertIsNone(o._incremental_context("7", "/tmp/repo"))
+        self.assertIsNone(o._incremental_context("7", "repo", "/tmp/repo"))
 
     def test_same_commit_as_last_time_is_a_full_review(self):
         o.get_pr = self._pr(self.DESC, "old123")
-        self.assertIsNone(o._incremental_context("7", "/tmp/repo"))
+        self.assertIsNone(o._incremental_context("7", "repo", "/tmp/repo"))
 
     def test_previous_commit_not_an_ancestor_falls_back(self):
         o.get_pr = self._pr(self.DESC, "new456")
+        o._record_reviewed_commit("repo", "7", "old123")
 
         def fake_run(cmd, **k):
             class R:
                 returncode = 0 if cmd[:2] != ["git", "merge-base"] else 1
             return R()
         o.subprocess.run = fake_run
-        self.assertIsNone(o._incremental_context("7", "/tmp/repo"))
+        self.assertIsNone(o._incremental_context("7", "repo", "/tmp/repo"))
 
     def test_get_pr_failure_falls_back(self):
         def boom(*a, **k):
             raise RuntimeError("aws unavailable")
         o.get_pr = boom
-        self.assertIsNone(o._incremental_context("7", "/tmp/repo"))
+        self.assertIsNone(o._incremental_context("7", "repo", "/tmp/repo"))
 
     def test_valid_ancestor_returns_the_previous_review_context(self):
         o.get_pr = self._pr(self.DESC, "new456")
-
-        def fake_run(cmd, **k):
-            class R:
-                returncode = 0
-            return R()
-        o.subprocess.run = fake_run
-        ctx = o._incremental_context("7", "/tmp/repo")
+        o._record_reviewed_commit("repo", "7", "old123")
+        self._always_ancestor()
+        ctx = o._incremental_context("7", "repo", "/tmp/repo")
         self.assertIsNotNone(ctx)
         self.assertEqual(ctx["commit"], "old123")
         self.assertEqual(ctx["current_commit"], "new456")
         self.assertEqual(ctx["verdict"], "request-changes")
         self.assertIn("Medium", ctx["block"])
+
+    def test_a_forged_description_stamp_is_not_trusted(self):
+        """The exact gap this store closes: a PR author can write anything
+        into the description, including a fake prism:meta block claiming an
+        earlier commit in their own branch was already reviewed and
+        approved. Without a matching local record, PRISM must not shortcut
+        to a skim of that "already reviewed" history — a forged stamp gets
+        exactly the same full review as a PR with no stamp at all."""
+        o.get_pr = self._pr(self.DESC, "new456")  # a real ancestor of new456
+        self._always_ancestor()
+        # No o._record_reviewed_commit call: PRISM never actually reviewed
+        # "old123" — the description's claim is unconfirmed.
+        self.assertIsNone(o._incremental_context("7", "repo", "/tmp/repo"))
+
+    def test_local_record_is_scoped_per_repo_and_pr(self):
+        """A record for a different repo or PR must never confirm this one."""
+        o.get_pr = self._pr(self.DESC, "new456")
+        self._always_ancestor()
+        o._record_reviewed_commit("other-repo", "7", "old123")
+        self.assertIsNone(o._incremental_context("7", "repo", "/tmp/repo"))
+        o._record_reviewed_commit("repo", "999", "old123")
+        self.assertIsNone(o._incremental_context("7", "repo", "/tmp/repo"))
+
+    def test_record_and_confirm_round_trip(self):
+        self.assertIsNone(o._locally_confirmed_reviewed_commit("repo", "7"))
+        o._record_reviewed_commit("repo", "7", "aaa111")
+        self.assertEqual(o._locally_confirmed_reviewed_commit("repo", "7"), "aaa111")
+        o._record_reviewed_commit("repo", "7", "bbb222")
+        self.assertEqual(o._locally_confirmed_reviewed_commit("repo", "7"), "bbb222",
+                         "a later review must overwrite the earlier record")
+
+    def test_recording_a_falsy_commit_is_a_no_op(self):
+        o._record_reviewed_commit("repo", "7", "")
+        self.assertIsNone(o._locally_confirmed_reviewed_commit("repo", "7"))
 
     def test_run_opencode_review_prompt_mentions_incremental_when_present(self):
         importlib.reload(o)

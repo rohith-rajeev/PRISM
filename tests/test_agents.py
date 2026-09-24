@@ -147,6 +147,9 @@ class SafetyGates(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.clone = self._tmp.name
         self.addCleanup(self._tmp.cleanup)
+        # Isolate the local review-provenance store (_run_pipeline calls the
+        # real _record_reviewed_commit) from ~/.prism/reviewed_commits.json.
+        o._REVIEWED_STORE_PATH = Path(self._tmp.name) / "reviewed_commits.json"
         o.ensure_bundled_agents = lambda *a, **k: ["pr-reviewer"]
         o.resolve_repo = lambda r, p, l: (r, self.clone)
         o.run_opencode_review = lambda *a, **k: (REPORT, "ses_x")
@@ -253,6 +256,7 @@ class HighImpactConfirmation(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.clone = self._tmp.name
         self.addCleanup(self._tmp.cleanup)
+        o._REVIEWED_STORE_PATH = Path(self._tmp.name) / "reviewed_commits.json"
         o.ensure_bundled_agents = lambda *a, **k: ["pr-reviewer"]
         o.resolve_repo = lambda r, p, l: (r, self.clone)
         o.run_agent = lambda *a, **k: ("", {"decision": "go", "reason": "looks fine"})
@@ -325,6 +329,7 @@ class ChatNotification(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.clone = self._tmp.name
         self.addCleanup(self._tmp.cleanup)
+        o._REVIEWED_STORE_PATH = Path(self._tmp.name) / "reviewed_commits.json"
         o.ensure_bundled_agents = lambda *a, **k: ["pr-reviewer"]
         o.resolve_repo = lambda r, p, l: (r, self.clone)
         o.run_opencode_review = lambda *a, **k: (REPORT, "ses_x")

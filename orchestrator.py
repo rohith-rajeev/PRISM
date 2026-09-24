@@ -25,6 +25,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+import config
 import notifier
 
 REGION_DEFAULT = "us-east-1"
@@ -913,14 +914,65 @@ def run_agent(agent, prompt, project_dir, emit=_emit_plain, model=None,
     return out, decision
 
 
-def _incremental_context(pr_id, local_repo, region=REGION_DEFAULT, emit=_emit_plain):
+# Local, PRISM-only record of which commit it actually finished reviewing on
+# a given PR — never derived from the PR description. The description is
+# attacker-controlled: anyone who can edit a PR can also write a fake
+# `prism:meta` block claiming an earlier, never-reviewed commit was already
+# reviewed and approved by PRISM. Without an independent check, that forged
+# stamp alone would be enough to make _incremental_context() only skim
+# everything up to that point on PRISM's very first real look at the PR —
+# exactly the review a malicious first-time contributor most needs to not be
+# skipped. This file is where PRISM writes down what it actually did, so a
+# stamp is only ever trusted when it matches an entry PRISM itself wrote.
+_REVIEWED_STORE_PATH = config.CONFIG_DIR / "reviewed_commits.json"
+_REVIEWED_STORE_GUARD = threading.Lock()
+
+
+def _record_reviewed_commit(repo_name, pr_id, commit):
+    """Note that PRISM itself finished reviewing `commit` on this PR.
+
+    Best-effort: losing this write only costs the incremental-review
+    optimisation on a later run (which then safely falls back to a full
+    review), never a safety property, so failures here are swallowed.
+    """
+    if not commit:
+        return
+    key = f"{repo_name}#{pr_id}"
+    with _REVIEWED_STORE_GUARD:
+        try:
+            store = json.loads(_REVIEWED_STORE_PATH.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            store = {}
+        store[key] = commit
+        try:
+            _REVIEWED_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            _REVIEWED_STORE_PATH.write_text(json.dumps(store), encoding="utf-8")
+        except OSError:
+            pass
+
+
+def _locally_confirmed_reviewed_commit(repo_name, pr_id):
+    """The commit PRISM's own records say it last finished reviewing on this
+    PR, or None. Never reads the PR description."""
+    with _REVIEWED_STORE_GUARD:
+        try:
+            store = json.loads(_REVIEWED_STORE_PATH.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return None
+        return store.get(f"{repo_name}#{pr_id}")
+
+
+def _incremental_context(pr_id, repo_name, local_repo, region=REGION_DEFAULT,
+                         emit=_emit_plain):
     """Previous-review context for an incremental pass, or None for a full one.
 
     An incremental review is a token-consumption optimisation, never a
     correctness risk — every uncertain step here (no stamp yet, the commit
     it names isn't fetchable, it isn't actually an ancestor of the PR's
-    current tip) falls back to None, and a None here means
-    run_opencode_review asks for an ordinary full review exactly as before.
+    current tip, or — critically — PRISM's own local records don't confirm
+    it actually reviewed that exact commit) falls back to None, and a None
+    here means run_opencode_review asks for an ordinary full review exactly
+    as before.
     """
     try:
         pr = get_pr(pr_id, region=region)
@@ -930,6 +982,12 @@ def _incremental_context(pr_id, local_repo, region=REGION_DEFAULT, emit=_emit_pl
     prev_commit = prev.get("commit")
     current_commit = pr.get("sourceCommit") or ""
     if not prev_commit or not current_commit or prev_commit == current_commit:
+        return None
+    # The description alone is never sufficient evidence — see the comment on
+    # _REVIEWED_STORE_PATH above. This alone closes the forged-stamp gap: an
+    # attacker can write anything into the description, but not into
+    # PRISM's own local file.
+    if _locally_confirmed_reviewed_commit(repo_name, pr_id) != prev_commit:
         return None
     src = pr.get("sourceReference")
     try:
@@ -963,7 +1021,8 @@ def run_opencode_review(pr_id, repo_name, local_repo, project_dir,
     exe = require_engine()
     ensure_bundled_agents(project_dir, emit=emit)
     agent = AGENT_REVIEWER
-    incremental = _incremental_context(pr_id, local_repo, region=region, emit=emit)
+    incremental = _incremental_context(pr_id, repo_name, local_repo, region=region,
+                                       emit=emit)
     if incremental:
         emit(f"▸ Incremental review since {incremental['commit'][:8]} "
              f"(previous verdict: {incremental['verdict']}).")
@@ -1716,6 +1775,12 @@ def _run_pipeline(project_dir, repo_name, pr_id, local_repo=None,
             source_commit_at_review = get_pr(pr_id, region=region).get("sourceCommit", "")
         except Exception:  # noqa: BLE001
             source_commit_at_review = ""
+        # PRISM's own record of what it actually reviewed — the only thing
+        # _incremental_context trusts when deciding whether a later run can
+        # go incremental (see _REVIEWED_STORE_PATH). Recorded here, not only
+        # after a successful description write, so the safety property holds
+        # regardless of whether do_update_desc is enabled.
+        _record_reviewed_commit(repo_name, pr_id, source_commit_at_review)
 
     # ---- Step 2: description ----
     # PRISM composes and writes this itself — no agent call. findings are
