@@ -44,10 +44,12 @@ variable "pipeline_branches" {
   description = "Map of CodePipeline pipeline name -> the branch it deploys. Used to (a) watch these pipelines for successful executions and (b) know which chats to notify as a fallback when a deployment can't be matched to a recorded PR-merge thread. Placeholder values below - override for your account."
   type        = map(string)
   default = {
-    "your-backend-pipeline-qa"   = "qa"
-    "your-backend-pipeline-stg"  = "staging"
-    "your-frontend-pipeline-qa"  = "qa"
-    "your-frontend-pipeline-stg" = "staging"
+    "your-backend-pipeline-qa"    = "qa"
+    "your-backend-pipeline-stg"   = "staging"
+    "your-backend-pipeline-prod"  = "main"
+    "your-frontend-pipeline-qa"   = "qa"
+    "your-frontend-pipeline-stg"  = "staging"
+    "your-frontend-pipeline-prod" = "main"
   }
 }
 
@@ -58,7 +60,7 @@ variable "thread_ttl_days" {
 }
 
 variable "post_unlinked_deployments" {
-  description = "If true, a successful deployment whose source commit cannot be matched to a recorded PR-merge thread is still posted as a new (non-threaded) card instead of being dropped."
+  description = "If true, a deployment whose source commit cannot be matched to a recorded PR-merge thread is still posted as a new (non-threaded) message instead of being dropped."
   type        = bool
   default     = true
 }
