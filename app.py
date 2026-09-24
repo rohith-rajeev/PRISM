@@ -1498,10 +1498,11 @@ class UpdateDialog(tk.Toplevel):
     Tk call still happens on the Tk thread - the same rule the job pump keeps.
     """
 
-    def __init__(self, parent, app):
+    def __init__(self, parent, app, silent=False):
         super().__init__(parent)
         self.withdraw()
         self.app = app
+        self._silent = silent
         self.title("Software update")
         self.configure(bg=PAL["page"])
         self.resizable(False, False)
@@ -1524,10 +1525,21 @@ class UpdateDialog(tk.Toplevel):
         self._show_checking()
         self.update_idletasks()
         self._centre(parent)
-        self.deiconify()
-        self.grab_set()
+        # A silent (startup) check builds this same "checking" state but
+        # stays withdrawn — it only actually appears if _pump finds a real
+        # update, via _reveal() below. An unprompted "you're up to date" or
+        # "couldn't check" popup on every launch would be the opposite of
+        # what an alert-only-when-relevant startup check is for.
+        if not self._silent:
+            self.deiconify()
+            self.grab_set()
         self._spawn(self._work_check)
         self._pump()
+
+    def _reveal(self):
+        self.deiconify()
+        self._centre(self.master)
+        self.grab_set()
 
     # ----- scaffolding -----
     def _centre(self, parent):
@@ -1699,7 +1711,15 @@ class UpdateDialog(tk.Toplevel):
             while True:
                 kind, payload = self._q.get_nowait()
                 if kind == "release":
-                    self._show_current() if payload is None else self._show_available(payload)
+                    if payload is None:
+                        if self._silent:
+                            self._close()      # up to date: never interrupt
+                            return
+                        self._show_current()
+                    else:
+                        self._show_available(payload)
+                        if self._silent:
+                            self._reveal()      # a real update: worth surfacing
                 elif kind == "progress":
                     self._on_progress(*payload)
                 elif kind == "installed":
@@ -1709,6 +1729,9 @@ class UpdateDialog(tk.Toplevel):
                     self._close()
                     return
                 elif kind == "check-failed":
+                    if self._silent:
+                        self._close()          # a quiet startup check fails quietly
+                        return
                     self._show_error(payload, tone="warn",
                                      title="Could not check for updates")
                 elif kind == "error":
@@ -1827,6 +1850,12 @@ class App(tk.Tk):
         # still sitting next to this one. It could not be deleted then - on
         # Windows it was the running process - but it can be now.
         U.cleanup_previous()
+        # A quiet, once-per-launch check — the window paints first (hence the
+        # delay), and the dialog itself only ever becomes visible if there is
+        # actually something to tell the user about (see UpdateDialog's
+        # silent mode). "Check for updates" in Help still works the same way
+        # on demand.
+        self.after(1500, lambda: UpdateDialog(self, self, silent=True))
 
     # ----- themed primitives -----
     def _lab(self, parent, text, font=None, fg="muted", bg="card"):
