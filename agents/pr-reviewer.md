@@ -72,6 +72,36 @@ context, not a replacement for the diff — the actual change still comes from
 you actually read. If `graphify-out/` does not exist, skip this step and
 scan as usual; do not go looking for one in any other location.
 
+## Step 0.5 — Incremental reviews
+
+Sometimes the prompt tells you this is an **INCREMENTAL** review: PRISM has
+already reviewed an earlier commit on this same PR, and gives you that
+commit's sha, its verdict, and its recorded findings verbatim. This is the
+main lever against the review-loop-and-recount-everything cost, so use it
+rather than re-reading the whole PR from scratch:
+
+- Diff from that previous commit to the PR's current tip
+  (`git diff <prevCommit>..<currentCommit>`), not the whole
+  `<dest>...<src>` range — that delta is what actually needs a full,
+  every-dimension review (Step 2, unchanged).
+- For each previously reported finding, explicitly say in your report
+  whether it was addressed, partially addressed, or still present — don't
+  silently drop it and don't restate it as if it were newly found.
+- Files the delta did **not** touch get a quick skim only —
+  `git diff --stat origin/<dest>...origin/<src>` is enough to see what's in
+  scope; read a skimmed file only far enough to rule out a newly obvious
+  critical/blocker issue (e.g. a stray unrelated change slipped into a later
+  commit). Do not run a full dimension-by-dimension pass over them again.
+- If the previous commit doesn't cleanly resolve (unknown ref, doesn't
+  actually diff, anything that makes "the delta since then" ambiguous),
+  fall back to a full review instead of guessing.
+
+Nothing else about the report changes — same Step 3 shape — except add one
+line under Summary noting the review was incremental and since which commit.
+
+When the prompt does not mention a previous review, this step doesn't apply:
+proceed straight to Step 1 as a full review, exactly as always.
+
 ## Step 1 — Get the diff and commit history
 
 ```
@@ -80,6 +110,10 @@ git log --format=fuller origin/<dest>..origin/<src>
 git diff origin/<dest>...origin/<src>          # three-dot: what CodeCommit shows
 git diff --stat origin/<dest>...origin/<src>   # start here for large PRs
 ```
+
+An incremental review (Step 0.5) additionally needs
+`git diff <prevCommit>..<currentCommit>` — the actual delta to give a full
+review to.
 
 As a last resort with no usable clone, use the API: `aws codecommit
 get-differences --repository-name <repo> --before-commit-specifier <dest>
@@ -127,7 +161,9 @@ so the `**Verdict:**` and `**Impact score:**` labels must appear exactly:
   and why it matters, with a concrete fix or question>
 
 ### Summary
-<2-4 sentences: what the PR does, overall risk, and anything blocking merge>
+<2-4 sentences: what the PR does, overall risk, and anything blocking merge.
+For an incremental review (Step 0.5), add one line: "Incremental since
+<prevCommit> — <n> of <m> previous findings addressed.">
 ```
 
 The impact score reflects blast radius and risk if merged as-is — 1 is a

@@ -6,6 +6,7 @@ conversation to its own session, and serialising mutations of a shared clone.
 
     python3 -m unittest discover -s tests -v
 """
+import importlib
 import json
 import sys
 import threading
@@ -400,6 +401,102 @@ class PreviousReview(unittest.TestCase):
                "<!-- pr-reviewer:end -->")
         self.assertEqual(o.previous_review(desc),
                          {"verdict": "block", "commit": "deadbeef"})
+
+
+class IncrementalReview(unittest.TestCase):
+    """_incremental_context() decides whether a review can scope itself to
+    the delta since a previous pass. Every uncertain branch must fall back
+    to None (a full review) rather than guess."""
+
+    DESC = ("<!-- prism:start -->\n"
+           "<!-- prism:meta reviewer=PRISM verdict=request-changes commit=old123 -->\n"
+           "---\n- **[Medium] x** something\n<!-- prism:end -->")
+
+    def setUp(self):
+        self.orig_get_pr = o.get_pr
+        self.orig_run = o.subprocess.run
+        self.addCleanup(setattr, o, "get_pr", self.orig_get_pr)
+        self.addCleanup(setattr, o.subprocess, "run", self.orig_run)
+
+    def _pr(self, description, source_commit, source_ref="feat"):
+        return lambda *a, **k: {"description": description,
+                                "sourceCommit": source_commit,
+                                "sourceReference": source_ref}
+
+    def test_no_previous_stamp_is_a_full_review(self):
+        o.get_pr = self._pr("", "new456")
+        self.assertIsNone(o._incremental_context("7", "/tmp/repo"))
+
+    def test_same_commit_as_last_time_is_a_full_review(self):
+        o.get_pr = self._pr(self.DESC, "old123")
+        self.assertIsNone(o._incremental_context("7", "/tmp/repo"))
+
+    def test_previous_commit_not_an_ancestor_falls_back(self):
+        o.get_pr = self._pr(self.DESC, "new456")
+
+        def fake_run(cmd, **k):
+            class R:
+                returncode = 0 if cmd[:2] != ["git", "merge-base"] else 1
+            return R()
+        o.subprocess.run = fake_run
+        self.assertIsNone(o._incremental_context("7", "/tmp/repo"))
+
+    def test_get_pr_failure_falls_back(self):
+        def boom(*a, **k):
+            raise RuntimeError("aws unavailable")
+        o.get_pr = boom
+        self.assertIsNone(o._incremental_context("7", "/tmp/repo"))
+
+    def test_valid_ancestor_returns_the_previous_review_context(self):
+        o.get_pr = self._pr(self.DESC, "new456")
+
+        def fake_run(cmd, **k):
+            class R:
+                returncode = 0
+            return R()
+        o.subprocess.run = fake_run
+        ctx = o._incremental_context("7", "/tmp/repo")
+        self.assertIsNotNone(ctx)
+        self.assertEqual(ctx["commit"], "old123")
+        self.assertEqual(ctx["current_commit"], "new456")
+        self.assertEqual(ctx["verdict"], "request-changes")
+        self.assertIn("Medium", ctx["block"])
+
+    def test_run_opencode_review_prompt_mentions_incremental_when_present(self):
+        importlib.reload(o)
+        self.addCleanup(importlib.reload, o)
+        captured = {}
+        o._incremental_context = lambda *a, **k: {
+            "commit": "old123", "current_commit": "new456",
+            "verdict": "request-changes", "block": "- prior finding"}
+        o.ensure_bundled_agents = lambda *a, **k: None
+        o.require_engine = lambda: "opencode"
+        o.engine_supports_json = lambda exe: False
+
+        def fake_stream(cmd, cwd, emit, control=None, json_mode=False, meter=None):
+            captured["prompt"] = cmd[-1]
+            return 0, "**Verdict:** OK Approve\n", "sid"
+        o._run_stream_resilient = fake_stream
+        o.run_opencode_review("7", "repo", "/tmp/repo", "/tmp/proj")
+        self.assertIn("INCREMENTAL", captured["prompt"])
+        self.assertIn("old123", captured["prompt"])
+        self.assertIn("prior finding", captured["prompt"])
+
+    def test_run_opencode_review_prompt_is_plain_without_previous_context(self):
+        importlib.reload(o)
+        self.addCleanup(importlib.reload, o)
+        captured = {}
+        o._incremental_context = lambda *a, **k: None
+        o.ensure_bundled_agents = lambda *a, **k: None
+        o.require_engine = lambda: "opencode"
+        o.engine_supports_json = lambda exe: False
+
+        def fake_stream(cmd, cwd, emit, control=None, json_mode=False, meter=None):
+            captured["prompt"] = cmd[-1]
+            return 0, "**Verdict:** OK Approve\n", "sid"
+        o._run_stream_resilient = fake_stream
+        o.run_opencode_review("7", "repo", "/tmp/repo", "/tmp/proj")
+        self.assertNotIn("INCREMENTAL", captured["prompt"])
 
 
 class PathLocks(unittest.TestCase):

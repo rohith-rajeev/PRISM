@@ -892,6 +892,49 @@ def run_agent(agent, prompt, project_dir, emit=_emit_plain, model=None,
     return out, decision
 
 
+def _incremental_context(pr_id, local_repo, region=REGION_DEFAULT, emit=_emit_plain):
+    """Previous-review context for an incremental pass, or None for a full one.
+
+    An incremental review is a token-consumption optimisation, never a
+    correctness risk — every uncertain step here (no stamp yet, the commit
+    it names isn't fetchable, it isn't actually an ancestor of the PR's
+    current tip) falls back to None, and a None here means
+    run_opencode_review asks for an ordinary full review exactly as before.
+    """
+    try:
+        pr = get_pr(pr_id, region=region)
+    except Exception:  # noqa: BLE001
+        return None
+    prev = previous_review(pr.get("description") or "")
+    prev_commit = prev.get("commit")
+    current_commit = pr.get("sourceCommit") or ""
+    if not prev_commit or not current_commit or prev_commit == current_commit:
+        return None
+    src = pr.get("sourceReference")
+    try:
+        # Same fetch the reviewer agent itself runs in its own Step 1, done
+        # here too so the ancestor check below has the objects it needs —
+        # a fetch reads remote refs and doesn't touch the working tree, so
+        # it's safe outside the sync/merge lock, same as the agent's own.
+        if src:
+            subprocess.run(["git", "fetch", "origin", src], cwd=local_repo,
+                           capture_output=True, timeout=120)
+        ancestor = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", prev_commit, current_commit],
+            cwd=local_repo, capture_output=True, timeout=60)
+    except Exception:  # noqa: BLE001
+        return None
+    if ancestor.returncode != 0:
+        return None
+    block_match = DESC_BLOCK_RE.search(pr.get("description") or "")
+    return {
+        "commit": prev_commit,
+        "current_commit": current_commit,
+        "verdict": prev.get("verdict", "unknown"),
+        "block": block_match.group(0) if block_match else "(not recorded)",
+    }
+
+
 def run_opencode_review(pr_id, repo_name, local_repo, project_dir,
                         region=REGION_DEFAULT, emit=_emit_plain, model=None,
                         control=None, meter=None):
@@ -899,13 +942,33 @@ def run_opencode_review(pr_id, repo_name, local_repo, project_dir,
     exe = require_engine()
     ensure_bundled_agents(project_dir, emit=emit)
     agent = AGENT_REVIEWER
-    prompt = (
-        f"Review CodeCommit pull request {pr_id} in CodeCommit repository "
-        f"'{repo_name}' (AWS region {region}). Local clone path: {local_repo}. "
-        f"Run directory: {project_dir}. "
-        f"Follow your pr-reviewer workflow and report the verdict in chat, "
-        f"then stop and ask about updating the PR description."
-    )
+    incremental = _incremental_context(pr_id, local_repo, region=region, emit=emit)
+    if incremental:
+        emit(f"▸ Incremental review since {incremental['commit'][:8]} "
+             f"(previous verdict: {incremental['verdict']}).")
+        prompt = (
+            f"Review CodeCommit pull request {pr_id} in CodeCommit repository "
+            f"'{repo_name}' (AWS region {region}). Local clone path: {local_repo}. "
+            f"Run directory: {project_dir}. "
+            f"This is an INCREMENTAL review — PRISM already reviewed commit "
+            f"{incremental['commit']} on this PR (verdict: {incremental['verdict']}). "
+            f"That review's recorded findings:\n{incremental['block']}\n\n"
+            f"Follow your pr-reviewer workflow's incremental-review step: do a full "
+            f"dimension-by-dimension review of the delta from {incremental['commit']} to "
+            f"{incremental['current_commit']} only, explicitly note whether each finding "
+            f"above was addressed, and do a quick --stat-level skim of any files outside "
+            f"that delta solely to catch a newly introduced critical/blocker issue — not a "
+            f"full re-review of files the delta didn't touch. Report the verdict in chat as "
+            f"usual, then stop and ask about updating the PR description."
+        )
+    else:
+        prompt = (
+            f"Review CodeCommit pull request {pr_id} in CodeCommit repository "
+            f"'{repo_name}' (AWS region {region}). Local clone path: {local_repo}. "
+            f"Run directory: {project_dir}. "
+            f"Follow your pr-reviewer workflow and report the verdict in chat, "
+            f"then stop and ask about updating the PR description."
+        )
     # No --session/--continue: a plain run always creates a fresh session, and
     # --format json is what lets us capture its id for the follow-up turns.
     json_mode = engine_supports_json(exe)
