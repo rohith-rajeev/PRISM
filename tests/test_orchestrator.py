@@ -8,7 +8,10 @@ conversation to its own session, and serialising mutations of a shared clone.
 """
 import importlib
 import json
+import shutil
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -497,6 +500,106 @@ class IncrementalReview(unittest.TestCase):
         o._run_stream_resilient = fake_stream
         o.run_opencode_review("7", "repo", "/tmp/repo", "/tmp/proj")
         self.assertNotIn("INCREMENTAL", captured["prompt"])
+
+
+@unittest.skipUnless(shutil.which("git"), "git is not on PATH")
+class WorktreeSync(unittest.TestCase):
+    """sync_destination_into_source's real behaviour: a genuine local
+    origin + clone pair, no mocking of git itself, so this proves the
+    worktree path actually produces the same result on disk as the old
+    shared-clone path — and that a worktree failure falls back cleanly."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        base = Path(self._tmp.name)
+        self.origin = base / "origin"
+        self.clone = base / "clone"
+
+        def git(repo, *args):
+            subprocess.run(["git", "-C", str(repo)] + list(args), check=True,
+                           capture_output=True, text=True, timeout=30)
+
+        self.origin.mkdir()
+        git(self.origin, "init", "-q", "-b", "main")
+        git(self.origin, "config", "user.email", "t@example.com")
+        git(self.origin, "config", "user.name", "t")
+        # origin is a normal (non-bare) repo standing in for CodeCommit here,
+        # and ends up with `feat` checked out — real CodeCommit has no
+        # working tree to conflict with a push, so allow it here too rather
+        # than the test tripping over an artifact of the fixture.
+        git(self.origin, "config", "receive.denyCurrentBranch", "ignore")
+        (self.origin / "f.txt").write_text("one\n")
+        git(self.origin, "add", "f.txt")
+        git(self.origin, "commit", "-q", "-m", "initial")
+        git(self.origin, "checkout", "-q", "-b", "feat")
+        # main gets a commit feat doesn't have yet — this is what "sync
+        # dest into src" actually has to bring across.
+        git(self.origin, "checkout", "-q", "main")
+        (self.origin / "g.txt").write_text("two\n")
+        git(self.origin, "add", "g.txt")
+        git(self.origin, "commit", "-q", "-m", "main-only")
+        git(self.origin, "checkout", "-q", "feat")
+
+        subprocess.run(["git", "clone", "-q", str(self.origin), str(self.clone)],
+                       check=True, capture_output=True, timeout=30)
+        git(self.clone, "config", "user.email", "t@example.com")
+        git(self.clone, "config", "user.name", "t")
+        git(self.clone, "checkout", "-q", "feat")
+        self.git = git
+
+    def _feat_has_main_only_file(self):
+        out = subprocess.run(["git", "-C", str(self.origin), "show", "feat:g.txt"],
+                             capture_output=True, text=True, timeout=30)
+        return out.returncode == 0
+
+    def test_worktree_path_syncs_and_cleans_up(self):
+        self.assertFalse(self._feat_has_main_only_file())
+        o.sync_destination_into_source(str(self.clone), "main", "feat", "99",
+                                       emit=lambda *a, **k: None)
+        self.assertTrue(self._feat_has_main_only_file(),
+                        "dest's commit never reached the PR's source branch")
+        leftover = list(o._worktree_root().glob("pr-99-*"))
+        self.assertEqual(leftover, [], "the worktree must be removed after use")
+
+    def test_worktree_dir_is_under_the_os_temp_root_not_the_clone(self):
+        real_add = subprocess.run
+        seen = {}
+
+        def spy(cmd, *a, **k):
+            if len(cmd) > 2 and cmd[:2] == ["git", "worktree"] and cmd[2] == "add":
+                seen["path"] = cmd[cmd.index("-B") + 2]
+            return real_add(cmd, *a, **k)
+        o.subprocess.run = spy
+        self.addCleanup(setattr, o.subprocess, "run", real_add)
+        o.sync_destination_into_source(str(self.clone), "main", "feat", "100",
+                                       emit=lambda *a, **k: None)
+        self.assertIn("path", seen, "the spy never saw a worktree add call")
+        wt_path = Path(seen["path"]).resolve()
+        self.assertEqual(wt_path.parent, o._worktree_root().resolve())
+        self.assertNotIn(str(Path(self.clone).resolve()), str(wt_path))
+
+    def test_falls_back_to_the_shared_clone_when_worktree_add_fails(self):
+        real_run = subprocess.run
+
+        def flaky(cmd, *a, **k):
+            if len(cmd) > 2 and cmd[:2] == ["git", "worktree"] and cmd[2] == "add":
+                raise OSError("simulated: git too old for worktree")
+            return real_run(cmd, *a, **k)
+        o.subprocess.run = flaky
+        self.addCleanup(setattr, o.subprocess, "run", real_run)
+        emitted = []
+        o.sync_destination_into_source(str(self.clone), "main", "feat", "101",
+                                       emit=emitted.append)
+        self.assertTrue(any("falling back" in m for m in emitted))
+        self.assertTrue(self._feat_has_main_only_file(),
+                        "the fallback path must still complete the sync")
+
+    def test_worktree_path_never_holds_more_than_one_lock(self):
+        import inspect
+        src = inspect.getsource(o._sync_via_worktree)
+        self.assertLessEqual(src.count("_lock_for("), 1)
+        self.assertNotIn("ask(", src, "a lock must never be held across a human wait")
 
 
 class PathLocks(unittest.TestCase):

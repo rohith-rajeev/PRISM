@@ -18,8 +18,10 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -116,10 +118,22 @@ def _emit_plain(text, tag=None):
 #
 # INVARIANT: no code path in this module may hold two of these locks at once.
 # It holds structurally today — the fallback directory lock is taken only in
-# the agent-turn helpers (pipeline steps 1-2) and the clone lock only inside
-# sync_destination_into_source (step 4) — and full_pipeline is straight-line,
-# so one is always released before the other is requested. That makes
-# lock-order inversion impossible. No lock is ever held across a human wait.
+# the agent-turn helpers (pipeline steps 1-2), the per-branch lock only inside
+# _sync_via_worktree, and the whole-clone lock only inside the fallback
+# _sync_locked path it defers to when a worktree can't be used — and
+# full_pipeline is straight-line, so one is always released (the `with` block
+# exits, worktree lock included, even on the exception that triggers the
+# fallback) before the next is requested. That makes lock-order inversion
+# impossible. No lock is ever held across a human wait.
+#
+# sync_destination_into_source (step 4) tries a per-job git worktree first —
+# keyed on the *branch name*, not the whole clone, so two different PRs (in
+# practice, two different source branches) sync and merge fully in parallel
+# instead of queuing behind one shared checkout. Only two jobs that somehow
+# target the same branch name still serialise, which is a real git
+# constraint (one worktree per branch) rather than a PRISM one. If
+# `git worktree` itself can't be used for any reason, it falls back to the
+# original whole-clone lock below, unchanged.
 _PATH_LOCKS = {}
 _PATH_LOCKS_GUARD = threading.Lock()
 
@@ -1310,20 +1324,116 @@ def describe_conflict(entry, index, hunk):
             f"INCOMING (the base branch):\n{trim(theirs)}")
 
 
+class _WorktreeUnavailable(RuntimeError):
+    """`git worktree` itself couldn't be used for this sync — fall back to
+    the shared, whole-clone-locked path. Never raised for anything that
+    happened *during* the sync itself (a real merge conflict, a rejected
+    push, ...) — only for the worktree machinery failing to stand up."""
+
+
+def _worktree_root():
+    """Where per-job worktrees live: always the OS temp directory, never
+    inside the project folder or the repo clone itself."""
+    return Path(tempfile.gettempdir()) / "prism-worktrees"
+
+
+def _sync_via_worktree(local_repo, dest, src, pr_id, emit, choices):
+    """Do the sync in a throwaway `git worktree` instead of the shared
+    clone, so a different PR (almost always a different branch) never
+    waits behind this one. Raises _WorktreeUnavailable if the worktree
+    itself can't be created; any other exception is a real outcome of the
+    sync (a conflict, a rejected push, ...) and propagates as-is.
+    """
+    root = _worktree_root()
+    wt = root / f"pr-{pr_id}-{uuid.uuid4().hex[:8]}"
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise _WorktreeUnavailable(str(e)) from e
+    # git needs origin/<src> as a local ref before it can branch a worktree
+    # off it — a plain fetch, safe unlocked for the same reason the review
+    # step's own fetch is (it only updates remote-tracking refs, which a
+    # concurrent worktree checkout elsewhere in this repo does not disturb).
+    try:
+        subprocess.run(["git", "fetch", "origin", dest, src], cwd=local_repo,
+                       capture_output=True, text=True, timeout=300, check=True)
+    except Exception as e:  # noqa: BLE001
+        raise _WorktreeUnavailable(str(e)) from e
+    # Keyed on the branch name, not the whole clone: two different PRs sync
+    # fully in parallel here. Only two jobs that somehow target the same
+    # source branch serialise — git itself allows only one worktree per
+    # branch, so that much is a real constraint, not an extra one PRISM adds.
+    with _lock_for(f"{local_repo}#branch:{src}"):
+        try:
+            # --force: the common case is that this branch is already
+            # checked out somewhere (the shared clone itself, most often) —
+            # without it, git refuses outright. Safe here because the lock
+            # above ensures no other PRISM-managed worktree for this same
+            # branch is active concurrently.
+            subprocess.run(["git", "worktree", "prune"], cwd=local_repo,
+                           capture_output=True, timeout=60)
+            subprocess.run(["git", "worktree", "add", "--force", "-B", src,
+                            str(wt), f"origin/{src}"],
+                           cwd=local_repo, capture_output=True, text=True,
+                           timeout=300, check=True)
+        except Exception as e:  # noqa: BLE001
+            raise _WorktreeUnavailable(str(e)) from e
+        emit(f"▸ Using an isolated worktree for PR #{pr_id} ({wt})")
+        try:
+            return _sync_locked(str(wt), dest, src, pr_id, emit, choices)
+        finally:
+            _remove_worktree(local_repo, wt, root)
+
+
+def _remove_worktree(local_repo, wt, root):
+    """Best-effort cleanup — never raises, so it's always safe from a
+    `finally`. A leftover worktree directory costs disk, not correctness
+    (the next run's `git worktree prune` + a fresh uuid path route around
+    it), so nothing here needs to be more than best-effort.
+    """
+    try:
+        subprocess.run(["git", "worktree", "remove", "--force", str(wt)],
+                       cwd=local_repo, capture_output=True, timeout=120)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        subprocess.run(["git", "worktree", "prune"], cwd=local_repo,
+                       capture_output=True, timeout=60)
+    except Exception:  # noqa: BLE001
+        pass
+    # Defensive belt-and-suspenders: only ever delete something PRISM itself
+    # created under the worktree temp root, never anything else.
+    try:
+        resolved, root_resolved = Path(wt).resolve(), root.resolve()
+        if resolved.exists() and resolved != root_resolved and \
+                root_resolved in resolved.parents:
+            shutil.rmtree(resolved, ignore_errors=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def sync_destination_into_source(local_repo, dest, src, pr_id, emit=_emit_plain,
                                  choices=None):
-    """Sync destination commits onto the source branch locally, then push.
+    """Sync destination commits onto the source branch, then push.
 
     Equivalent of: git fetch, checkout source, merge origin/destination, push.
     Raises on merge conflicts (aborts the merge first).
 
-    Serialised on the clone: this is the one place that mutates the working
-    tree, and two jobs reviewing different PRs out of the same checkout would
-    otherwise interleave each other's `git checkout`. Reviews deliberately run
-    outside this lock — they read remote refs (origin/<dest>...origin/<src>),
-    which a concurrent checkout does not disturb, and holding the lock across a
-    multi-minute agent turn would serialise the whole tool.
+    Tries an isolated `git worktree` first (see _sync_via_worktree) so a
+    different PR's sync never queues behind this one on a shared checkout.
+    Falls back to the original whole-clone-locked path, unchanged, the
+    moment anything about standing up that worktree goes wrong — an old git
+    version, no disk space, a read-only temp dir, whatever. Reviews
+    deliberately run outside either lock — they read remote refs
+    (origin/<dest>...origin/<src>), which neither path's checkout disturbs,
+    and holding a lock across a multi-minute agent turn would serialise the
+    whole tool.
     """
+    try:
+        return _sync_via_worktree(local_repo, dest, src, pr_id, emit, choices)
+    except _WorktreeUnavailable as e:
+        emit(f"⚠ Couldn't use an isolated worktree ({e}); "
+             f"falling back to the shared clone.")
     with _lock_for(local_repo):
         return _sync_locked(local_repo, dest, src, pr_id, emit, choices)
 
