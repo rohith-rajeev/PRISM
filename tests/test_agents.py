@@ -147,6 +147,9 @@ class SafetyGates(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.clone = self._tmp.name
         self.addCleanup(self._tmp.cleanup)
+        # Isolate the local review-provenance store (_run_pipeline calls the
+        # real _record_reviewed_commit) from ~/.prism/reviewed_commits.json.
+        o._REVIEWED_STORE_PATH = Path(self._tmp.name) / "reviewed_commits.json"
         o.ensure_bundled_agents = lambda *a, **k: ["pr-reviewer"]
         o.resolve_repo = lambda r, p, l: (r, self.clone)
         o.run_opencode_review = lambda *a, **k: (REPORT, "ses_x")
@@ -235,10 +238,16 @@ class SafetyGates(unittest.TestCase):
         self.assertTrue(res["merged"])
 
 
-class ChatNotification(unittest.TestCase):
-    """The webhook post is a courtesy layered on top of the pipeline in
-    full_pipeline() itself — these prove it never changes what the pipeline
-    does, only reports on it, and stays silent with nothing configured."""
+HIGH_IMPACT_REPORT = ("## PR #7\n**Verdict:** OK Approve\n"
+                      "**Impact score:** 8/10 - touches shared auth\n"
+                      "- **[High] risk — `auth.py:1`** big change\n")
+
+
+class HighImpactConfirmation(unittest.TestCase):
+    """Impact score >= HIGH_IMPACT_THRESHOLD must pause for an explicit
+    human 'proceed' before merging, even on an Approve verdict — a
+    reviewer being right about the code isn't the same as it being safe to
+    merge unattended. Low/medium impact must be completely unaffected."""
 
     def setUp(self):
         importlib.reload(o)
@@ -247,6 +256,80 @@ class ChatNotification(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.clone = self._tmp.name
         self.addCleanup(self._tmp.cleanup)
+        o._REVIEWED_STORE_PATH = Path(self._tmp.name) / "reviewed_commits.json"
+        o.ensure_bundled_agents = lambda *a, **k: ["pr-reviewer"]
+        o.resolve_repo = lambda r, p, l: (r, self.clone)
+        o.run_agent = lambda *a, **k: ("", {"decision": "go", "reason": "looks fine"})
+        o.check_ff_mergeable = lambda *a, **k: (True, "ok")
+        o.try_fast_forward_merge = lambda *a, **k: self.merged.append(1) or {}
+        o.update_description_direct = lambda *a, **k: ""
+        o.get_pr = lambda *a, **k: {"status": "OPEN", "repositoryName": "repo",
+                                    "destinationReference": "main",
+                                    "sourceReference": "feat", "description": ""}
+
+    def _run(self, report=HIGH_IMPACT_REPORT, ask=None, **kw):
+        o.run_opencode_review = lambda *a, **k: (report, "ses_x")
+        return o.full_pipeline(self.clone, "repo", "7", local_repo=self.clone,
+                               emit=lambda *a, **k: None, ask=ask, **kw)
+
+    def test_no_ask_available_refuses_to_merge(self):
+        """Never silently proceed past a gate meant to require a human."""
+        res = self._run(ask=None)
+        self.assertEqual(self.merged, [])
+        self.assertEqual(res["stopped"], "high-impact-not-confirmed")
+
+    def test_declining_does_not_merge(self):
+        res = self._run(ask=lambda q, choices=None: "abort")
+        self.assertEqual(self.merged, [])
+        self.assertEqual(res["stopped"], "high-impact-not-confirmed")
+
+    def test_confirming_proceeds_to_merge(self):
+        res = self._run(ask=lambda q, choices=None: "proceed")
+        self.assertEqual(len(self.merged), 1)
+        self.assertTrue(res["merged"])
+
+    def test_the_question_carries_score_verdict_and_findings(self):
+        captured = {}
+        def ask(question, choices=None):
+            captured["question"] = question
+            captured["choices"] = choices
+            return "proceed"
+        self._run(ask=ask)
+        self.assertIn("8/10", captured["question"])
+        self.assertIn("auth.py", captured["question"])
+        self.assertEqual({c[0] for c in captured["choices"]}, {"proceed", "abort"})
+
+    def test_below_threshold_never_asks(self):
+        def ask(*a, **k):
+            raise AssertionError("must not ask below the high-impact threshold")
+        res = self._run(report=REPORT, ask=ask)  # REPORT's impact is 2/10
+        self.assertEqual(len(self.merged), 1)
+        self.assertTrue(res["merged"])
+
+    def test_skipped_review_never_asks(self):
+        """No review means no impact score to gate on — the do_review=False
+        fast path must be completely unaffected by this gate."""
+        def ask(*a, **k):
+            raise AssertionError("must not ask when review was skipped")
+        res = self._run(ask=ask, do_review=False)
+        self.assertEqual(len(self.merged), 1)
+        self.assertTrue(res["merged"])
+
+
+class ChatNotification(unittest.TestCase):
+    """The webhook post is a courtesy layered on top of the pipeline in
+    full_pipeline() itself — these prove it never changes what the pipeline
+    does, only reports on completed outcomes (never execution errors), and
+    stays silent with nothing configured."""
+
+    def setUp(self):
+        importlib.reload(o)
+        self.addCleanup(importlib.reload, o)
+        self.merged = []
+        self._tmp = tempfile.TemporaryDirectory()
+        self.clone = self._tmp.name
+        self.addCleanup(self._tmp.cleanup)
+        o._REVIEWED_STORE_PATH = Path(self._tmp.name) / "reviewed_commits.json"
         o.ensure_bundled_agents = lambda *a, **k: ["pr-reviewer"]
         o.resolve_repo = lambda r, p, l: (r, self.clone)
         o.run_opencode_review = lambda *a, **k: (REPORT, "ses_x")
@@ -296,16 +379,17 @@ class ChatNotification(unittest.TestCase):
         self.assertFalse(kw["do_review"])
         self.assertTrue(kw["merged"])
 
-    def test_a_hard_failure_still_posts_before_reraising(self):
+    def test_a_hard_failure_reraises_and_posts_nothing(self):
+        """An execution error (engine crash, AWS API error, ...) is not a
+        review outcome — it must not be reported to the group chat next to
+        real verdicts. It's still surfaced to the person running PRISM
+        through the job's own log/status (jobs.py JobManager._work)."""
         def boom(*a, **k):
             raise RuntimeError("kaboom")
         o.ensure_bundled_agents = boom
         with self.assertRaises(RuntimeError):
             self._run(webhook_url="https://example.invalid/hook")
-        self.assertEqual(len(self.posted), 1)
-        _url, kw = self.posted[0]
-        self.assertFalse(kw["merged"])
-        self.assertIn("kaboom", kw["reason"])
+        self.assertEqual(self.posted, [])
 
     def test_a_user_initiated_cancel_posts_nothing(self):
         def cancelled(*a, **k):

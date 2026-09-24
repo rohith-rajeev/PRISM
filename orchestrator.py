@@ -18,11 +18,14 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+import config
 import notifier
 
 REGION_DEFAULT = "us-east-1"
@@ -76,9 +79,23 @@ FINDING_RE = re.compile(r"^\s*-\s*\*\*\[(Critical|High|Medium|Low|Nit)\]", re.IG
 # pattern-matching the report so styled output can't hide the verdict line.
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
-DESC_BLOCK_RE = re.compile(r"<!-- pr-reviewer:start -->.*?<!-- pr-reviewer:end -->", re.DOTALL)
+# Matches both the current "prism:" tag and the legacy "pr-reviewer:" one a
+# PR's description may still carry from an older PRISM version, so a stale
+# block always gets replaced cleanly instead of accumulating duplicates.
+# New writes always use the "prism:" tag — see update_description_direct.
+DESC_BLOCK_RE = re.compile(
+    r"<!-- (?:pr-reviewer|prism):start -->.*?<!-- (?:pr-reviewer|prism):end -->",
+    re.DOTALL)
+DESC_META_RE = re.compile(r"<!-- (?:pr-reviewer|prism):meta\s+([^>]*?)-->")
 
 MERGEABLE_VERDICTS = ("approve", "approve with comments")
+
+# A verdict that would otherwise auto-merge still pauses for an explicit
+# human "go" when the reviewer's own impact score says the blast radius is
+# high — the review can be right about the code and still be the wrong
+# thing to merge unattended. See the high-impact confirmation gate in
+# _run_pipeline's STEP 4.
+HIGH_IMPACT_THRESHOLD = 7
 
 # A free-tier model occasionally bounces one call in a back-to-back sequence
 # with a 403 "can only be used from within OpenCode" while an identical call
@@ -102,10 +119,22 @@ def _emit_plain(text, tag=None):
 #
 # INVARIANT: no code path in this module may hold two of these locks at once.
 # It holds structurally today — the fallback directory lock is taken only in
-# the agent-turn helpers (pipeline steps 1-2) and the clone lock only inside
-# sync_destination_into_source (step 4) — and full_pipeline is straight-line,
-# so one is always released before the other is requested. That makes
-# lock-order inversion impossible. No lock is ever held across a human wait.
+# the agent-turn helpers (pipeline steps 1-2), the per-branch lock only inside
+# _sync_via_worktree, and the whole-clone lock only inside the fallback
+# _sync_locked path it defers to when a worktree can't be used — and
+# full_pipeline is straight-line, so one is always released (the `with` block
+# exits, worktree lock included, even on the exception that triggers the
+# fallback) before the next is requested. That makes lock-order inversion
+# impossible. No lock is ever held across a human wait.
+#
+# sync_destination_into_source (step 4) tries a per-job git worktree first —
+# keyed on the *branch name*, not the whole clone, so two different PRs (in
+# practice, two different source branches) sync and merge fully in parallel
+# instead of queuing behind one shared checkout. Only two jobs that somehow
+# target the same branch name still serialise, which is a real git
+# constraint (one worktree per branch) rather than a PRISM one. If
+# `git worktree` itself can't be used for any reason, it falls back to the
+# original whole-clone lock below, unchanged.
 _PATH_LOCKS = {}
 _PATH_LOCKS_GUARD = threading.Lock()
 
@@ -294,14 +323,17 @@ def parse_review_output(text: str) -> ReviewResult:
     if m2:
         res.impact_score = m2.group(1).strip()
         res.impact_reason = m2.group(2).strip()
-    # findings: keep the one-line bullets
+    # findings: keep the one-line bullets. The cap here is a defensive
+    # ceiling against a malformed/runaway line, not a working trim — the
+    # developer reading the PR description should see the finding in full,
+    # so this is generous rather than tight.
     for line in (text or "").splitlines():
         if FINDING_RE.match(line):
-            res.findings.append(line.strip()[:300])
+            res.findings.append(line.strip()[:800])
     # summary block
     ms = re.search(r"###\s*Summary\s*\n(.+)", text or "", re.IGNORECASE | re.DOTALL)
     if ms:
-        res.summary = ms.group(1).strip()[:2000]
+        res.summary = ms.group(1).strip()[:6000]
     return res
 
 
@@ -882,6 +914,106 @@ def run_agent(agent, prompt, project_dir, emit=_emit_plain, model=None,
     return out, decision
 
 
+# Local, PRISM-only record of which commit it actually finished reviewing on
+# a given PR — never derived from the PR description. The description is
+# attacker-controlled: anyone who can edit a PR can also write a fake
+# `prism:meta` block claiming an earlier, never-reviewed commit was already
+# reviewed and approved by PRISM. Without an independent check, that forged
+# stamp alone would be enough to make _incremental_context() only skim
+# everything up to that point on PRISM's very first real look at the PR —
+# exactly the review a malicious first-time contributor most needs to not be
+# skipped. This file is where PRISM writes down what it actually did, so a
+# stamp is only ever trusted when it matches an entry PRISM itself wrote.
+_REVIEWED_STORE_PATH = config.CONFIG_DIR / "reviewed_commits.json"
+_REVIEWED_STORE_GUARD = threading.Lock()
+
+
+def _record_reviewed_commit(repo_name, pr_id, commit):
+    """Note that PRISM itself finished reviewing `commit` on this PR.
+
+    Best-effort: losing this write only costs the incremental-review
+    optimisation on a later run (which then safely falls back to a full
+    review), never a safety property, so failures here are swallowed.
+    """
+    if not commit:
+        return
+    key = f"{repo_name}#{pr_id}"
+    with _REVIEWED_STORE_GUARD:
+        try:
+            store = json.loads(_REVIEWED_STORE_PATH.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            store = {}
+        store[key] = commit
+        try:
+            _REVIEWED_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            _REVIEWED_STORE_PATH.write_text(json.dumps(store), encoding="utf-8")
+        except OSError:
+            pass
+
+
+def _locally_confirmed_reviewed_commit(repo_name, pr_id):
+    """The commit PRISM's own records say it last finished reviewing on this
+    PR, or None. Never reads the PR description."""
+    with _REVIEWED_STORE_GUARD:
+        try:
+            store = json.loads(_REVIEWED_STORE_PATH.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return None
+        return store.get(f"{repo_name}#{pr_id}")
+
+
+def _incremental_context(pr_id, repo_name, local_repo, region=REGION_DEFAULT,
+                         emit=_emit_plain):
+    """Previous-review context for an incremental pass, or None for a full one.
+
+    An incremental review is a token-consumption optimisation, never a
+    correctness risk — every uncertain step here (no stamp yet, the commit
+    it names isn't fetchable, it isn't actually an ancestor of the PR's
+    current tip, or — critically — PRISM's own local records don't confirm
+    it actually reviewed that exact commit) falls back to None, and a None
+    here means run_opencode_review asks for an ordinary full review exactly
+    as before.
+    """
+    try:
+        pr = get_pr(pr_id, region=region)
+    except Exception:  # noqa: BLE001
+        return None
+    prev = previous_review(pr.get("description") or "")
+    prev_commit = prev.get("commit")
+    current_commit = pr.get("sourceCommit") or ""
+    if not prev_commit or not current_commit or prev_commit == current_commit:
+        return None
+    # The description alone is never sufficient evidence — see the comment on
+    # _REVIEWED_STORE_PATH above. This alone closes the forged-stamp gap: an
+    # attacker can write anything into the description, but not into
+    # PRISM's own local file.
+    if _locally_confirmed_reviewed_commit(repo_name, pr_id) != prev_commit:
+        return None
+    src = pr.get("sourceReference")
+    try:
+        # Same fetch the reviewer agent itself runs in its own Step 1, done
+        # here too so the ancestor check below has the objects it needs —
+        # a fetch reads remote refs and doesn't touch the working tree, so
+        # it's safe outside the sync/merge lock, same as the agent's own.
+        if src:
+            subprocess.run(["git", "fetch", "origin", src], cwd=local_repo,
+                           capture_output=True, timeout=120)
+        ancestor = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", prev_commit, current_commit],
+            cwd=local_repo, capture_output=True, timeout=60)
+    except Exception:  # noqa: BLE001
+        return None
+    if ancestor.returncode != 0:
+        return None
+    block_match = DESC_BLOCK_RE.search(pr.get("description") or "")
+    return {
+        "commit": prev_commit,
+        "current_commit": current_commit,
+        "verdict": prev.get("verdict", "unknown"),
+        "block": block_match.group(0) if block_match else "(not recorded)",
+    }
+
+
 def run_opencode_review(pr_id, repo_name, local_repo, project_dir,
                         region=REGION_DEFAULT, emit=_emit_plain, model=None,
                         control=None, meter=None):
@@ -889,13 +1021,34 @@ def run_opencode_review(pr_id, repo_name, local_repo, project_dir,
     exe = require_engine()
     ensure_bundled_agents(project_dir, emit=emit)
     agent = AGENT_REVIEWER
-    prompt = (
-        f"Review CodeCommit pull request {pr_id} in CodeCommit repository "
-        f"'{repo_name}' (AWS region {region}). Local clone path: {local_repo}. "
-        f"Run directory: {project_dir}. "
-        f"Follow your pr-reviewer workflow and report the verdict in chat, "
-        f"then stop and ask about updating the PR description."
-    )
+    incremental = _incremental_context(pr_id, repo_name, local_repo, region=region,
+                                       emit=emit)
+    if incremental:
+        emit(f"▸ Incremental review since {incremental['commit'][:8]} "
+             f"(previous verdict: {incremental['verdict']}).")
+        prompt = (
+            f"Review CodeCommit pull request {pr_id} in CodeCommit repository "
+            f"'{repo_name}' (AWS region {region}). Local clone path: {local_repo}. "
+            f"Run directory: {project_dir}. "
+            f"This is an INCREMENTAL review — PRISM already reviewed commit "
+            f"{incremental['commit']} on this PR (verdict: {incremental['verdict']}). "
+            f"That review's recorded findings:\n{incremental['block']}\n\n"
+            f"Follow your pr-reviewer workflow's incremental-review step: do a full "
+            f"dimension-by-dimension review of the delta from {incremental['commit']} to "
+            f"{incremental['current_commit']} only, explicitly note whether each finding "
+            f"above was addressed, and do a quick --stat-level skim of any files outside "
+            f"that delta solely to catch a newly introduced critical/blocker issue — not a "
+            f"full re-review of files the delta didn't touch. Report the verdict in chat as "
+            f"usual, then stop and ask about updating the PR description."
+        )
+    else:
+        prompt = (
+            f"Review CodeCommit pull request {pr_id} in CodeCommit repository "
+            f"'{repo_name}' (AWS region {region}). Local clone path: {local_repo}. "
+            f"Run directory: {project_dir}. "
+            f"Follow your pr-reviewer workflow and report the verdict in chat, "
+            f"then stop and ask about updating the PR description."
+        )
     # No --session/--continue: a plain run always creates a fresh session, and
     # --format json is what lets us capture its id for the follow-up turns.
     json_mode = engine_supports_json(exe)
@@ -1030,17 +1183,22 @@ def update_description_direct(pr_id, verdict_text, impact, findings, region=REGI
 
     No agent call — the findings are already one-line bullets straight from
     the parsed review, so PRISM composes and writes this block itself.
+
+    Every finding is included untrimmed — the developer reading the PR
+    should see everything the reviewer found, not PRISM's guess at which
+    ones mattered. The only thing allowed to cut this down is CodeCommit's
+    own hard length limit below, and only when the content actually needs it.
     """
     pr = get_pr(pr_id, region=region)
     desc = DESC_BLOCK_RE.sub("", pr["description"] or "").strip()  # drop stale block
-    bullets = "\n".join(f"{b}" for b in (findings or [])[:20]) or "- (no discrete findings)"
-    stamp = (f"<!-- pr-reviewer:meta verdict={verdict_key or 'unknown'} "
+    bullets = "\n".join(f"{b}" for b in (findings or [])) or "- (no discrete findings)"
+    stamp = (f"<!-- prism:meta reviewer=PRISM verdict={verdict_key or 'unknown'} "
              f"commit={source_commit or 'unknown'} -->\n") if (verdict_key or source_commit) else ""
     header = (
-        "\n\n<!-- pr-reviewer:start -->\n" + stamp + "---\n"
-        f"**Automated review — {verdict_text} (impact {impact}/10)**\n"
+        "\n\n<!-- prism:start -->\n" + stamp + "---\n"
+        f"**PRISM review — {verdict_text} (impact {impact}/10)**\n"
     )
-    footer = "\n<!-- pr-reviewer:end -->"
+    footer = "\n<!-- prism:end -->"
     merged = (desc + header + bullets + footer).strip()
     if len(merged) > PR_DESCRIPTION_MAX:
         # CodeCommit hard-rejects oversized descriptions. Shrink the parts we
@@ -1063,6 +1221,27 @@ def update_description_direct(pr_id, verdict_text, impact, findings, region=REGI
     aws_cli("update-pull-request-description", "--pull-request-id", str(pr_id),
             "--description", merged, region=region)
     return merged
+
+
+def previous_review(description):
+    """The verdict/commit PRISM last recorded on this PR, if any.
+
+    Reads back the `prism:meta` (or legacy `pr-reviewer:meta`) stamp
+    `update_description_direct` writes — this is the durable state an
+    incremental review is built on: knowing what was already reviewed is
+    what lets a later pass scope itself to what changed since, instead of
+    re-reading the whole PR from scratch every time. Returns {} when no
+    stamp is present (a PR's first-ever review) or it doesn't parse.
+    """
+    m = DESC_META_RE.search(description or "")
+    if not m:
+        return {}
+    out = {}
+    for part in m.group(1).split():
+        key, sep, value = part.partition("=")
+        if sep and key:
+            out[key] = value
+    return out
 
 
 def check_ff_mergeable(repo_name, dest, src, region=REGION_DEFAULT):
@@ -1204,20 +1383,116 @@ def describe_conflict(entry, index, hunk):
             f"INCOMING (the base branch):\n{trim(theirs)}")
 
 
+class _WorktreeUnavailable(RuntimeError):
+    """`git worktree` itself couldn't be used for this sync — fall back to
+    the shared, whole-clone-locked path. Never raised for anything that
+    happened *during* the sync itself (a real merge conflict, a rejected
+    push, ...) — only for the worktree machinery failing to stand up."""
+
+
+def _worktree_root():
+    """Where per-job worktrees live: always the OS temp directory, never
+    inside the project folder or the repo clone itself."""
+    return Path(tempfile.gettempdir()) / "prism-worktrees"
+
+
+def _sync_via_worktree(local_repo, dest, src, pr_id, emit, choices):
+    """Do the sync in a throwaway `git worktree` instead of the shared
+    clone, so a different PR (almost always a different branch) never
+    waits behind this one. Raises _WorktreeUnavailable if the worktree
+    itself can't be created; any other exception is a real outcome of the
+    sync (a conflict, a rejected push, ...) and propagates as-is.
+    """
+    root = _worktree_root()
+    wt = root / f"pr-{pr_id}-{uuid.uuid4().hex[:8]}"
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise _WorktreeUnavailable(str(e)) from e
+    # git needs origin/<src> as a local ref before it can branch a worktree
+    # off it — a plain fetch, safe unlocked for the same reason the review
+    # step's own fetch is (it only updates remote-tracking refs, which a
+    # concurrent worktree checkout elsewhere in this repo does not disturb).
+    try:
+        subprocess.run(["git", "fetch", "origin", dest, src], cwd=local_repo,
+                       capture_output=True, text=True, timeout=300, check=True)
+    except Exception as e:  # noqa: BLE001
+        raise _WorktreeUnavailable(str(e)) from e
+    # Keyed on the branch name, not the whole clone: two different PRs sync
+    # fully in parallel here. Only two jobs that somehow target the same
+    # source branch serialise — git itself allows only one worktree per
+    # branch, so that much is a real constraint, not an extra one PRISM adds.
+    with _lock_for(f"{local_repo}#branch:{src}"):
+        try:
+            # --force: the common case is that this branch is already
+            # checked out somewhere (the shared clone itself, most often) —
+            # without it, git refuses outright. Safe here because the lock
+            # above ensures no other PRISM-managed worktree for this same
+            # branch is active concurrently.
+            subprocess.run(["git", "worktree", "prune"], cwd=local_repo,
+                           capture_output=True, timeout=60)
+            subprocess.run(["git", "worktree", "add", "--force", "-B", src,
+                            str(wt), f"origin/{src}"],
+                           cwd=local_repo, capture_output=True, text=True,
+                           timeout=300, check=True)
+        except Exception as e:  # noqa: BLE001
+            raise _WorktreeUnavailable(str(e)) from e
+        emit(f"▸ Using an isolated worktree for PR #{pr_id} ({wt})")
+        try:
+            return _sync_locked(str(wt), dest, src, pr_id, emit, choices)
+        finally:
+            _remove_worktree(local_repo, wt, root)
+
+
+def _remove_worktree(local_repo, wt, root):
+    """Best-effort cleanup — never raises, so it's always safe from a
+    `finally`. A leftover worktree directory costs disk, not correctness
+    (the next run's `git worktree prune` + a fresh uuid path route around
+    it), so nothing here needs to be more than best-effort.
+    """
+    try:
+        subprocess.run(["git", "worktree", "remove", "--force", str(wt)],
+                       cwd=local_repo, capture_output=True, timeout=120)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        subprocess.run(["git", "worktree", "prune"], cwd=local_repo,
+                       capture_output=True, timeout=60)
+    except Exception:  # noqa: BLE001
+        pass
+    # Defensive belt-and-suspenders: only ever delete something PRISM itself
+    # created under the worktree temp root, never anything else.
+    try:
+        resolved, root_resolved = Path(wt).resolve(), root.resolve()
+        if resolved.exists() and resolved != root_resolved and \
+                root_resolved in resolved.parents:
+            shutil.rmtree(resolved, ignore_errors=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def sync_destination_into_source(local_repo, dest, src, pr_id, emit=_emit_plain,
                                  choices=None):
-    """Sync destination commits onto the source branch locally, then push.
+    """Sync destination commits onto the source branch, then push.
 
     Equivalent of: git fetch, checkout source, merge origin/destination, push.
     Raises on merge conflicts (aborts the merge first).
 
-    Serialised on the clone: this is the one place that mutates the working
-    tree, and two jobs reviewing different PRs out of the same checkout would
-    otherwise interleave each other's `git checkout`. Reviews deliberately run
-    outside this lock — they read remote refs (origin/<dest>...origin/<src>),
-    which a concurrent checkout does not disturb, and holding the lock across a
-    multi-minute agent turn would serialise the whole tool.
+    Tries an isolated `git worktree` first (see _sync_via_worktree) so a
+    different PR's sync never queues behind this one on a shared checkout.
+    Falls back to the original whole-clone-locked path, unchanged, the
+    moment anything about standing up that worktree goes wrong — an old git
+    version, no disk space, a read-only temp dir, whatever. Reviews
+    deliberately run outside either lock — they read remote refs
+    (origin/<dest>...origin/<src>), which neither path's checkout disturbs,
+    and holding a lock across a multi-minute agent turn would serialise the
+    whole tool.
     """
+    try:
+        return _sync_via_worktree(local_repo, dest, src, pr_id, emit, choices)
+    except _WorktreeUnavailable as e:
+        emit(f"⚠ Couldn't use an isolated worktree ({e}); "
+             f"falling back to the shared clone.")
     with _lock_for(local_repo):
         return _sync_locked(local_repo, dest, src, pr_id, emit, choices)
 
@@ -1500,6 +1775,12 @@ def _run_pipeline(project_dir, repo_name, pr_id, local_repo=None,
             source_commit_at_review = get_pr(pr_id, region=region).get("sourceCommit", "")
         except Exception:  # noqa: BLE001
             source_commit_at_review = ""
+        # PRISM's own record of what it actually reviewed — the only thing
+        # _incremental_context trusts when deciding whether a later run can
+        # go incremental (see _REVIEWED_STORE_PATH). Recorded here, not only
+        # after a successful description write, so the safety property holds
+        # regardless of whether do_update_desc is enabled.
+        _record_reviewed_commit(repo_name, pr_id, source_commit_at_review)
 
     # ---- Step 2: description ----
     # PRISM composes and writes this itself — no agent call. findings are
@@ -1649,6 +1930,38 @@ def _run_pipeline(project_dir, repo_name, pr_id, local_repo=None,
         return {"review": review, "merged": False,
                 "stopped": "pr-changed-since-review", "tokens": meter.total()}
 
+    if do_review:
+        try:
+            impact_num = int(review.impact_score)
+        except (TypeError, ValueError):
+            impact_num = None
+        if impact_num is not None and impact_num >= HIGH_IMPACT_THRESHOLD:
+            ck()
+            emit(f"\n⚠ Impact score {impact_num}/10 — pausing for human "
+                 f"confirmation before merging.")
+            question = (
+                f"PR #{pr_id} scored {impact_num}/10 impact"
+                + (f" — {review.impact_reason}" if review.impact_reason else "")
+                + f".\nVerdict: {review.verdict_raw or review.verdict_key}\n\n"
+                + ("\n".join(review.findings) if review.findings
+                   else "(no discrete findings)")
+                + "\n\nProceed with merging this PR?"
+            )
+            # No `ask` available (shouldn't happen in the real app — jobs.py
+            # always supplies one) means no one to confirm with, so refuse
+            # rather than silently merging past a gate meant to require a
+            # human: never proceed on missing input.
+            answer = ask(question, choices=[
+                ("proceed", "Proceed with merge"),
+                ("abort", "Abort — I'll handle this manually"),
+            ]) if ask is not None else None
+            if answer != "proceed":
+                emit("■ Merge not confirmed — stopping without merging.")
+                pg(STAGE_MERGE, "skipped")
+                return {"review": review, "merged": False,
+                        "stopped": "high-impact-not-confirmed", "tokens": meter.total()}
+            emit("▸ Merge confirmed.")
+
     if not mergeable:
         # A fast-forward is not possible up front. Same handling as a
         # fast-forward attempt failing below: sync destination into source
@@ -1688,6 +2001,7 @@ _STOPPED_LABEL = {
     "dry-run": "dry run",
     "pr-changed-since-review": "PR changed since review",
     "not-fast-forwardable": "not fast-forwardable",
+    "high-impact-not-confirmed": "high-impact merge not confirmed",
 }
 
 
@@ -1707,28 +2021,27 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
     """Run the pipeline (see _run_pipeline), then post a brief outcome
     summary to Google Chat if a webhook is configured.
 
-    Split out from _run_pipeline so that every exit path — success, a
-    blocked merge, a hard failure — gets exactly one notification from one
-    place, rather than a post call threaded through every one of that
-    function's return points. A webhook is a courtesy: posting to it (or
-    failing to) never changes what the pipeline itself does or returns, and
-    with no webhook configured this is a no-op wrapper.
+    Split out from _run_pipeline so that a completed run — merged, blocked by
+    verdict, or otherwise deliberately stopped — gets exactly one
+    notification from one place, rather than a post call threaded through
+    every one of that function's return points. A webhook is a courtesy:
+    posting to it (or failing to) never changes what the pipeline itself
+    does or returns, and with no webhook configured this is a no-op wrapper.
+
+    A hard failure (engine crash, AWS API error, ...) is deliberately NOT
+    posted here — that's an execution error, not a review outcome, and it is
+    already surfaced to the person running PRISM through the job's own log/
+    status (see jobs.py JobManager._work). Spamming the group chat with
+    infrastructure noise indistinguishable from a real verdict was worse
+    than saying nothing.
     """
-    try:
-        result = _run_pipeline(
-            project_dir, repo_name, pr_id, local_repo=local_repo, region=region,
-            do_review=do_review, do_update_desc=do_update_desc, do_merge=do_merge,
-            do_sync=do_sync, dry_run=dry_run, model=model, progress=progress,
-            emit=emit, control=control, ask=ask)
-    except Cancelled:
-        raise  # the user's own action; nothing worth telling anyone about
-    except Exception as e:  # noqa: BLE001
-        if webhook_url:
-            notifier.post_summary(
-                webhook_url, emit=emit, repo_name=repo_name, pr_id=pr_id,
-                do_review=do_review, merged=False, reason=str(e)[:80],
-                author=get_pr_author(pr_id, region=region))
-        raise
+    # No try/except here on purpose: a hard failure propagates untouched
+    # (Cancelled included) — see the note above on why it isn't notified.
+    result = _run_pipeline(
+        project_dir, repo_name, pr_id, local_repo=local_repo, region=region,
+        do_review=do_review, do_update_desc=do_update_desc, do_merge=do_merge,
+        do_sync=do_sync, dry_run=dry_run, model=model, progress=progress,
+        emit=emit, control=control, ask=ask)
     if webhook_url:
         review = result.get("review")
         notifier.post_summary(

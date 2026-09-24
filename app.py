@@ -66,12 +66,24 @@ PAL = {
 }
 
 
+def _pt(n):
+    """Point size for the current platform.
+
+    Tk on macOS renders noticeably smaller than the same point size on
+    Windows/Linux (no DPI-aware default the way those two have), so every
+    font in the app is comfortably too small there at parity sizing. Every
+    literal point size in this module routes through this one function
+    rather than special-casing individual labels.
+    """
+    return n + 2 if sys.platform == "darwin" else n
+
+
 def _mono():
     fams = set(tkfont.families())
     for name in ("Consolas", "Menlo", "DejaVu Sans Mono"):
         if name in fams:
-            return (name, 10)
-    return ("TkFixedFont", 10)
+            return (name, _pt(10))
+    return ("TkFixedFont", _pt(10))
 
 
 def _ui_family(available=None):
@@ -98,11 +110,11 @@ def _ui_family(available=None):
 
 
 _FAMILY = _ui_family()
-FONT = (_FAMILY, 10)
-FONT_B = (_FAMILY, 10, "bold")
-FONT_S = (_FAMILY, 9)
-FONT_XS = (_FAMILY, 8)
-TITLE_F = (_FAMILY, 16, "bold")
+FONT = (_FAMILY, _pt(10))
+FONT_B = (_FAMILY, _pt(10), "bold")
+FONT_S = (_FAMILY, _pt(9))
+FONT_XS = (_FAMILY, _pt(8))
+TITLE_F = (_FAMILY, _pt(16), "bold")
 
 
 def _resolve_fonts():
@@ -123,11 +135,11 @@ def _resolve_fonts():
         except Exception:  # noqa: BLE001
             return
     _FAMILY = family
-    FONT = (family, 10)
-    FONT_B = (family, 10, "bold")
-    FONT_S = (family, 9)
-    FONT_XS = (family, 8)
-    TITLE_F = (family, 16, "bold")
+    FONT = (family, _pt(10))
+    FONT_B = (family, _pt(10), "bold")
+    FONT_S = (family, _pt(9))
+    FONT_XS = (family, _pt(8))
+    TITLE_F = (family, _pt(16), "bold")
 
 STAGE_DEFS = [
     (STAGE_REVIEW, "Review"),
@@ -492,9 +504,9 @@ class ProgressBar(tk.Canvas):
             if state == "done":
                 dot, fg, font = PAL["good"], PAL["good"], FONT_XS
             elif state == "active":
-                dot, fg, font = PAL["accent_text"], PAL["accent_text"], (_FAMILY, 8, "bold")
+                dot, fg, font = PAL["accent_text"], PAL["accent_text"], (_FAMILY, _pt(8), "bold")
             elif state == "error":
-                dot, fg, font = PAL["bad"], PAL["bad"], (_FAMILY, 8, "bold")
+                dot, fg, font = PAL["bad"], PAL["bad"], (_FAMILY, _pt(8), "bold")
             elif state == "skipped":
                 dot, fg, font = PAL["border"], PAL["muted"], FONT_XS
             else:
@@ -615,7 +627,7 @@ class CheckRow(tk.Frame):
         _rr(self.box, 2, 2, 18, 18, 5, fill, outline)
         if on:
             self.box.create_text(10, 10, text="✓", fill="white" if self._enabled
-                                 else PAL["disabled_fg"], font=(_FAMILY, 9, "bold"))
+                                 else PAL["disabled_fg"], font=(_FAMILY, _pt(9), "bold"))
 
 
 class AgentPanel(RoundedCard):
@@ -757,9 +769,9 @@ class Dialog(tk.Toplevel):
         head = tk.Frame(inner, bg=PAL["card"])
         head.pack(fill="x", pady=(0, 8))
         glyph = {"bad": "⛔", "warn": "⚠", "accent": "💬"}.get(tone, "⚠")
-        tk.Label(head, text=glyph, font=(_FAMILY, 14), bg=PAL["card"],
+        tk.Label(head, text=glyph, font=(_FAMILY, _pt(14)), bg=PAL["card"],
                  fg=PAL[tone]).pack(side="left", padx=(0, 10))
-        tk.Label(head, text=title, font=(_FAMILY, 12, "bold"), bg=PAL["card"],
+        tk.Label(head, text=title, font=(_FAMILY, _pt(12), "bold"), bg=PAL["card"],
                  fg=PAL["text"], anchor="w").pack(side="left")
 
         tk.Label(inner, text=message, font=FONT_S, bg=PAL["card"], fg=PAL["text"],
@@ -1119,7 +1131,7 @@ class Picker(tk.Frame):
 
         head = tk.Frame(top, bg=PAL["border"])
         head.pack(fill="x")
-        tk.Label(head, text=f"  {self._title}", font=(_FAMILY, 8, "bold"),
+        tk.Label(head, text=f"  {self._title}", font=(_FAMILY, _pt(8), "bold"),
                  bg=PAL["border"], fg=PAL["muted"]).pack(side="left", pady=4)
         tk.Button(head, text="✕", command=self.close, bg=PAL["border"], fg=PAL["muted"],
                   activebackground=PAL["bad"], activeforeground="white", relief="flat",
@@ -1196,7 +1208,7 @@ class Picker(tk.Frame):
             groups.setdefault(key, []).append((short, full))
         for key in sorted(groups):
             if key:
-                tk.Label(self._inner, text=f"  {key}", font=(_FAMILY, 8, "bold"),
+                tk.Label(self._inner, text=f"  {key}", font=(_FAMILY, _pt(8), "bold"),
                          bg=PAL["card"], fg=PAL["muted"]).pack(anchor="w", padx=4, pady=(8, 0))
             for name, full in groups[key]:      # already sorted with `matches`
                 sel = full == self._value
@@ -1313,7 +1325,7 @@ def _flush_table(widget, rows):
             lb = tk.Label(
                 frame, text=text, bg=PAL["card"], justify="left", anchor="w",
                 fg=PAL["text"] if is_header else PAL["log_fg"],
-                font=(_FAMILY, 9, "bold") if is_header else FONT_S,
+                font=(_FAMILY, _pt(9), "bold") if is_header else FONT_S,
                 # Long explanatory cells (the troubleshooting table) wrap
                 # instead of stretching the whole table off-screen; short
                 # cells (everything else) size naturally.
@@ -1415,11 +1427,11 @@ def render_markdown(widget, md):
 
 def style_markdown(widget):
     """Tags for `render_markdown`, in the app palette."""
-    widget.tag_config("h1", font=(_FAMILY, 15, "bold"), foreground=PAL["text"],
+    widget.tag_config("h1", font=(_FAMILY, _pt(15), "bold"), foreground=PAL["text"],
                       spacing1=4, spacing3=8)
-    widget.tag_config("h2", font=(_FAMILY, 12, "bold"), foreground=PAL["accent_text"],
+    widget.tag_config("h2", font=(_FAMILY, _pt(12), "bold"), foreground=PAL["accent_text"],
                       spacing1=16, spacing3=6)
-    widget.tag_config("h3", font=(_FAMILY, 11, "bold"), foreground=PAL["text"],
+    widget.tag_config("h3", font=(_FAMILY, _pt(11), "bold"), foreground=PAL["text"],
                       spacing1=10, spacing3=4)
     # spacing2 keeps re-flowed lines of one paragraph tighter than the gap
     # between paragraphs, which is what makes the column readable.
@@ -1431,8 +1443,8 @@ def style_markdown(widget):
                       spacing3=9, lmargin1=18, lmargin2=18)
     widget.tag_config("code", font=_mono(), foreground=PAL["accent_text"])
     widget.tag_config("mono", font=_mono(), foreground=PAL["accent_text"])
-    widget.tag_config("b", font=(_FAMILY, 10, "bold"), foreground=PAL["text"])
-    widget.tag_config("i", font=(_FAMILY, 10, "italic"), foreground=PAL["text"])
+    widget.tag_config("b", font=(_FAMILY, _pt(10), "bold"), foreground=PAL["text"])
+    widget.tag_config("i", font=(_FAMILY, _pt(10), "italic"), foreground=PAL["text"])
     widget.tag_config("link", font=FONT_S, foreground=PAL["accent"])
 
 
@@ -1516,10 +1528,10 @@ class UpdateDialog(tk.Toplevel):
     def _head(self, glyph, title, tone="accent"):
         row = tk.Frame(self.body, bg=PAL["card"])
         row.pack(fill="x", pady=(0, 8))
-        self._glyph = tk.Label(row, text=glyph, font=(_FAMILY, 14),
+        self._glyph = tk.Label(row, text=glyph, font=(_FAMILY, _pt(14)),
                                bg=PAL["card"], fg=PAL[tone])
         self._glyph.pack(side="left", padx=(0, 10))
-        tk.Label(row, text=title, font=(_FAMILY, 12, "bold"), bg=PAL["card"],
+        tk.Label(row, text=title, font=(_FAMILY, _pt(12), "bold"), bg=PAL["card"],
                  fg=PAL["text"], anchor="w").pack(side="left")
 
     def _text(self, message, tone="text"):
@@ -2090,7 +2102,7 @@ class App(tk.Tk):
         arow.pack(fill="x", pady=(2, 0))
         self.run_btn = RoundedButton(arow, text="▶  Start Prisming", command=self._start,
                                      style="primary", height=38, radius=10,
-                                     font=(_FAMILY, 11, "bold"))
+                                     font=(_FAMILY, _pt(11), "bold"))
         self.run_btn.pack(side="left", fill="x", expand=True)
         RoundedButton(arow, text="Cancel", command=self.show_jobs, style="outline",
                       height=38, radius=10, font=FONT_B,
@@ -2126,15 +2138,15 @@ class App(tk.Tk):
         self._lab(vi, "VERDICT").grid(row=0, column=0, sticky="w")
         self._lab(vi, "IMPACT").grid(row=0, column=1, sticky="w")
         self._lab(vi, "TOKENS").grid(row=0, column=2, sticky="w")
-        self.verdict_val = tk.Label(vi, text="Not run yet", font=(_FAMILY, 11, "bold"),
+        self.verdict_val = tk.Label(vi, text="Not run yet", font=(_FAMILY, _pt(11), "bold"),
                                     bg=PAL["card"], fg=PAL["text"], anchor="w",
                                     justify="left")
         self.verdict_val.grid(row=1, column=0, sticky="ew")
-        self.impact_val = tk.Label(vi, text="—", font=(_FAMILY, 11, "bold"),
+        self.impact_val = tk.Label(vi, text="—", font=(_FAMILY, _pt(11), "bold"),
                                    bg=PAL["card"], fg=PAL["text"], anchor="w",
                                    justify="left")
         self.impact_val.grid(row=1, column=1, sticky="ew")
-        self.tokens_val = tk.Label(vi, text="—", font=(_FAMILY, 11, "bold"),
+        self.tokens_val = tk.Label(vi, text="—", font=(_FAMILY, _pt(11), "bold"),
                                    bg=PAL["card"], fg=PAL["muted"], anchor="w",
                                    justify="left")
         self.tokens_val.grid(row=1, column=2, sticky="ew")
@@ -2227,7 +2239,7 @@ class App(tk.Tk):
         c.delete("all")
         c.config(bg=PAL["page"])
         _rr(c, 2, 2, 30, 30, 8, PAL["badge_bg"], None)
-        c.create_text(16, 16, text="◇", fill=PAL["badge_fg"], font=(_FAMILY, 13, "bold"))
+        c.create_text(16, 16, text="◇", fill=PAL["badge_fg"], font=(_FAMILY, _pt(13), "bold"))
 
     # ----- log -----
     def _show_placeholder(self):
@@ -3038,6 +3050,17 @@ def _add_placeholder(entry, text):
             entry.delete(0, "end")
             entry._has_ph = False
             entry.config(fg=PAL["text"])
+    def sync_state(_e=None):
+        # Self-healing backstop: if something other than on_key/clear_
+        # placeholder changed the field's text (a paste that slips past the
+        # printable-char check below, an IME commit, ...), the widget can end
+        # up showing real content while _has_ph is still True — _entry_value()
+        # would then silently read "" back even though the field looks filled
+        # in. Reconcile the flag from what's actually on screen instead of
+        # trusting every event to have updated it.
+        if getattr(entry, "_has_ph", False) and entry.get() != text:
+            entry._has_ph = False
+            entry.config(fg=PAL["text"])
     entry._ph_text = text  # noqa: SLF001 - so it can be restored later
     entry.insert(0, text)
     entry._has_ph = True  # noqa: SLF001
@@ -3062,6 +3085,17 @@ def _add_placeholder(entry, text):
     entry.bind("<FocusIn>", on_in)
     entry.bind("<FocusOut>", on_out)
     entry.bind("<KeyPress>", on_key)
+    # Pasting (Ctrl+V — common when copying a PR id straight out of the
+    # CodeCommit console URL) fires <KeyPress> for the shortcut key itself
+    # with a non-printable e.char, so on_key above never runs: the pasted
+    # digits land in the field but _has_ph stays True, and the very next
+    # click into the field (<FocusIn> -> clear_placeholder) then wipes them
+    # out again because it still believes it's looking at the placeholder —
+    # forcing a second, manual retype. <<Paste>> closes that specific gap;
+    # <KeyRelease> -> sync_state is the general backstop for anything else
+    # that changes the text without going through on_key the same way.
+    entry.bind("<<Paste>>", lambda _e: clear_placeholder())
+    entry.bind("<KeyRelease>", sync_state, add="+")
 
 
 def _restore_placeholder(entry):
