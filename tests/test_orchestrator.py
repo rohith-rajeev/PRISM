@@ -525,7 +525,13 @@ class IncrementalReview(unittest.TestCase):
             captured["prompt"] = cmd[-1]
             return 0, "**Verdict:** OK Approve\n", "sid"
         o._run_stream_resilient = fake_stream
-        o.run_opencode_review("7", "repo", "/tmp/repo", "/tmp/proj")
+        # A real emit, not the _emit_plain default: that prints straight to
+        # stdout, and the "▸ Incremental review since..." note this path
+        # logs isn't encodable on a Windows console's legacy cp1252 codepage
+        # — every other test that drives real pipeline code swallows emit
+        # the same way, this one just missed it.
+        o.run_opencode_review("7", "repo", "/tmp/repo", "/tmp/proj",
+                              emit=lambda *a, **k: None)
         self.assertIn("INCREMENTAL", captured["prompt"])
         self.assertIn("old123", captured["prompt"])
         self.assertIn("prior finding", captured["prompt"])
@@ -543,7 +549,8 @@ class IncrementalReview(unittest.TestCase):
             captured["prompt"] = cmd[-1]
             return 0, "**Verdict:** OK Approve\n", "sid"
         o._run_stream_resilient = fake_stream
-        o.run_opencode_review("7", "repo", "/tmp/repo", "/tmp/proj")
+        o.run_opencode_review("7", "repo", "/tmp/repo", "/tmp/proj",
+                              emit=lambda *a, **k: None)
         self.assertNotIn("INCREMENTAL", captured["prompt"])
 
 
