@@ -12,23 +12,25 @@ import notifier as n  # noqa: E402
 
 
 class CardShape(unittest.TestCase):
-    """Brief on purpose: one header, at most two widget rows."""
+    """Brief on purpose: one header, a handful of widget rows. The header
+    identifies the PR (id, then repo); outcome is always the first widget."""
 
     def test_merged_verdict_and_impact(self):
         card = n.build_card("repo", "12", do_review=True, verdict_raw="Approve",
                             verdict_key="approve", impact_score="3", merged=True)
-        self.assertEqual(card["header"]["subtitle"], "✅ Merged")
         widgets = card["sections"][0]["widgets"]
-        self.assertEqual(len(widgets), 2, "verdict + impact, nothing else")
-        self.assertIn("Approve", widgets[0]["decoratedText"]["text"])
-        self.assertIn("✅", widgets[0]["decoratedText"]["text"])
-        self.assertEqual(widgets[1]["decoratedText"]["text"], "3/10")
+        self.assertEqual(widgets[0]["decoratedText"]["text"], "✅ Merged")
+        self.assertEqual(len(widgets), 3, "outcome + verdict + impact, nothing else")
+        self.assertIn("Approve", widgets[1]["decoratedText"]["text"])
+        self.assertIn("✅", widgets[1]["decoratedText"]["text"])
+        self.assertEqual(widgets[2]["decoratedText"]["text"], "3/10")
 
     def test_not_merged_carries_a_reason(self):
         card = n.build_card("repo", "12", do_review=True, verdict_raw="Request changes",
                             verdict_key="request-changes", merged=False,
                             reason="verdict blocks merge")
-        self.assertEqual(card["header"]["subtitle"],
+        widgets = card["sections"][0]["widgets"]
+        self.assertEqual(widgets[0]["decoratedText"]["text"],
                          "⛔ Not merged — verdict blocks merge")
 
     def test_review_skipped_by_configuration_has_no_verdict_widget(self):
@@ -36,25 +38,34 @@ class CardShape(unittest.TestCase):
         showing them would misrepresent a deliberate bypass as a result."""
         card = n.build_card("repo", "12", do_review=False, merged=True)
         widgets = card["sections"][0]["widgets"]
-        self.assertEqual(len(widgets), 1)
-        self.assertEqual(widgets[0]["decoratedText"]["text"], "Skipped by configuration")
+        self.assertEqual(len(widgets), 2, "outcome + the skipped note, nothing else")
+        self.assertEqual(widgets[1]["decoratedText"]["text"], "Skipped by configuration")
 
     def test_review_ran_but_verdict_unparsed_is_distinct_from_skipped(self):
         """A real gap in what the reviewer returned must not be reported as
         the same thing as the user's own choice to skip review."""
         card = n.build_card("repo", "12", do_review=True, verdict_raw="", merged=False)
         widgets = card["sections"][0]["widgets"]
-        self.assertEqual(widgets[0]["decoratedText"]["text"], "No verdict parsed")
+        self.assertEqual(widgets[1]["decoratedText"]["text"], "No verdict parsed")
 
     def test_no_impact_widget_when_impact_is_missing(self):
         card = n.build_card("repo", "12", do_review=True, verdict_raw="Approve",
                             verdict_key="approve", impact_score=None, merged=True)
-        self.assertEqual(len(card["sections"][0]["widgets"]), 1)
+        self.assertEqual(len(card["sections"][0]["widgets"]), 2, "outcome + verdict only")
 
-    def test_title_names_the_repo_and_pr(self):
+    def test_header_is_pr_id_as_title_repo_as_subtitle(self):
         card = n.build_card("my-repo", "42", do_review=True, merged=True)
-        self.assertIn("my-repo", card["header"]["title"])
-        self.assertIn("42", card["header"]["title"])
+        self.assertEqual(card["header"]["title"], "PR #42")
+        self.assertEqual(card["header"]["subtitle"], "my-repo")
+
+    def test_verdict_glyph_is_not_doubled_when_the_agent_already_included_one(self):
+        """The reviewer's own report text already opens with an emoji
+        ("**Verdict:** ✅ Approve"); the card must not prepend a second one."""
+        card = n.build_card("repo", "12", do_review=True, verdict_raw="✅ Approve",
+                            verdict_key="approve", merged=True)
+        text = card["sections"][0]["widgets"][1]["decoratedText"]["text"]
+        self.assertEqual(text, "✅ Approve")
+        self.assertEqual(text.count("✅"), 1)
 
 
 class PostSummary(unittest.TestCase):

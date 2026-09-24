@@ -238,7 +238,8 @@ class SafetyGates(unittest.TestCase):
 class ChatNotification(unittest.TestCase):
     """The webhook post is a courtesy layered on top of the pipeline in
     full_pipeline() itself — these prove it never changes what the pipeline
-    does, only reports on it, and stays silent with nothing configured."""
+    does, only reports on completed outcomes (never execution errors), and
+    stays silent with nothing configured."""
 
     def setUp(self):
         importlib.reload(o)
@@ -296,16 +297,17 @@ class ChatNotification(unittest.TestCase):
         self.assertFalse(kw["do_review"])
         self.assertTrue(kw["merged"])
 
-    def test_a_hard_failure_still_posts_before_reraising(self):
+    def test_a_hard_failure_reraises_and_posts_nothing(self):
+        """An execution error (engine crash, AWS API error, ...) is not a
+        review outcome — it must not be reported to the group chat next to
+        real verdicts. It's still surfaced to the person running PRISM
+        through the job's own log/status (jobs.py JobManager._work)."""
         def boom(*a, **k):
             raise RuntimeError("kaboom")
         o.ensure_bundled_agents = boom
         with self.assertRaises(RuntimeError):
             self._run(webhook_url="https://example.invalid/hook")
-        self.assertEqual(len(self.posted), 1)
-        _url, kw = self.posted[0]
-        self.assertFalse(kw["merged"])
-        self.assertIn("kaboom", kw["reason"])
+        self.assertEqual(self.posted, [])
 
     def test_a_user_initiated_cancel_posts_nothing(self):
         def cancelled(*a, **k):

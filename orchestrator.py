@@ -1707,28 +1707,27 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
     """Run the pipeline (see _run_pipeline), then post a brief outcome
     summary to Google Chat if a webhook is configured.
 
-    Split out from _run_pipeline so that every exit path — success, a
-    blocked merge, a hard failure — gets exactly one notification from one
-    place, rather than a post call threaded through every one of that
-    function's return points. A webhook is a courtesy: posting to it (or
-    failing to) never changes what the pipeline itself does or returns, and
-    with no webhook configured this is a no-op wrapper.
+    Split out from _run_pipeline so that a completed run — merged, blocked by
+    verdict, or otherwise deliberately stopped — gets exactly one
+    notification from one place, rather than a post call threaded through
+    every one of that function's return points. A webhook is a courtesy:
+    posting to it (or failing to) never changes what the pipeline itself
+    does or returns, and with no webhook configured this is a no-op wrapper.
+
+    A hard failure (engine crash, AWS API error, ...) is deliberately NOT
+    posted here — that's an execution error, not a review outcome, and it is
+    already surfaced to the person running PRISM through the job's own log/
+    status (see jobs.py JobManager._work). Spamming the group chat with
+    infrastructure noise indistinguishable from a real verdict was worse
+    than saying nothing.
     """
-    try:
-        result = _run_pipeline(
-            project_dir, repo_name, pr_id, local_repo=local_repo, region=region,
-            do_review=do_review, do_update_desc=do_update_desc, do_merge=do_merge,
-            do_sync=do_sync, dry_run=dry_run, model=model, progress=progress,
-            emit=emit, control=control, ask=ask)
-    except Cancelled:
-        raise  # the user's own action; nothing worth telling anyone about
-    except Exception as e:  # noqa: BLE001
-        if webhook_url:
-            notifier.post_summary(
-                webhook_url, emit=emit, repo_name=repo_name, pr_id=pr_id,
-                do_review=do_review, merged=False, reason=str(e)[:80],
-                author=get_pr_author(pr_id, region=region))
-        raise
+    # No try/except here on purpose: a hard failure propagates untouched
+    # (Cancelled included) — see the note above on why it isn't notified.
+    result = _run_pipeline(
+        project_dir, repo_name, pr_id, local_repo=local_repo, region=region,
+        do_review=do_review, do_update_desc=do_update_desc, do_merge=do_merge,
+        do_sync=do_sync, dry_run=dry_run, model=model, progress=progress,
+        emit=emit, control=control, ask=ask)
     if webhook_url:
         review = result.get("review")
         notifier.post_summary(

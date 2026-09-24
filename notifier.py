@@ -11,6 +11,7 @@ Deliberately free of Tkinter, in the same spirit as updater.py, so
 orchestrator.py can use it without pulling in the UI.
 """
 import json
+import re
 import urllib.error
 import urllib.request
 
@@ -22,6 +23,12 @@ _VERDICT_GLYPH = {
     "approve": "✅", "approve-with-comments": "⚠️",
     "request-changes": "🔴", "block": "⛔",
 }
+
+# The reviewer's own report already opens the verdict line with an emoji
+# (see agents/pr-reviewer.md's "**Verdict:** ✅ Approve | ..." template), so
+# verdict_raw arrives pre-glyphed. Strip it before prepending our own
+# canonical glyph, or the card doubles up ("✅ ✅ Approve").
+_LEADING_SYMBOL_RE = re.compile(r"^[^\w(]+\s*")
 
 
 def _display_author(author_arn):
@@ -36,16 +43,18 @@ def build_card(repo_name, pr_id, do_review, verdict_raw=None, verdict_key=None,
     """A small Google Chat card: one header line, a few widget rows.
 
     Kept to this shape deliberately — a card that scrolls off a phone screen
-    defeats the point of a *brief* summary.
+    defeats the point of a *brief* summary. The header identifies the PR
+    itself (id, then repo) — outcome is a widget row, not the subtitle, so
+    the header stays stable across a run's lifetime.
     """
     if merged:
-        subtitle = "✅ Merged"
+        outcome = "✅ Merged"
     elif merged is False:
-        subtitle = "⛔ Not merged" + (f" — {reason}" if reason else "")
+        outcome = "⛔ Not merged" + (f" — {reason}" if reason else "")
     else:
-        subtitle = "⚠️ Unknown outcome" + (f" — {reason}" if reason else "")
+        outcome = "⚠️ Unknown outcome" + (f" — {reason}" if reason else "")
 
-    widgets = []
+    widgets = [{"decoratedText": {"topLabel": "Outcome", "text": outcome}}]
     if author:
         widgets.append({"decoratedText": {
             "topLabel": "Author", "text": _display_author(author)}})
@@ -54,8 +63,9 @@ def build_card(repo_name, pr_id, do_review, verdict_raw=None, verdict_key=None,
             "topLabel": "Review", "text": "Skipped by configuration"}})
     elif verdict_raw:
         glyph = _VERDICT_GLYPH.get(verdict_key, "")
+        clean = _LEADING_SYMBOL_RE.sub("", verdict_raw)
         widgets.append({"decoratedText": {
-            "topLabel": "Verdict", "text": f"{glyph} {verdict_raw}".strip()}})
+            "topLabel": "Verdict", "text": f"{glyph} {clean}".strip()}})
         if impact_score:
             widgets.append({"decoratedText": {
                 "topLabel": "Impact", "text": f"{impact_score}/10"}})
@@ -64,7 +74,7 @@ def build_card(repo_name, pr_id, do_review, verdict_raw=None, verdict_key=None,
             "topLabel": "Review", "text": "No verdict parsed"}})
 
     return {
-        "header": {"title": f"PRISM  ·  {repo_name} #{pr_id}", "subtitle": subtitle},
+        "header": {"title": f"PR #{pr_id}", "subtitle": repo_name},
         "sections": [{"widgets": widgets}],
     }
 
