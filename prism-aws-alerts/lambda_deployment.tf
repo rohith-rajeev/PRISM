@@ -40,13 +40,13 @@ resource "aws_lambda_function" "deployment_notifier" {
 
 resource "aws_cloudwatch_event_rule" "pipeline_succeeded" {
   name        = "${var.name_prefix}-pipeline-succeeded"
-  description = "Fires when a watched CodePipeline execution succeeds, so the deployment can be posted as a reply to its originating PR-merge card."
+  description = "Fires when a watched CodePipeline execution succeeds or fails, so the deployment can be posted as a reply to its originating PR-merge card."
 
   event_pattern = jsonencode({
     source      = ["aws.codepipeline"]
     detail-type = ["CodePipeline Pipeline Execution State Change"]
     detail = {
-      state    = ["SUCCEEDED"]
+      state    = ["SUCCEEDED", "FAILED"]
       pipeline = keys(var.pipeline_branches)
     }
   })

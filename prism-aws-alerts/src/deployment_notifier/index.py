@@ -9,7 +9,7 @@ CHAT_TARGETS = json.loads(os.environ["CHAT_TARGETS_JSON"])
 CHAT_TARGETS_BY_NAME = {t["name"]: t for t in CHAT_TARGETS}
 PIPELINE_BRANCHES = json.loads(os.environ.get("PIPELINE_BRANCHES_JSON", "{}"))
 POST_UNLINKED = os.environ.get("POST_UNLINKED_DEPLOYMENTS", "true").lower() == "true"
-REGION = os.environ.get("AWS_REGION", "us-east-1")
+STATUS_BY_STATE = {"SUCCEEDED": "succeeded", "FAILED": "failed"}
 
 dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table(TABLE_NAME)
@@ -36,47 +36,14 @@ def _post_to_chat(webhook_url, payload, thread_name):
         return json.loads(resp.read().decode("utf-8"))
 
 
-def _execution_console_link(pipeline_name, execution_id):
-    return (
-        f"https://{REGION}.console.aws.amazon.com/codesuite/codepipeline/pipelines/"
-        f"{pipeline_name}/executions/{execution_id}/timeline?region={REGION}"
-    )
-
-
-def _build_card(pipeline_name, execution_id, commit_sha, environment, pr_title, thread_name):
-    link = _execution_console_link(pipeline_name, execution_id)
-    widgets = [
-        {"decoratedText": {"topLabel": "Environment", "text": environment}},
-        {"decoratedText": {"topLabel": "Pipeline", "text": pipeline_name}},
-    ]
+def _build_message(environment, status, pr_id, commit_sha, thread_name):
+    lines = [f"{environment} deployment {status}:"]
+    if pr_id:
+        lines.append(f"- PR #{pr_id}")
     if commit_sha:
-        widgets.append({"decoratedText": {"topLabel": "Commit", "text": commit_sha[:12]}})
-    if pr_title and not thread_name:
-        widgets.append({"decoratedText": {"topLabel": "Pull Request", "text": pr_title}})
-    widgets.append(
-        {
-            "buttonList": {
-                "buttons": [
-                    {"text": "View Execution", "onClick": {"openLink": {"url": link}}}
-                ]
-            }
-        }
-    )
+        lines.append(f"- Commit #{commit_sha[:12]}")
 
-    payload = {
-        "cardsV2": [
-            {
-                "cardId": f"deploy-{pipeline_name}-{execution_id}",
-                "card": {
-                    "header": {
-                        "title": "\U0001F680 Deployment Succeeded",
-                        "subtitle": pipeline_name,
-                    },
-                    "sections": [{"widgets": widgets}],
-                },
-            }
-        ]
-    }
+    payload = {"text": "\n".join(lines)}
     if thread_name:
         payload["thread"] = {"name": thread_name}
     return payload
@@ -87,12 +54,13 @@ def handler(event, context):
     pipeline_name = detail.get("pipeline")
     execution_id = detail.get("execution-id")
     state = detail.get("state")
+    status = STATUS_BY_STATE.get(state)
 
-    if state != "SUCCEEDED" or not pipeline_name or not execution_id:
+    if not status or not pipeline_name or not execution_id:
         print("Ignoring event:", json.dumps(detail))
         return
 
-    environment = pipeline_name.split("-")[-1]
+    environment = pipeline_name.split("-")[-1].title()
 
     commit_sha = None
     try:
@@ -110,14 +78,14 @@ def handler(event, context):
         item = table.get_item(Key={"commit_sha": commit_sha}).get("Item")
 
     if item:
-        pr_title = item.get("pr_title")
+        pr_id = item.get("pull_request_id")
         for entry in item.get("chat_threads", []):
             chat = CHAT_TARGETS_BY_NAME.get(entry.get("chat_name"))
             if not chat:
                 print(f"WARNING: stored chat '{entry.get('chat_name')}' is no longer configured, skipping")
                 continue
-            payload = _build_card(
-                pipeline_name, execution_id, commit_sha, environment, pr_title, entry.get("thread_name")
+            payload = _build_message(
+                environment, status, pr_id, commit_sha, entry.get("thread_name")
             )
             try:
                 _post_to_chat(chat["webhook_url"], payload, entry.get("thread_name"))
@@ -137,9 +105,9 @@ def handler(event, context):
         return
 
     for chat in targets:
-        payload = _build_card(pipeline_name, execution_id, commit_sha, environment, None, None)
+        payload = _build_message(environment, status, None, commit_sha, None)
         try:
             _post_to_chat(chat["webhook_url"], payload, None)
-            print(f"Posted standalone deployment card to chat '{chat['name']}' (no matching PR thread)")
+            print(f"Posted standalone deployment message to chat '{chat['name']}' (no matching PR thread)")
         except Exception as exc:
             print(f"ERROR posting to chat '{chat['name']}': {exc}")

@@ -26,3 +26,7 @@ Thumbs.db
 # --- agent runtime scratch ---
 # PRISM installs its bundled reviewer here inside whatever project it reviews.
 .opencode/
+
+# --- local run artifacts ---
+logs/
+screenshots/
