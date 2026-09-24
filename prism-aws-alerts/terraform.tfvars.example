@@ -1,0 +1,41 @@
+# Copy to terraform.tfvars (which is gitignored) and fill in real webhook URLs,
+# or keep it out of tfvars entirely and export as JSON instead:
+#   export TF_VAR_chat_targets='[{"name":"chat-a","webhook_url":"https://chat.googleapis.com/...A","branches":["qa","staging"]},{"name":"chat-b","webhook_url":"https://chat.googleapis.com/...B","branches":["staging"]}]'
+
+aws_region  = "us-east-1"
+name_prefix = "prism-aws-alerts"
+
+# Example matching "chat A gets qa+staging, chat B gets staging only":
+chat_targets = [
+  {
+    name        = "chat-a"
+    webhook_url = "https://chat.googleapis.com/v1/spaces/AAAAAAA/messages?key=XXXX&token=YYYY"
+    branches    = ["qa", "staging"]
+  },
+  {
+    name        = "chat-b"
+    webhook_url = "https://chat.googleapis.com/v1/spaces/BBBBBBB/messages?key=XXXX&token=YYYY"
+    branches    = ["staging"]
+  },
+]
+
+watched_repositories = [
+  "your-backend-repo",
+  "your-frontend-repo",
+]
+
+# Which branch each pipeline deploys - drives both the EventBridge watch list
+# and the fallback routing for deployments that can't be matched to a PR thread.
+pipeline_branches = {
+  "your-backend-pipeline-qa"  = "qa"
+  "your-backend-pipeline-stg" = "staging"
+  "your-frontend-pipeline-qa" = "qa"
+  "your-frontend-pipeline-stg" = "staging"
+}
+
+thread_ttl_days           = 30
+post_unlinked_deployments = true
+
+tags = {
+  Project = "prism-aws-alerts"
+}

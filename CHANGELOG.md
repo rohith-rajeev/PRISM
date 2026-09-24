@@ -4,6 +4,14 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v3.2
+
+- Added `prism-aws-alerts`, a standalone Terraform sub-project bundled in
+  this repo: Lambdas + EventBridge rules that post a Google Chat card when a
+  pull request is merged into a watched branch, then reply in that same
+  thread once the resulting commit is deployed. Independent of the desktop
+  app — nothing here changes how PRISM itself runs.
+
 ## v3.1
 
 - **Retry a finished job** with one click — same repo, PR id and settings,
