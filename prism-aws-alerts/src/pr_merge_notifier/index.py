@@ -8,7 +8,6 @@ import boto3
 TABLE_NAME = os.environ["DYNAMODB_TABLE_NAME"]
 CHAT_TARGETS = json.loads(os.environ["CHAT_TARGETS_JSON"])
 THREAD_TTL_DAYS = int(os.environ.get("THREAD_TTL_DAYS", "30"))
-REGION = os.environ.get("AWS_REGION", "us-east-1")
 
 dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table(TABLE_NAME)
@@ -31,13 +30,6 @@ def _post_to_chat(webhook_url, payload):
         return json.loads(resp.read().decode("utf-8"))
 
 
-def _pr_console_link(repo_name, pr_id):
-    return (
-        f"https://{REGION}.console.aws.amazon.com/codesuite/codecommit/"
-        f"repositories/{repo_name}/pull-requests/{pr_id}/details?region={REGION}"
-    )
-
-
 def _find_target(pr, repo_name, destination_reference):
     for target in pr.get("pullRequestTargets", []):
         if (
@@ -50,37 +42,20 @@ def _find_target(pr, repo_name, destination_reference):
 
 
 def _build_card(repo_name, branch, pr_id, title, author):
-    pr_link = _pr_console_link(repo_name, pr_id)
     return {
         "cardsV2": [
             {
                 "cardId": f"pr-merge-{repo_name}-{pr_id}",
                 "card": {
                     "header": {
-                        "title": "\U0001F500 Pull Request Merged",
-                        "subtitle": f"{repo_name} → {branch}",
+                        "title": f"Merged PR #{pr_id} → {branch}",
+                        "subtitle": repo_name,
                     },
                     "sections": [
                         {
                             "widgets": [
-                                {
-                                    "decoratedText": {
-                                        "topLabel": "Pull Request",
-                                        "text": f"#{pr_id} — {title}",
-                                    }
-                                },
+                                {"decoratedText": {"topLabel": "PR", "text": title}},
                                 {"decoratedText": {"topLabel": "Author", "text": author}},
-                                {"decoratedText": {"topLabel": "Target Branch", "text": branch}},
-                                {
-                                    "buttonList": {
-                                        "buttons": [
-                                            {
-                                                "text": "View Pull Request",
-                                                "onClick": {"openLink": {"url": pr_link}},
-                                            }
-                                        ]
-                                    }
-                                },
                             ]
                         }
                     ],
