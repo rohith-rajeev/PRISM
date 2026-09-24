@@ -123,6 +123,12 @@ and three buttons: **`Keep current`** (your branch), **`Take incoming`** (the
 base branch), or **`Abort sync`**. Once you have chosen for every conflict,
 PRISM replays the merge with your answers.
 
+**High-impact PRs pause for you too.** A PR the reviewer scores 7/10 or
+higher on impact stops here even on an Approve verdict — **`Proceed with
+merge`** or **`Abort — I'll handle this manually`**. A verdict on its own is
+never enough to auto-merge something that risky; PRISM always waits for you
+to say go.
+
 If this happens while you're looking at a different job, that job shows
 **Needs input** in the list, and the header says so too. Nothing is missed.
 
@@ -136,11 +142,13 @@ turn and start automatically.
 The jobs list shows every job at a glance:
 
 ```
-● example-service-be #12948   Running…   ⚠️ Approve with comments   ⚠️ 6/10   [Stop] [✕]
-● example-portal-fe  #884                         Finished   ✅ Approve                 ✅ 2/10   [Stop] [✕]
+● example-service-be #12948   Running…   ⚠️ Approve with comments   ⚠️ 6/10   [Stop]    [✕]
+● example-portal-fe  #884                         Finished   ✅ Approve                 ✅ 2/10   [↻ Retry] [✕]
 ```
 
-Click a row to open it. `Stop` ends that job. `✕` removes it from the list.
+Click a row to open it. `✕` removes it from the list. The other button
+changes with the job: **`Stop`** while it's running, **`↻ Retry`** once it's
+finished (see **Retrying a job**, below).
 
 What the status word means:
 
@@ -158,11 +166,27 @@ Two rules keep things safe:
 
 - **The same PR twice is refused.** Both jobs would fight over the PR
   description and one set of findings would be lost.
-- **Two jobs on the same clone are allowed, with a warning.** They take turns
-  for git operations, so the second may wait a little.
+- **Two jobs on the same clone are allowed, with a warning.** Each works in
+  its own isolated copy, so different PRs (almost always different branches)
+  run fully in parallel; only two jobs that happen to target the exact same
+  branch still take turns.
 
 The new-job form remembers your last job's settings, so reviewing five PRs in
 one repo usually means changing only the PR id.
+
+### Retrying a job
+
+Once a job is finished, its `Stop` button becomes **`↻ Retry`** — in the jobs
+list, and on the job's own detail screen. Click it to start a fresh job with
+the exact same repo, PR id and settings; nothing to retype.
+
+This is the normal way to handle "Request changes": fix the PR, come back,
+click `↻ Retry`. PRISM recognizes it has already reviewed this PR and scopes
+the new pass to what changed since — checking whether earlier findings were
+addressed, and only skimming the rest for anything newly critical — instead
+of reading the whole PR again from scratch. A PR PRISM hasn't reviewed
+before (or a retry of a job that never got that far) just gets an ordinary
+full review.
 
 ---
 
@@ -200,9 +224,10 @@ and whether it merged. Leave the field empty to turn it off again.
 checks between steps, so it won't interrupt a merge halfway. (An AWS call
 already sent may still complete — the conversation panel will show it.)
 
-**Closing the window asks first**, because **PRISM saves nothing to disk**. Your
-verdicts and conversations exist only while the window is open. The prompt tells
-you exactly what would be lost, and defaults to staying open.
+**Closing the window asks first**, because **no job's verdict or conversation
+is saved to disk** — they exist only while the window is open (see **Good to
+know**, below, for the couple of small settings that *do* persist). The
+prompt tells you exactly what would be lost, and defaults to staying open.
 
 ---
 
@@ -238,7 +263,12 @@ PRISM is deliberately cautious:
 
 ## Good to know
 
-- Nothing is saved between sessions — no config file, no history.
+- **No job history survives a restart** — closing PRISM discards every job's
+  conversation and verdict, same as always. Two small things do persist
+  between sessions, both under `~/.prism/`: the Google Chat webhook setting,
+  and a local record of which commit PRISM last reviewed on each PR (what
+  makes retrying a job — see **Retrying a job**, above — faster instead of
+  starting over).
 - Each job keeps the last 5,000 lines of its conversation.
 - Every job takes a snapshot of its settings when it starts, so changing the
   form afterwards never affects a job already running.
@@ -259,12 +289,18 @@ opens this manual too.
 
 ## Keeping PRISM up to date
 
-Open **`?  Help`** and click **`Check for updates`**. PRISM asks GitHub whether
-a newer release exists.
+**PRISM checks once, quietly, when it starts.** If you're already on the
+latest version, nothing happens — no popup, nothing to dismiss. If a newer
+version exists, the same "update available" screen described below opens on
+its own.
+
+You can also check any time yourself: open **`?  Help`** and click **`Check
+for updates`**.
 
 - **You are up to date** — nothing to do.
 - **A newer version exists** — you will see the version number and its release
-  notes, and can choose **`Download and install`** or ignore it.
+  notes (written by hand for each release, not a raw commit list), and can
+  choose **`Download and install`** or ignore it.
 
 If you install, PRISM downloads the build for your operating system, checks it
 against the checksum published alongside it, replaces itself, and offers to
@@ -280,8 +316,8 @@ Two things to know:
   Use `git pull` instead; the Help screen says so rather than offering a
   download.
 
-Nothing is sent to GitHub except the request for the release list. PRISM only
-checks when you ask it to — there is no background polling.
+Nothing is sent to GitHub except the request for the release list — whether
+that check happens on its own at startup or because you asked for it.
 
 ---
 

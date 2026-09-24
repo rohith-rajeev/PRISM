@@ -59,6 +59,42 @@ class AdmissionTests(unittest.TestCase):
         self.m.create(s2)                   # allowed
 
 
+class RetryTests(unittest.TestCase):
+    def setUp(self):
+        self.m = J.JobManager(queue.Queue(), runner=lambda **k: {})
+
+    def test_retrying_a_finished_job_creates_a_new_one_with_the_same_spec(self):
+        job = self.m.create(spec("214"))
+        job.status = J.DONE
+        retried = self.m.retry(job.id)
+        self.assertIsNotNone(retried)
+        self.assertNotEqual(retried.id, job.id)
+        self.assertEqual(retried.spec, job.spec)
+        self.assertEqual(retried.status, J.QUEUED)
+
+    def test_retrying_an_active_job_is_a_no_op(self):
+        job = self.m.create(spec("214"))
+        self.assertEqual(job.status, J.QUEUED)   # active — nothing to retry yet
+        self.assertIsNone(self.m.retry(job.id))
+        self.assertEqual(len(self.m.jobs), 1)
+
+    def test_retrying_an_unknown_job_is_a_no_op(self):
+        self.assertIsNone(self.m.retry(999))
+
+    def test_retrying_while_another_active_job_covers_the_pr_refuses(self):
+        job = self.m.create(spec("214"))
+        job.status = J.ERROR
+        self.m.create(spec("214"))               # a second, active attempt
+        with self.assertRaises(J.DuplicateJob):
+            self.m.retry(job.id)
+
+    def test_retry_works_for_every_terminal_status(self):
+        for status in (J.DONE, J.ERROR, J.STOPPED):
+            job = self.m.create(spec(f"pr-{status}"))
+            job.status = status
+            self.assertIsNotNone(self.m.retry(job.id), f"retry failed for {status}")
+
+
 class SchedulerTests(unittest.TestCase):
     def setUp(self):
         self.q = queue.Queue()
