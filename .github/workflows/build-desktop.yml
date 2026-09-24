@@ -277,6 +277,24 @@ jobs:
           cat release/SHA256SUMS
           ls -la release
 
+      - name: Pull this release's notes from CHANGELOG.md
+        # Hand-written, not auto-generated: CHANGELOG.md is what a person
+        # reads in the in-app "update available" screen, so it says what
+        # changed for them rather than listing commits. A tag with no
+        # matching section (a changelog entry forgotten before tagging)
+        # degrades to a placeholder instead of failing the release.
+        run: |
+          set -e
+          awk -v tag="$TAG" '
+            $0 ~ "^## " tag "([ (]|$)" { found=1; next }
+            found && /^## / { exit }
+            found { print }
+          ' src/CHANGELOG.md > release/NOTES.md
+          if [ ! -s release/NOTES.md ]; then
+            echo "_No changelog entry yet for this release._" > release/NOTES.md
+          fi
+          cat release/NOTES.md
+
       - uses: softprops/action-gh-release@v2
         with:
           # Named explicitly: on a merge into main this run is not on a tag
@@ -284,4 +302,4 @@ jobs:
           tag_name: ${{ env.TAG }}
           name: PRISM ${{ env.TAG }}
           files: release/*
-          generate_release_notes: true
+          body_path: release/NOTES.md

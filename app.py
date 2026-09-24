@@ -328,6 +328,12 @@ class RoundedButton(tk.Canvas):
         self._text = text
         self._draw()
 
+    def set_command(self, command):
+        """Repoint the click handler — used where one button slot changes
+        meaning with job state (Stop while running, Retry once finished)
+        rather than adding a second button next to it."""
+        self._command = command
+
     def _fit(self, text, max_px):
         """Trim `text` with an ellipsis so it cannot run past the button edge.
 
@@ -962,9 +968,11 @@ class ScrollFrame(tk.Frame):
 class JobRow(RoundedCard):
     """One line in the jobs list: status, target, verdict, impact, actions."""
 
-    def __init__(self, parent, job, on_open, on_stop, on_remove):
+    def __init__(self, parent, job, on_open, on_stop, on_remove, on_retry):
         super().__init__(parent)
         self.job = job
+        self._on_stop = on_stop
+        self._on_retry = on_retry
         inner = self.inner
         inner.config(padx=12, pady=7)
         inner.columnconfigure(1, weight=1)
@@ -990,9 +998,12 @@ class JobRow(RoundedCard):
                                    fg=PAL["muted"], anchor="w", width=9)
         self.tokens_lbl.grid(row=0, column=4, rowspan=2, sticky="w", padx=(0, 8))
 
+        # One button slot, two meanings: "Stop" while the job is active,
+        # "↻ Retry" once it's finished — set per-refresh() below rather than
+        # adding a second button that would crowd an already-compact row.
         self.stop_btn = RoundedButton(inner, text="Stop", style="outline",
-                                      height=26, width=66, font=FONT_XS,
-                                      command=lambda: on_stop(job.id))
+                                      height=26, width=76, font=FONT_XS,
+                                      command=lambda: self._on_stop(job.id))
         self.stop_btn.grid(row=0, column=5, rowspan=2, padx=(0, 6))
         self.del_btn = RoundedButton(inner, text="✕", style="ghost", height=26,
                                      width=30, font=FONT_XS,
@@ -1052,7 +1063,14 @@ class JobRow(RoundedCard):
             self.impact.config(text="", fg=PAL["muted"])
         total = (job.tokens or {}).get("total")
         self.tokens_lbl.config(text=f"⛃ {_format_tokens(total)}" if total else "")
-        self.stop_btn.set_enabled(job.is_active)
+        if job.is_terminal:
+            self.stop_btn.set_text("↻ Retry")
+            self.stop_btn.set_command(lambda: self._on_retry(job.id))
+            self.stop_btn.set_enabled(True)
+        else:
+            self.stop_btn.set_text("Stop")
+            self.stop_btn.set_command(lambda: self._on_stop(job.id))
+            self.stop_btn.set_enabled(job.is_active)
         self.del_btn.set_enabled(True)
 
 
@@ -1480,10 +1498,11 @@ class UpdateDialog(tk.Toplevel):
     Tk call still happens on the Tk thread - the same rule the job pump keeps.
     """
 
-    def __init__(self, parent, app):
+    def __init__(self, parent, app, silent=False):
         super().__init__(parent)
         self.withdraw()
         self.app = app
+        self._silent = silent
         self.title("Software update")
         self.configure(bg=PAL["page"])
         self.resizable(False, False)
@@ -1506,10 +1525,21 @@ class UpdateDialog(tk.Toplevel):
         self._show_checking()
         self.update_idletasks()
         self._centre(parent)
-        self.deiconify()
-        self.grab_set()
+        # A silent (startup) check builds this same "checking" state but
+        # stays withdrawn — it only actually appears if _pump finds a real
+        # update, via _reveal() below. An unprompted "you're up to date" or
+        # "couldn't check" popup on every launch would be the opposite of
+        # what an alert-only-when-relevant startup check is for.
+        if not self._silent:
+            self.deiconify()
+            self.grab_set()
         self._spawn(self._work_check)
         self._pump()
+
+    def _reveal(self):
+        self.deiconify()
+        self._centre(self.master)
+        self.grab_set()
 
     # ----- scaffolding -----
     def _centre(self, parent):
@@ -1681,7 +1711,15 @@ class UpdateDialog(tk.Toplevel):
             while True:
                 kind, payload = self._q.get_nowait()
                 if kind == "release":
-                    self._show_current() if payload is None else self._show_available(payload)
+                    if payload is None:
+                        if self._silent:
+                            self._close()      # up to date: never interrupt
+                            return
+                        self._show_current()
+                    else:
+                        self._show_available(payload)
+                        if self._silent:
+                            self._reveal()      # a real update: worth surfacing
                 elif kind == "progress":
                     self._on_progress(*payload)
                 elif kind == "installed":
@@ -1691,6 +1729,9 @@ class UpdateDialog(tk.Toplevel):
                     self._close()
                     return
                 elif kind == "check-failed":
+                    if self._silent:
+                        self._close()          # a quiet startup check fails quietly
+                        return
                     self._show_error(payload, tone="warn",
                                      title="Could not check for updates")
                 elif kind == "error":
@@ -1809,6 +1850,12 @@ class App(tk.Tk):
         # still sitting next to this one. It could not be deleted then - on
         # Windows it was the running process - but it can be now.
         U.cleanup_previous()
+        # A quiet, once-per-launch check — the window paints first (hence the
+        # delay), and the dialog itself only ever becomes visible if there is
+        # actually something to tell the user about (see UpdateDialog's
+        # silent mode). "Check for updates" in Help still works the same way
+        # on demand.
+        self.after(1500, lambda: UpdateDialog(self, self, silent=True))
 
     # ----- themed primitives -----
     def _lab(self, parent, text, font=None, fg="muted", bg="card"):
@@ -2587,7 +2634,8 @@ class App(tk.Tk):
             row = self.rows.get(job.id)
             if row is None:
                 row = JobRow(inner, job, on_open=self.show_detail,
-                             on_stop=self._stop_job, on_remove=self._remove_job)
+                             on_stop=self._stop_job, on_remove=self._remove_job,
+                             on_retry=self._retry_job)
                 self.rows[job.id] = row
                 created = True
             if not row.winfo_manager():
@@ -2728,6 +2776,27 @@ class App(tk.Tk):
         if self.selected_job_id is not None:
             self._stop_job(self.selected_job_id)
 
+    def _retry_job(self, job_id):
+        """Resubmit a finished job's exact spec as a new one — same repo, PR
+        id and flags, no form to refill. The new job's own review picks up
+        automatically where PRISM's last one left off (see JobManager.retry)."""
+        try:
+            new_job = self.manager.retry(job_id)
+        except J.DuplicateJob as e:
+            show_warning(self, "Already running", str(e))
+            return
+        if new_job is None:
+            return
+        self.last_spec = new_job.spec
+        self.manager.pump()
+        self._refresh_jobs_list()
+        self._refresh_pill()
+        self.show_detail(new_job.id)
+
+    def _retry_current_job(self):
+        if self.selected_job_id is not None:
+            self._retry_job(self.selected_job_id)
+
     def _remove_job(self, job_id):
         job = self.manager.jobs.get(job_id)
         if job is not None and job.is_active and not ask_confirm(
@@ -2767,7 +2836,14 @@ class App(tk.Tk):
         self._paint_impact(job.impact)
         self._paint_tokens(job.tokens)
         self.run_btn.set_text("▶  Start Prisming")
-        self.stop_btn.set_enabled(job.is_active)
+        if job.is_terminal:
+            self.stop_btn.set_text("↻  Retry")
+            self.stop_btn.set_command(self._retry_current_job)
+            self.stop_btn.set_enabled(True)
+        else:
+            self.stop_btn.set_text("■  Stop")
+            self.stop_btn.set_command(self._stop)
+            self.stop_btn.set_enabled(job.is_active)
         self._render_log(job)
         if job.pending_question:
             # The ask event already fired while this job was unselected, so the

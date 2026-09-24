@@ -238,6 +238,24 @@ class JobManager:
         self._next_id += 1
         return job
 
+    def retry(self, job_id):
+        """Start a fresh job from a finished one's exact spec.
+
+        Same repo, PR id, flags and model — nothing to retype. The new job's
+        own review automatically scopes itself to what changed since PRISM's
+        last completed review of this PR (orchestrator._incremental_context),
+        backed by PRISM's own local record of what it actually reviewed, so
+        a retry costs no more context-setup than any other job.
+
+        None for a job that isn't finished yet (nothing to retry) or doesn't
+        exist. Raises DuplicateJob exactly like create() when another active
+        job already covers this PR — retry is not a way around that guard.
+        """
+        job = self.jobs.get(job_id)
+        if job is None or not job.is_terminal:
+            return None
+        return self.create(job.spec)
+
     # ----- scheduling -----
     @property
     def running_count(self):
