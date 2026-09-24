@@ -328,6 +328,12 @@ class RoundedButton(tk.Canvas):
         self._text = text
         self._draw()
 
+    def set_command(self, command):
+        """Repoint the click handler — used where one button slot changes
+        meaning with job state (Stop while running, Retry once finished)
+        rather than adding a second button next to it."""
+        self._command = command
+
     def _fit(self, text, max_px):
         """Trim `text` with an ellipsis so it cannot run past the button edge.
 
@@ -962,9 +968,11 @@ class ScrollFrame(tk.Frame):
 class JobRow(RoundedCard):
     """One line in the jobs list: status, target, verdict, impact, actions."""
 
-    def __init__(self, parent, job, on_open, on_stop, on_remove):
+    def __init__(self, parent, job, on_open, on_stop, on_remove, on_retry):
         super().__init__(parent)
         self.job = job
+        self._on_stop = on_stop
+        self._on_retry = on_retry
         inner = self.inner
         inner.config(padx=12, pady=7)
         inner.columnconfigure(1, weight=1)
@@ -990,9 +998,12 @@ class JobRow(RoundedCard):
                                    fg=PAL["muted"], anchor="w", width=9)
         self.tokens_lbl.grid(row=0, column=4, rowspan=2, sticky="w", padx=(0, 8))
 
+        # One button slot, two meanings: "Stop" while the job is active,
+        # "↻ Retry" once it's finished — set per-refresh() below rather than
+        # adding a second button that would crowd an already-compact row.
         self.stop_btn = RoundedButton(inner, text="Stop", style="outline",
-                                      height=26, width=66, font=FONT_XS,
-                                      command=lambda: on_stop(job.id))
+                                      height=26, width=76, font=FONT_XS,
+                                      command=lambda: self._on_stop(job.id))
         self.stop_btn.grid(row=0, column=5, rowspan=2, padx=(0, 6))
         self.del_btn = RoundedButton(inner, text="✕", style="ghost", height=26,
                                      width=30, font=FONT_XS,
@@ -1052,7 +1063,14 @@ class JobRow(RoundedCard):
             self.impact.config(text="", fg=PAL["muted"])
         total = (job.tokens or {}).get("total")
         self.tokens_lbl.config(text=f"⛃ {_format_tokens(total)}" if total else "")
-        self.stop_btn.set_enabled(job.is_active)
+        if job.is_terminal:
+            self.stop_btn.set_text("↻ Retry")
+            self.stop_btn.set_command(lambda: self._on_retry(job.id))
+            self.stop_btn.set_enabled(True)
+        else:
+            self.stop_btn.set_text("Stop")
+            self.stop_btn.set_command(lambda: self._on_stop(job.id))
+            self.stop_btn.set_enabled(job.is_active)
         self.del_btn.set_enabled(True)
 
 
@@ -2587,7 +2605,8 @@ class App(tk.Tk):
             row = self.rows.get(job.id)
             if row is None:
                 row = JobRow(inner, job, on_open=self.show_detail,
-                             on_stop=self._stop_job, on_remove=self._remove_job)
+                             on_stop=self._stop_job, on_remove=self._remove_job,
+                             on_retry=self._retry_job)
                 self.rows[job.id] = row
                 created = True
             if not row.winfo_manager():
@@ -2728,6 +2747,27 @@ class App(tk.Tk):
         if self.selected_job_id is not None:
             self._stop_job(self.selected_job_id)
 
+    def _retry_job(self, job_id):
+        """Resubmit a finished job's exact spec as a new one — same repo, PR
+        id and flags, no form to refill. The new job's own review picks up
+        automatically where PRISM's last one left off (see JobManager.retry)."""
+        try:
+            new_job = self.manager.retry(job_id)
+        except J.DuplicateJob as e:
+            show_warning(self, "Already running", str(e))
+            return
+        if new_job is None:
+            return
+        self.last_spec = new_job.spec
+        self.manager.pump()
+        self._refresh_jobs_list()
+        self._refresh_pill()
+        self.show_detail(new_job.id)
+
+    def _retry_current_job(self):
+        if self.selected_job_id is not None:
+            self._retry_job(self.selected_job_id)
+
     def _remove_job(self, job_id):
         job = self.manager.jobs.get(job_id)
         if job is not None and job.is_active and not ask_confirm(
@@ -2767,7 +2807,14 @@ class App(tk.Tk):
         self._paint_impact(job.impact)
         self._paint_tokens(job.tokens)
         self.run_btn.set_text("▶  Start Prisming")
-        self.stop_btn.set_enabled(job.is_active)
+        if job.is_terminal:
+            self.stop_btn.set_text("↻  Retry")
+            self.stop_btn.set_command(self._retry_current_job)
+            self.stop_btn.set_enabled(True)
+        else:
+            self.stop_btn.set_text("■  Stop")
+            self.stop_btn.set_command(self._stop)
+            self.stop_btn.set_enabled(job.is_active)
         self._render_log(job)
         if job.pending_question:
             # The ask event already fired while this job was unselected, so the
