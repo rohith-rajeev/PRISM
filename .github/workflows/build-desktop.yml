@@ -283,17 +283,22 @@ jobs:
         # changed for them rather than listing commits. A tag with no
         # matching section (a changelog entry forgotten before tagging)
         # degrades to a placeholder instead of failing the release.
+        #
+        # Written outside release/ on purpose - that directory becomes the
+        # release's downloadable assets (`files: release/*` below), and the
+        # notes are the release body, not one more file to download.
         run: |
           set -e
+          mkdir -p notes
           awk -v tag="$TAG" '
             $0 ~ "^## " tag "([ (]|$)" { found=1; next }
             found && /^## / { exit }
             found { print }
-          ' src/CHANGELOG.md > release/NOTES.md
-          if [ ! -s release/NOTES.md ]; then
-            echo "_No changelog entry yet for this release._" > release/NOTES.md
+          ' src/CHANGELOG.md > notes/NOTES.md
+          if [ ! -s notes/NOTES.md ]; then
+            echo "_No changelog entry yet for this release._" > notes/NOTES.md
           fi
-          cat release/NOTES.md
+          cat notes/NOTES.md
 
       - uses: softprops/action-gh-release@v2
         with:
@@ -302,4 +307,4 @@ jobs:
           tag_name: ${{ env.TAG }}
           name: PRISM ${{ env.TAG }}
           files: release/*
-          body_path: release/NOTES.md
+          body_path: notes/NOTES.md
