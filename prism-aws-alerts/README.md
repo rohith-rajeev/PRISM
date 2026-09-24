@@ -1,25 +1,25 @@
 # prism-aws-alerts
 
 Standalone Terraform project. Posts a card to one or more Google Chat spaces
-when a pull request is merged into a watched branch (e.g. `qa`, `staging`),
-then posts a second card **as a threaded reply** on that same message, in
-every one of those spaces, once the resulting commit has been deployed by the
-matching CodePipeline pipeline.
+when a pull request is merged into a watched branch (e.g. `qa`, `staging`,
+`main`), then posts a second message **as a threaded reply** on that same
+message, in every one of those spaces, once the resulting commit has been
+deployed (or fails to deploy) by the matching CodePipeline pipeline.
 
 Routing is per chat, per branch: a chat can watch multiple branches, and a
 branch can be watched by multiple chats. For example:
 
 ```hcl
 chat_targets = [
-  { name = "chat-a", webhook_url = "...", branches = ["qa", "staging"] },
+  { name = "chat-a", webhook_url = "...", branches = ["qa", "staging", "main"] },
   { name = "chat-b", webhook_url = "...", branches = ["staging"] },
 ]
 ```
 
-`chat-a` gets both the merge card and the deploy reply for `qa` *and*
-`staging`; `chat-b` only gets them for `staging`. Each chat's message thread
-is tracked independently, so the deploy reply lands in the right thread in
-every chat that received the original merge card.
+`chat-a` gets both the merge card and the deploy reply for `qa`, `staging`
+*and* `main` (production); `chat-b` only gets them for `staging`. Each chat's
+message thread is tracked independently, so the deploy reply lands in the
+right thread in every chat that received the original merge card.
 
 All resources are new (`prism-aws-alerts-*` by default) and independent of any
 other IaC-managed stacks in the same AWS account (e.g. a SAM or CDK
@@ -43,17 +43,18 @@ application) — nothing here is imported from or attached to them.
 
 2. **`deployment-notifier` Lambda** — triggered by an EventBridge rule
    matching `aws.codepipeline` / `CodePipeline Pipeline Execution State
-   Change` events where `state = SUCCEEDED`, for every pipeline listed in
-   `pipeline_branches`.
+   Change` events where `state = SUCCEEDED` or `FAILED`, for every pipeline
+   listed in `pipeline_branches`.
    - Calls `codepipeline:GetPipelineExecution` to read the commit SHA the
      pipeline actually built.
-   - Looks that commit up in DynamoDB. If found, posts a "Deployment
-     Succeeded" card **threaded onto** the original message in each recorded
-     chat.
+   - Looks that commit up in DynamoDB. If found, posts a plain-text
+     `{environment} deployment {succeeded|failed}:` message **threaded onto**
+     the original message in each recorded chat.
    - If the commit isn't found (e.g. a manual re-run on an old revision), it
      falls back to `pipeline_branches` to work out which branch was deployed
-     and posts a standalone card to every chat watching that branch instead
-     — unless `post_unlinked_deployments = false`, in which case it's dropped.
+     and posts a standalone message to every chat watching that branch
+     instead — unless `post_unlinked_deployments = false`, in which case it's
+     dropped.
 
 No SNS topics, CodeCommit notification rules, or existing EventBridge buses
 are touched — both rules run on the account's default event bus, which
