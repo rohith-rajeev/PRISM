@@ -340,13 +340,14 @@ class DirectDescriptionUpdate(unittest.TestCase):
         o.update_description_direct(
             "7", "Approve", "3", ["- **[Low] nit** cosmetic"],
             verdict_key="approve", source_commit="abc123")
-        self.assertIn("<!-- pr-reviewer:meta verdict=approve commit=abc123 -->",
-                     self.written["description"])
+        self.assertIn(
+            "<!-- prism:meta reviewer=PRISM verdict=approve commit=abc123 -->",
+            self.written["description"])
 
     def test_replaces_a_stale_block_from_an_earlier_run(self):
-        stale = ("<!-- pr-reviewer:start -->\n"
-                 "<!-- pr-reviewer:meta verdict=request-changes commit=old -->\n"
-                 "old findings\n<!-- pr-reviewer:end -->")
+        stale = ("<!-- prism:start -->\n"
+                 "<!-- prism:meta reviewer=PRISM verdict=request-changes commit=old -->\n"
+                 "old findings\n<!-- prism:end -->")
         o.get_pr = lambda *a, **k: {"description": stale}
         o.update_description_direct(
             "7", "Approve", "3", ["- new finding"],
@@ -354,8 +355,51 @@ class DirectDescriptionUpdate(unittest.TestCase):
         desc = self.written["description"]
         self.assertNotIn("old findings", desc)
         self.assertIn("commit=new-commit", desc)
-        self.assertEqual(desc.count("pr-reviewer:start"), 1,
+        self.assertEqual(desc.count("prism:start"), 1,
                          "the stale block must be replaced, not appended to")
+
+    def test_replaces_a_legacy_pr_reviewer_tagged_block(self):
+        """A description written by a pre-rebrand PRISM must be cleanly
+        replaced, not left duplicated alongside the new prism:-tagged one."""
+        legacy = ("<!-- pr-reviewer:start -->\n"
+                 "<!-- pr-reviewer:meta verdict=request-changes commit=old -->\n"
+                 "old findings\n<!-- pr-reviewer:end -->")
+        o.get_pr = lambda *a, **k: {"description": legacy}
+        o.update_description_direct(
+            "7", "Approve", "3", ["- new finding"],
+            verdict_key="approve", source_commit="new-commit")
+        desc = self.written["description"]
+        self.assertNotIn("old findings", desc)
+        self.assertNotIn("pr-reviewer:start", desc, "new writes use the prism: tag only")
+        self.assertEqual(desc.count("prism:start"), 1)
+
+    def test_findings_are_not_capped_at_twenty(self):
+        findings = [f"- finding {i}" for i in range(30)]
+        o.get_pr = lambda *a, **k: {"description": ""}
+        o.update_description_direct("7", "Approve", "3", findings, verdict_key="approve")
+        desc = self.written["description"]
+        for f in findings:
+            self.assertIn(f, desc)
+
+
+class PreviousReview(unittest.TestCase):
+    def test_no_stamp_returns_empty(self):
+        self.assertEqual(o.previous_review(""), {})
+        self.assertEqual(o.previous_review("just some text"), {})
+
+    def test_parses_the_current_stamp_shape(self):
+        desc = ("<!-- prism:start -->\n"
+               "<!-- prism:meta reviewer=PRISM verdict=approve commit=abc123 -->\n"
+               "---\n- a finding\n<!-- prism:end -->")
+        self.assertEqual(o.previous_review(desc),
+                         {"reviewer": "PRISM", "verdict": "approve", "commit": "abc123"})
+
+    def test_parses_the_legacy_stamp_shape(self):
+        desc = ("<!-- pr-reviewer:start -->\n"
+               "<!-- pr-reviewer:meta verdict=block commit=deadbeef -->\n"
+               "<!-- pr-reviewer:end -->")
+        self.assertEqual(o.previous_review(desc),
+                         {"verdict": "block", "commit": "deadbeef"})
 
 
 class PathLocks(unittest.TestCase):

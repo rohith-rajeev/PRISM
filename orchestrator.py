@@ -76,7 +76,14 @@ FINDING_RE = re.compile(r"^\s*-\s*\*\*\[(Critical|High|Medium|Low|Nit)\]", re.IG
 # pattern-matching the report so styled output can't hide the verdict line.
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
-DESC_BLOCK_RE = re.compile(r"<!-- pr-reviewer:start -->.*?<!-- pr-reviewer:end -->", re.DOTALL)
+# Matches both the current "prism:" tag and the legacy "pr-reviewer:" one a
+# PR's description may still carry from an older PRISM version, so a stale
+# block always gets replaced cleanly instead of accumulating duplicates.
+# New writes always use the "prism:" tag — see update_description_direct.
+DESC_BLOCK_RE = re.compile(
+    r"<!-- (?:pr-reviewer|prism):start -->.*?<!-- (?:pr-reviewer|prism):end -->",
+    re.DOTALL)
+DESC_META_RE = re.compile(r"<!-- (?:pr-reviewer|prism):meta\s+([^>]*?)-->")
 
 MERGEABLE_VERDICTS = ("approve", "approve with comments")
 
@@ -294,14 +301,17 @@ def parse_review_output(text: str) -> ReviewResult:
     if m2:
         res.impact_score = m2.group(1).strip()
         res.impact_reason = m2.group(2).strip()
-    # findings: keep the one-line bullets
+    # findings: keep the one-line bullets. The cap here is a defensive
+    # ceiling against a malformed/runaway line, not a working trim — the
+    # developer reading the PR description should see the finding in full,
+    # so this is generous rather than tight.
     for line in (text or "").splitlines():
         if FINDING_RE.match(line):
-            res.findings.append(line.strip()[:300])
+            res.findings.append(line.strip()[:800])
     # summary block
     ms = re.search(r"###\s*Summary\s*\n(.+)", text or "", re.IGNORECASE | re.DOTALL)
     if ms:
-        res.summary = ms.group(1).strip()[:2000]
+        res.summary = ms.group(1).strip()[:6000]
     return res
 
 
@@ -1030,17 +1040,22 @@ def update_description_direct(pr_id, verdict_text, impact, findings, region=REGI
 
     No agent call — the findings are already one-line bullets straight from
     the parsed review, so PRISM composes and writes this block itself.
+
+    Every finding is included untrimmed — the developer reading the PR
+    should see everything the reviewer found, not PRISM's guess at which
+    ones mattered. The only thing allowed to cut this down is CodeCommit's
+    own hard length limit below, and only when the content actually needs it.
     """
     pr = get_pr(pr_id, region=region)
     desc = DESC_BLOCK_RE.sub("", pr["description"] or "").strip()  # drop stale block
-    bullets = "\n".join(f"{b}" for b in (findings or [])[:20]) or "- (no discrete findings)"
-    stamp = (f"<!-- pr-reviewer:meta verdict={verdict_key or 'unknown'} "
+    bullets = "\n".join(f"{b}" for b in (findings or [])) or "- (no discrete findings)"
+    stamp = (f"<!-- prism:meta reviewer=PRISM verdict={verdict_key or 'unknown'} "
              f"commit={source_commit or 'unknown'} -->\n") if (verdict_key or source_commit) else ""
     header = (
-        "\n\n<!-- pr-reviewer:start -->\n" + stamp + "---\n"
-        f"**Automated review — {verdict_text} (impact {impact}/10)**\n"
+        "\n\n<!-- prism:start -->\n" + stamp + "---\n"
+        f"**PRISM review — {verdict_text} (impact {impact}/10)**\n"
     )
-    footer = "\n<!-- pr-reviewer:end -->"
+    footer = "\n<!-- prism:end -->"
     merged = (desc + header + bullets + footer).strip()
     if len(merged) > PR_DESCRIPTION_MAX:
         # CodeCommit hard-rejects oversized descriptions. Shrink the parts we
@@ -1063,6 +1078,27 @@ def update_description_direct(pr_id, verdict_text, impact, findings, region=REGI
     aws_cli("update-pull-request-description", "--pull-request-id", str(pr_id),
             "--description", merged, region=region)
     return merged
+
+
+def previous_review(description):
+    """The verdict/commit PRISM last recorded on this PR, if any.
+
+    Reads back the `prism:meta` (or legacy `pr-reviewer:meta`) stamp
+    `update_description_direct` writes — this is the durable state an
+    incremental review is built on: knowing what was already reviewed is
+    what lets a later pass scope itself to what changed since, instead of
+    re-reading the whole PR from scratch every time. Returns {} when no
+    stamp is present (a PR's first-ever review) or it doesn't parse.
+    """
+    m = DESC_META_RE.search(description or "")
+    if not m:
+        return {}
+    out = {}
+    for part in m.group(1).split():
+        key, sep, value = part.partition("=")
+        if sep and key:
+            out[key] = value
+    return out
 
 
 def check_ff_mergeable(repo_name, dest, src, region=REGION_DEFAULT):
