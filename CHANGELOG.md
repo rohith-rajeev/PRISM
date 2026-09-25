@@ -22,7 +22,6 @@ release, so keep entries short and about what you'd actually notice.
 - **Two jobs run at a time now, not three** — the rest queue and start
   automatically as before, just with a smaller live window to stay clear
   of provider rate limits.
-- Manual updated to match all of the above.
 
 ## v3.2
 
