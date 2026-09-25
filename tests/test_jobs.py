@@ -63,14 +63,35 @@ class RetryTests(unittest.TestCase):
     def setUp(self):
         self.m = J.JobManager(queue.Queue(), runner=lambda **k: {})
 
-    def test_retrying_a_finished_job_creates_a_new_one_with_the_same_spec(self):
+    def test_retrying_a_finished_job_reruns_it_in_place(self):
         job = self.m.create(spec("214"))
         job.status = J.DONE
+        job.verdict_raw = "Approve"
+        job.verdict_key = "approve"
+        job.impact = "2/10"
+        job.append_log("some previous output")
+        job.result = {"merged": True}
+        job.error = "stale"
         retried = self.m.retry(job.id)
         self.assertIsNotNone(retried)
-        self.assertNotEqual(retried.id, job.id)
+        self.assertIs(retried, job, "retry must reuse the same job, not create a new one")
+        self.assertEqual(retried.id, job.id)
+        self.assertEqual(len(self.m.jobs), 1, "no extra row should appear")
         self.assertEqual(retried.spec, job.spec)
         self.assertEqual(retried.status, J.QUEUED)
+        self.assertEqual(retried.verdict_raw, "")
+        self.assertEqual(retried.verdict_key, "")
+        self.assertEqual(retried.impact, "")
+        self.assertEqual(len(retried.log), 0)
+        self.assertIsNone(retried.result)
+        self.assertIsNone(retried.error)
+
+    def test_retrying_drops_a_leftover_pending_note(self):
+        job = self.m.create(spec("214"))
+        job.queue_note("stale note from the last run")
+        job.status = J.DONE
+        self.m.retry(job.id)
+        self.assertIsNone(job.pop_note())
 
     def test_retrying_an_active_job_is_a_no_op(self):
         job = self.m.create(spec("214"))
@@ -93,6 +114,13 @@ class RetryTests(unittest.TestCase):
             job = self.m.create(spec(f"pr-{status}"))
             job.status = status
             self.assertIsNotNone(self.m.retry(job.id), f"retry failed for {status}")
+
+
+class DefaultConcurrencyTests(unittest.TestCase):
+    def test_default_max_parallel_is_two(self):
+        self.assertEqual(J.MAX_PARALLEL_JOBS, 2)
+        m = J.JobManager(queue.Queue(), runner=lambda **k: {})
+        self.assertEqual(m.max_parallel, 2)
 
 
 class SchedulerTests(unittest.TestCase):
@@ -130,6 +158,32 @@ class SchedulerTests(unittest.TestCase):
         time.sleep(0.2)
         self.assertEqual(self.m.running_count, 3)
         self.assertEqual(len(self.started), 4)
+
+
+class SteeringNoteTests(unittest.TestCase):
+    def test_queue_and_pop_round_trip(self):
+        job = J.Job(1, spec(), queue.Queue())
+        self.assertIsNone(job.pop_note())
+        job.queue_note("  focus on auth  ")
+        self.assertEqual(job.pop_note(), "focus on auth")
+        self.assertIsNone(job.pop_note(), "popping must clear it")
+
+    def test_blank_note_is_a_no_op(self):
+        job = J.Job(1, spec(), queue.Queue())
+        job.queue_note("   ")
+        self.assertIsNone(job.pop_note())
+
+    def test_worker_is_handed_a_get_note_callback(self):
+        q = queue.Queue()
+        captured = {}
+        def runner(**kw):
+            captured["has_get_note"] = callable(kw.get("get_note"))
+            return {}
+        m = J.JobManager(q, runner=runner)
+        job = m.create(spec())
+        m.pump()
+        job.thread.join(timeout=5)
+        self.assertTrue(captured.get("has_get_note"))
 
 
 class RoutingTests(unittest.TestCase):

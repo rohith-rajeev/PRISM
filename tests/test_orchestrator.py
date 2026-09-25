@@ -520,6 +520,8 @@ class IncrementalReview(unittest.TestCase):
         o.ensure_bundled_agents = lambda *a, **k: None
         o.require_engine = lambda: "opencode"
         o.engine_supports_json = lambda exe: False
+        o.get_pr = lambda *a, **k: {"sourceReference": "feat/x",
+                                    "destinationReference": "main"}
 
         def fake_stream(cmd, cwd, emit, control=None, json_mode=False, meter=None):
             captured["prompt"] = cmd[-1]
@@ -535,6 +537,8 @@ class IncrementalReview(unittest.TestCase):
         self.assertIn("INCREMENTAL", captured["prompt"])
         self.assertIn("old123", captured["prompt"])
         self.assertIn("prior finding", captured["prompt"])
+        self.assertIn("feat/x", captured["prompt"])
+        self.assertIn("main", captured["prompt"])
 
     def test_run_opencode_review_prompt_is_plain_without_previous_context(self):
         importlib.reload(o)
@@ -544,6 +548,8 @@ class IncrementalReview(unittest.TestCase):
         o.ensure_bundled_agents = lambda *a, **k: None
         o.require_engine = lambda: "opencode"
         o.engine_supports_json = lambda exe: False
+        o.get_pr = lambda *a, **k: {"sourceReference": "feat/x",
+                                    "destinationReference": "main"}
 
         def fake_stream(cmd, cwd, emit, control=None, json_mode=False, meter=None):
             captured["prompt"] = cmd[-1]
@@ -552,6 +558,47 @@ class IncrementalReview(unittest.TestCase):
         o.run_opencode_review("7", "repo", "/tmp/repo", "/tmp/proj",
                               emit=lambda *a, **k: None)
         self.assertNotIn("INCREMENTAL", captured["prompt"])
+        self.assertIn("feat/x", captured["prompt"])
+        self.assertIn("main", captured["prompt"])
+
+    def test_run_opencode_review_prompt_includes_custom_instructions(self):
+        importlib.reload(o)
+        self.addCleanup(importlib.reload, o)
+        captured = {}
+        o._incremental_context = lambda *a, **k: None
+        o.ensure_bundled_agents = lambda *a, **k: None
+        o.require_engine = lambda: "opencode"
+        o.engine_supports_json = lambda exe: False
+        o.get_pr = lambda *a, **k: {}
+
+        def fake_stream(cmd, cwd, emit, control=None, json_mode=False, meter=None):
+            captured["prompt"] = cmd[-1]
+            return 0, "**Verdict:** OK Approve\n", "sid"
+        o._run_stream_resilient = fake_stream
+        o.run_opencode_review("7", "repo", "/tmp/repo", "/tmp/proj",
+                              emit=lambda *a, **k: None,
+                              custom_instructions="focus on the auth changes")
+        self.assertIn("focus on the auth changes", captured["prompt"])
+
+    def test_run_opencode_review_prompt_omits_branches_when_lookup_fails(self):
+        importlib.reload(o)
+        self.addCleanup(importlib.reload, o)
+        captured = {}
+        o._incremental_context = lambda *a, **k: None
+        o.ensure_bundled_agents = lambda *a, **k: None
+        o.require_engine = lambda: "opencode"
+        o.engine_supports_json = lambda exe: False
+        def boom(*a, **k):
+            raise RuntimeError("no aws cli")
+        o.get_pr = boom
+
+        def fake_stream(cmd, cwd, emit, control=None, json_mode=False, meter=None):
+            captured["prompt"] = cmd[-1]
+            return 0, "**Verdict:** OK Approve\n", "sid"
+        o._run_stream_resilient = fake_stream
+        o.run_opencode_review("7", "repo", "/tmp/repo", "/tmp/proj",
+                              emit=lambda *a, **k: None)
+        self.assertNotIn("Source branch", captured["prompt"])
 
 
 @unittest.skipUnless(shutil.which("git"), "git is not on PATH")

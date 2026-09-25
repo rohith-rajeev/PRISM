@@ -19,8 +19,10 @@ from orchestrator import REGION_DEFAULT, RunControl, full_pipeline
 
 # Each job is a full agent run — model calls, AWS, git. Running an unbounded
 # number at once invites provider rate limits and spawns unbounded child
-# processes, so extra jobs queue and start as slots free.
-MAX_PARALLEL_JOBS = 3
+# processes, so extra jobs queue and start as slots free. Three live jobs
+# turned out to be enough to make model/API rate limits bite in practice —
+# two stays comfortably under them, with the rest queued instead of stalling.
+MAX_PARALLEL_JOBS = 2
 
 # Per-job ring buffer. 5,000 lines renders in ~8 ms when switching jobs and
 # costs roughly half a megabyte.
@@ -52,6 +54,7 @@ class JobSpec:
     do_sync: bool = True
     dry_run: bool = False
     webhook_url: str = None
+    custom_instructions: str = ""
 
     @property
     def label(self):
@@ -83,7 +86,8 @@ class JobSpec:
                     region=self.region, model=self.model,
                     do_review=self.do_review, do_update_desc=self.do_update_desc,
                     do_merge=self.do_merge, do_sync=self.do_sync, dry_run=self.dry_run,
-                    webhook_url=self.webhook_url)
+                    webhook_url=self.webhook_url,
+                    custom_instructions=self.custom_instructions)
 
 
 class AskBridge:
@@ -141,11 +145,32 @@ class Job:
         self.control = RunControl()
         self.ask = AskBridge(self)
         self.thread = None
+        self._note_lock = threading.Lock()
+        self._pending_note = None
 
     # ----- plumbing -----
     def emit_event(self, kind, payload):
         """Post to the UI queue. Called from the worker thread only."""
         self._out_q.put((self.id, kind, payload))
+
+    def queue_note(self, text):
+        """UI thread: leave a steering note for the worker to pick up.
+
+        There is no live channel into an agent turn already in flight (see
+        pop_note), so the note waits here until the pipeline next checks for
+        one — between agent turns, not mid-turn.
+        """
+        text = (text or "").strip()
+        if not text:
+            return
+        with self._note_lock:
+            self._pending_note = text
+
+    def pop_note(self):
+        """Worker thread: take and clear the pending note, if any."""
+        with self._note_lock:
+            note, self._pending_note = self._pending_note, None
+            return note
 
     def append_log(self, text, tag=None):
         """The single place log lines are recorded.
@@ -239,22 +264,44 @@ class JobManager:
         return job
 
     def retry(self, job_id):
-        """Start a fresh job from a finished one's exact spec.
+        """Rerun a finished job in place — same id, row and spec.
 
-        Same repo, PR id, flags and model — nothing to retype. The new job's
-        own review automatically scopes itself to what changed since PRISM's
-        last completed review of this PR (orchestrator._incremental_context),
-        backed by PRISM's own local record of what it actually reviewed, so
-        a retry costs no more context-setup than any other job.
+        Same repo, PR id, flags and model — nothing to retype, and nothing
+        new added to the jobs list either: the existing row just goes back
+        to queued with its log and verdict cleared. The rerun automatically
+        scopes itself to what changed since PRISM's last completed review of
+        this PR (orchestrator._incremental_context), backed by PRISM's own
+        local record of what it actually reviewed, so a retry costs no more
+        context-setup than any other job.
 
         None for a job that isn't finished yet (nothing to retry) or doesn't
         exist. Raises DuplicateJob exactly like create() when another active
         job already covers this PR — retry is not a way around that guard.
+        The job being retried is itself terminal at this point, so it can
+        never be the one duplicate_of() finds.
         """
         job = self.jobs.get(job_id)
         if job is None or not job.is_terminal:
             return None
-        return self.create(job.spec)
+        dup = self.duplicate_of(job.spec)
+        if dup is not None:
+            raise DuplicateJob(
+                f"{job.spec.label} is already being reviewed (job #{dup.id}).")
+        job.status = QUEUED
+        job.stages = {}
+        job.verdict_raw = ""
+        job.verdict_key = ""
+        job.impact = ""
+        job.tokens = {}
+        job.pending_question = None
+        job.result = None
+        job.error = None
+        job.log.clear()
+        job.control = RunControl()
+        job.ask = AskBridge(job)
+        job.thread = None
+        job.pop_note()   # drop any note left over from the previous run
+        return job
 
     # ----- scheduling -----
     @property
@@ -284,7 +331,7 @@ class JobManager:
             summary = self._runner(
                 emit=lambda m, tag=None: job.emit_event("log", (m, tag)),
                 progress=lambda stage, state: job.emit_event("progress", (stage, state)),
-                control=job.control, ask=job.ask.ask,
+                control=job.control, ask=job.ask.ask, get_note=job.pop_note,
                 **job.spec.pipeline_kwargs())
             # "tokens" is a small dict for the UI to render directly; every
             # other field is a short display string, same as before.

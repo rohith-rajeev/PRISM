@@ -7,7 +7,7 @@ no pip packages) that reviews AWS CodeCommit pull requests end-to-end for
 ## Jobs
 Each pull request runs as its own **job**, and several run at once. PRISM opens
 on a jobs list showing every job's status, verdict and impact; clicking one
-opens the detailed view (progress, conversation, agent questions, Stop). Three
+opens the detailed view (progress, conversation, agent questions, Stop). Two
 jobs run concurrently by default and the rest queue, starting automatically as
 slots free.
 
@@ -67,10 +67,15 @@ all. The Merge caption switches to "Syncing…" when a fast-forward needs a
 destination→source sync first.
 
 **Stop** cancels at any point — it terminates the running child process and
-returns to idle. If the reviewer asks a question (missing PR id, ambiguous
-source branch), a **Reviewer needs your input** panel appears with the
-question and a free-text box, and your reply goes straight back into the same
-agent session.
+returns to idle. Source and destination branches are resolved by PRISM
+itself from the PR id, so the agent is never left guessing which one is
+which; if it asks a question for some other reason, a **Reviewer needs your
+input** panel appears with the question and a free-text box, and your reply
+goes straight back into the same agent session. A second box, always
+available while a job is active, lets you hand it a steering instruction of
+your own at any point — no need to wait for it to ask first — and a
+**Custom instructions** field on the new-job screen does the same before a
+review even starts.
 
 ## Run
 
@@ -139,14 +144,15 @@ with.
 Optional and off by default. Paste a Google Chat webhook URL into **Help**
 and click **Save** — it's a machine-wide setting stored once in
 `~/.prism/config.json`, not a per-job option, and every job created from
-then on picks it up automatically. When a job finishes it posts one small
-card: the verdict and impact score (only when review actually ran —
-skipped review shows as "Skipped by configuration", never a fabricated
-verdict) and whether it was merged, with a short reason when it wasn't.
-Posting is entirely PRISM's own HTTP call, no agent involved, and it never
-affects the job it's reporting on: a slow, misconfigured, or unreachable
-webhook is swallowed and logged as a warning, not a failure. Leave the field
-empty to turn it off — nothing else about PRISM changes.
+then on picks it up automatically. A card is posted only when the run
+produced a real, parseable verdict — Approve, Approve with comments, Request
+changes, or Block — with the verdict, impact score and whether it was
+merged, plus a short reason when it wasn't. A skipped review, a verdict
+PRISM couldn't parse, or an internal error never posts — those aren't review
+outcomes. Posting is entirely PRISM's own HTTP call, no agent involved, and
+it never affects the job it's reporting on: a slow, misconfigured, or
+unreachable webhook is swallowed and logged as a warning, not a failure.
+Leave the field empty to turn it off — nothing else about PRISM changes.
 
 ## Updating
 `?  Help` → `Check for updates` asks GitHub for the latest release. If it is
