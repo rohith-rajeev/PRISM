@@ -52,6 +52,12 @@ data "aws_iam_policy_document" "pr_merge_notifier" {
   }
 
   statement {
+    sid       = "ReadBranchTip"
+    actions   = ["codecommit:GetBranch"]
+    resources = local.watched_repository_arns
+  }
+
+  statement {
     sid       = "WriteThreadMapping"
     actions   = ["dynamodb:PutItem"]
     resources = [aws_dynamodb_table.pr_deploy_threads.arn]
@@ -82,6 +88,12 @@ data "aws_iam_policy_document" "deployment_notifier" {
     sid       = "ReadPipelineExecutions"
     actions   = ["codepipeline:GetPipelineExecution"]
     resources = local.watched_pipeline_arns
+  }
+
+  statement {
+    sid       = "ReadCommitAuthor"
+    actions   = ["codecommit:GetCommit"]
+    resources = local.watched_repository_arns
   }
 
   statement {

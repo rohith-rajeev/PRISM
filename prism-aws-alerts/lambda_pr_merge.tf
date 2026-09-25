@@ -45,7 +45,7 @@ resource "aws_cloudwatch_event_rule" "pr_merged" {
     source      = ["aws.codecommit"]
     detail-type = ["CodeCommit Pull Request State Change"]
     detail = {
-      event                = ["pullRequestStatusChanged"]
+      event                = ["pullRequestMergeStatusUpdated"]
       isMerged             = ["True"]
       repositoryNames      = var.watched_repositories
       destinationReference = [for b in local.watched_branches : "refs/heads/${b}"]

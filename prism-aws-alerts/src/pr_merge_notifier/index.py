@@ -91,6 +91,20 @@ def handler(event, context):
     target_meta = _find_target(pr, repo_name, destination_reference)
     merge_commit_id = (target_meta.get("mergeMetadata") or {}).get("mergeCommitId")
 
+    if not merge_commit_id:
+        # Some merges land via a direct push to the destination branch rather than
+        # CodeCommit's Merge Pull Request action (CodeCommit then auto-closes the
+        # PR via UpdatePullRequestStatus), which never populates
+        # mergeMetadata.mergeCommitId. Fall back to the branch's current tip - the
+        # only value guaranteed to match what CodePipeline later reports as its
+        # source revision for this deployment.
+        try:
+            merge_commit_id = codecommit.get_branch(
+                repositoryName=repo_name, branchName=branch
+            )["branch"]["commitId"]
+        except Exception as exc:
+            print(f"WARNING: could not resolve branch tip for {repo_name}@{branch}: {exc}")
+
     title = pr.get("title") or "(no title)"
     author_arn = pr.get("authorArn", "")
     author = author_arn.split("/")[-1] if author_arn else "unknown"
