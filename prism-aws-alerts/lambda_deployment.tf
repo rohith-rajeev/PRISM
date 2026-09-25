@@ -22,10 +22,11 @@ resource "aws_lambda_function" "deployment_notifier" {
 
   environment {
     variables = {
-      CHAT_TARGETS_JSON         = jsonencode(var.chat_targets)
-      PIPELINE_BRANCHES_JSON    = jsonencode(var.pipeline_branches)
-      DYNAMODB_TABLE_NAME       = aws_dynamodb_table.pr_deploy_threads.name
-      POST_UNLINKED_DEPLOYMENTS = tostring(var.post_unlinked_deployments)
+      CHAT_TARGETS_JSON          = jsonencode(var.chat_targets)
+      PIPELINE_BRANCHES_JSON     = jsonencode(var.pipeline_branches)
+      PIPELINE_REPOSITORIES_JSON = jsonencode(var.pipeline_repositories)
+      DYNAMODB_TABLE_NAME        = aws_dynamodb_table.pr_deploy_threads.name
+      POST_UNLINKED_DEPLOYMENTS  = tostring(var.post_unlinked_deployments)
     }
   }
 

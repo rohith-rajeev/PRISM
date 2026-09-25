@@ -2141,6 +2141,15 @@ class App(tk.Tk):
                                 ("Merge PR", self.mrg_var, False),
                                 ("Dry run — skip writes and merges", self.dry_var, True)):
             CheckRow(mi, txt, var, muted=muted).pack(anchor="w")
+        self._lab(mi, "Custom instructions (optional)").pack(anchor="w", pady=(6, 2))
+        self.instr_text = tk.Text(mi, height=3, font=FONT_S, bg=PAL["field"],
+                                  fg=PAL["text"], insertbackground=PAL["text"],
+                                  relief="flat", wrap="word", highlightthickness=1,
+                                  highlightbackground=PAL["border"],
+                                  highlightcolor=PAL["accent"])
+        self.instr_text.pack(fill="x")
+        self._lab(mi, "e.g. \"focus on the auth changes\" or \"skip the generated files\"",
+                  font=FONT_XS).pack(anchor="w", pady=(2, 0))
         self._sync_review_dependency()
         self._place_midrow()
 
@@ -2197,6 +2206,26 @@ class App(tk.Tk):
                                    bg=PAL["card"], fg=PAL["muted"], anchor="w",
                                    justify="left")
         self.tokens_val.grid(row=1, column=2, sticky="ew")
+
+        # ---- steering note: an instruction the reviewer picks up at its next
+        # turn, without waiting for it to ask something first. Always in the
+        # layout; greyed out once the job can no longer act on one. ----
+        nc = RoundedCard(root)
+        self._note_card = nc
+        nc.pack(fill="x", pady=(0, 6))
+        ni = nc.inner
+        ni.config(padx=12, pady=6)
+        nrow = tk.Frame(ni, bg=PAL["card"])
+        nrow.pack(fill="x")
+        self.note_entry = self._entry(nrow)
+        self.note_entry.pack(side="left", fill="x", expand=True, ipady=3, padx=(0, 8))
+        _add_placeholder(self.note_entry,
+                         "Add an instruction — the reviewer picks it up at its next turn…")
+        self.note_entry.bind("<Return>", lambda _e: self._send_note())
+        self.note_send_btn = RoundedButton(nrow, text="Send note", command=self._send_note,
+                                           style="outline", height=30, width=90,
+                                           font=FONT_S)
+        self.note_send_btn.pack(side="left")
 
         # ---- agent conversation (packed only while a question is open) ----
         self.agent_panel = AgentPanel(root, on_send=self._answer_agent,
@@ -2713,7 +2742,8 @@ class App(tk.Tk):
             # next job without needing a restart — and still gets frozen
             # into this one job's own spec once created, same as everything
             # else here.
-            webhook_url=CFG.get_webhook_url() or None)
+            webhook_url=CFG.get_webhook_url() or None,
+            custom_instructions=self.instr_text.get("1.0", "end").strip())
 
     def _populate_form(self, spec):
         """Seed the form from a previous job — usually only the PR id changes."""
@@ -2729,6 +2759,8 @@ class App(tk.Tk):
         self.mrg_var.set(spec.do_merge)
         self.syn_var.set(spec.do_sync)
         self.dry_var.set(spec.dry_run)
+        self.instr_text.delete("1.0", "end")
+        self.instr_text.insert("1.0", spec.custom_instructions or "")
         self._refresh_detection()
         if self.mode != "multi":
             self.repo_var.set(spec.repo_name)
@@ -2845,6 +2877,9 @@ class App(tk.Tk):
             self.stop_btn.set_command(self._stop)
             self.stop_btn.set_enabled(job.is_active)
         self._render_log(job)
+        note_enabled = job.is_active
+        self.note_entry.config(state="normal" if note_enabled else "disabled")
+        self.note_send_btn.set_enabled(note_enabled)
         if job.pending_question:
             # The ask event already fired while this job was unselected, so the
             # panel has to be driven from stored state, not from the event.
@@ -2898,6 +2933,20 @@ class App(tk.Tk):
         job.ask.resolve(message)
         self._refresh_jobs_list()
         self._refresh_pill()
+
+    def _send_note(self):
+        job = self.manager.jobs.get(self.selected_job_id)
+        if job is None or not job.is_active:
+            return
+        text = _entry_value(self.note_entry).strip()
+        if not text:
+            return
+        job.queue_note(text)
+        job.append_log(f"📝 Note queued — the reviewer picks it up at its next turn: "
+                       f"{text[:200]}", "warn")
+        self.note_entry.delete(0, "end")
+        _restore_placeholder(self.note_entry)
+        self._render_log(job)
 
     # ---------------- the pump ----------------
     def _drain_logs(self):

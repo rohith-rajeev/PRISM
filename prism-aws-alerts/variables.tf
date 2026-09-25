@@ -53,6 +53,19 @@ variable "pipeline_branches" {
   }
 }
 
+variable "pipeline_repositories" {
+  description = "Map of CodePipeline pipeline name -> the CodeCommit repository it deploys from. Used to look up the deploying commit's author for deployment alerts, independent of whether a PR-merge thread was recorded (e.g. if the merge alert never posted). Placeholder values below - override for your account."
+  type        = map(string)
+  default = {
+    "your-backend-pipeline-qa"    = "your-backend-repo"
+    "your-backend-pipeline-stg"   = "your-backend-repo"
+    "your-backend-pipeline-prod"  = "your-backend-repo"
+    "your-frontend-pipeline-qa"   = "your-frontend-repo"
+    "your-frontend-pipeline-stg"  = "your-frontend-repo"
+    "your-frontend-pipeline-prod" = "your-frontend-repo"
+  }
+}
+
 variable "thread_ttl_days" {
   description = "How many days a stored PR-merge -> Google Chat thread mapping is kept in DynamoDB before it expires (TTL)."
   type        = number

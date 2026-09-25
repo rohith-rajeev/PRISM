@@ -43,11 +43,17 @@ sets itself up accordingly:
 > The repository name box is editable on purpose: the name in AWS can differ
 > from your local folder name.
 
-**3. Enter the PR id** — just the number, e.g. `214`.
+**3. Enter the PR id** — just the number, e.g. `214`. That's the only thing
+PRISM needs to find the PR: it looks up the source and destination branches
+itself from the PR id and repository, so you never have to type a branch name.
 
 **4. Check the region** (defaults to `us-east-1`).
 
-**5. Click `▶ Start Prisming`.**
+**5. (Optional) Add custom instructions.** A free-text box under the model
+picker lets you steer the review — "focus on the auth changes", "skip the
+generated files", anything relevant. Leave it empty for an ordinary review.
+
+**6. Click `▶ Start Prisming`.**
 
 That's it. PRISM opens the job's detail view and starts working.
 
@@ -107,14 +113,24 @@ The reviewer's reasoning is in the conversation panel.
 
 ## When the reviewer asks you something
 
-Sometimes it needs your input — a missing detail, or two branches that could
-both be the source. A **`💬 Reviewer needs your input`** panel appears with the
-question and a text box.
+Sometimes it needs your input — a genuinely missing detail the PR itself
+doesn't make clear. (Source and destination branches are not one of these —
+PRISM resolves them itself from the PR id, so you're never asked to pick
+between two branches.) A **`💬 Reviewer needs your input`** panel appears with
+the question and a text box.
 
 Type a normal sentence and press **Enter** (or click `Send ▸`). The job carries
 on with your answer.
 
 Click **`Skip`** if you'd rather not answer — the job finishes with what it has.
+
+**Steering a review while it runs.** You don't have to wait for the reviewer
+to ask you something — the detail screen always has an **"Add an
+instruction…"** box above the conversation panel, enabled for as long as the
+job is active. Type a note and click `Send note` (or press Enter); the
+reviewer picks it up at its next turn — right after the current step it's on
+finishes, not mid-thought. It's handed over the same way a typed answer is,
+so anything you'd say to steer the review works here too.
 
 **Merge conflicts appear here too.** If syncing your branch with its base hits a
 conflict, PRISM does not resolve it. It undoes the merge, leaves your clone
@@ -136,7 +152,7 @@ If this happens while you're looking at a different job, that job shows
 
 ## Running several PRs at once
 
-Create as many jobs as you like. **Three run at a time**; the rest wait their
+Create as many jobs as you like. **Two run at a time**; the rest wait their
 turn and start automatically.
 
 The jobs list shows every job at a glance:
@@ -177,8 +193,10 @@ one repo usually means changing only the PR id.
 ### Retrying a job
 
 Once a job is finished, its `Stop` button becomes **`↻ Retry`** — in the jobs
-list, and on the job's own detail screen. Click it to start a fresh job with
-the exact same repo, PR id and settings; nothing to retype.
+list, and on the job's own detail screen. Click it to rerun that same job —
+same row, same repo, PR id and settings; nothing to retype, and nothing new
+added to the list. Its previous log and verdict are cleared and it goes
+straight back to queued (or running, if a slot is free).
 
 This is the normal way to handle "Request changes": fix the PR, come back,
 click `↻ Retry`. PRISM recognizes it has already reviewed this PR and scopes
@@ -210,11 +228,20 @@ right before it merges, review or no review.
 
 The **Model** picker is optional — leave it alone to use the default.
 
+**Custom instructions**, just below it, is a free-text box — optional, and
+empty by default. Anything you write there is handed to the reviewer
+alongside its usual workflow, for that job only.
+
 **Google Chat notifications**, on the Help screen, are also optional and off
 by default. Paste in a webhook URL and click Save once — it applies to
-every job from then on, not just the one you're about to run. Each finished
-job posts one small card: the PR author, verdict + impact (when review ran),
-and whether it merged. Leave the field empty to turn it off again.
+every job from then on, not just the one you're about to run. A card is
+posted **only when the reviewer produced a real, parseable verdict** —
+Approve, Approve with comments, Request changes, or Block — with the PR
+author, verdict, impact, and whether it merged. A skipped review, a run
+whose verdict PRISM couldn't parse, or an internal error never posts —
+those aren't review outcomes, and the group chat doesn't need to see them
+next to real ones. Leave the webhook field empty to turn notifications off
+entirely.
 
 ---
 

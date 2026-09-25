@@ -1016,20 +1016,41 @@ def _incremental_context(pr_id, repo_name, local_repo, region=REGION_DEFAULT,
 
 def run_opencode_review(pr_id, repo_name, local_repo, project_dir,
                         region=REGION_DEFAULT, emit=_emit_plain, model=None,
-                        control=None, meter=None):
+                        control=None, meter=None, custom_instructions=""):
     """Step 1: trigger the pr-reviewer agent. Returns raw agent output."""
     exe = require_engine()
     ensure_bundled_agents(project_dir, emit=emit)
     agent = AGENT_REVIEWER
     incremental = _incremental_context(pr_id, repo_name, local_repo, region=region,
                                        emit=emit)
+
+    # Resolved here, from the PR id alone, so the agent is actually handed
+    # the branches its own instructions (agents/pr-reviewer.md's "Inputs"
+    # section) already claim are "already resolved for you" — previously
+    # that line was aspirational: the prompt never carried them, leaving the
+    # agent to work them out itself and sometimes ask the user which branch
+    # was which. Best-effort: a lookup failure here still lets the agent
+    # fall back to resolving them on its own, exactly as before.
+    try:
+        pr_meta = get_pr(pr_id, region=region)
+        source_ref = pr_meta.get("sourceReference") or ""
+        dest_ref = pr_meta.get("destinationReference") or ""
+    except Exception:  # noqa: BLE001
+        source_ref = dest_ref = ""
+    branch_line = (f"Source branch: {source_ref}. Destination branch: {dest_ref}. "
+                   if source_ref and dest_ref else "")
+    instructions_line = (
+        f"Additional instructions from the person running this review — follow "
+        f"them alongside your usual workflow: {custom_instructions.strip()} "
+        if custom_instructions and custom_instructions.strip() else "")
+
     if incremental:
         emit(f"▸ Incremental review since {incremental['commit'][:8]} "
              f"(previous verdict: {incremental['verdict']}).")
         prompt = (
             f"Review CodeCommit pull request {pr_id} in CodeCommit repository "
             f"'{repo_name}' (AWS region {region}). Local clone path: {local_repo}. "
-            f"Run directory: {project_dir}. "
+            f"Run directory: {project_dir}. " + branch_line +
             f"This is an INCREMENTAL review — PRISM already reviewed commit "
             f"{incremental['commit']} on this PR (verdict: {incremental['verdict']}). "
             f"That review's recorded findings:\n{incremental['block']}\n\n"
@@ -1039,15 +1060,17 @@ def run_opencode_review(pr_id, repo_name, local_repo, project_dir,
             f"above was addressed, and do a quick --stat-level skim of any files outside "
             f"that delta solely to catch a newly introduced critical/blocker issue — not a "
             f"full re-review of files the delta didn't touch. Report the verdict in chat as "
-            f"usual, then stop and ask about updating the PR description."
+            f"usual, then stop and ask about updating the PR description. "
+            + instructions_line
         )
     else:
         prompt = (
             f"Review CodeCommit pull request {pr_id} in CodeCommit repository "
             f"'{repo_name}' (AWS region {region}). Local clone path: {local_repo}. "
-            f"Run directory: {project_dir}. "
+            f"Run directory: {project_dir}. " + branch_line +
             f"Follow your pr-reviewer workflow and report the verdict in chat, "
-            f"then stop and ask about updating the PR description."
+            f"then stop and ask about updating the PR description. "
+            + instructions_line
         )
     # No --session/--continue: a plain run always creates a fresh session, and
     # --format json is what lets us capture its id for the follow-up turns.
@@ -1673,7 +1696,7 @@ def _run_pipeline(project_dir, repo_name, pr_id, local_repo=None,
                   region=REGION_DEFAULT, do_review=True,
                   do_update_desc=True, do_merge=True, do_sync=True,
                   dry_run=False, model=None, progress=None, emit=_emit_plain,
-                  control=None, ask=None):
+                  control=None, ask=None, custom_instructions="", get_note=None):
     """Run the whole review → describe → merge pipeline. Returns dict summary.
 
     Project-agnostic: works with any CodeCommit repo + local clone.
@@ -1688,6 +1711,11 @@ def _run_pipeline(project_dir, repo_name, pr_id, local_repo=None,
     treated as an explicit approval rather than an unparsed verdict.
     `do_update_desc` has nothing to describe without a review and is
     forced off in that case regardless of what was asked for.
+
+    `custom_instructions` steers the review from the start; `get_note` (if
+    given) is polled between agent turns for a note left by the user after
+    the job started — see the clarify-round loop below, which handles both
+    that and the agent's own clarifying questions the same way.
     """
     if not do_review:
         do_update_desc = False
@@ -1729,28 +1757,41 @@ def _run_pipeline(project_dir, repo_name, pr_id, local_repo=None,
         emit("\n═══ STEP 1 — AI review ═══")
         raw, session_id = run_opencode_review(pr_id, repo_name, local_clone, project_dir,
                                               region=region, emit=emit, model=model,
-                                              control=control, meter=meter)
+                                              control=control, meter=meter,
+                                              custom_instructions=custom_instructions)
         review = parse_review_output(raw)
 
-        # The agent stops and asks when something is missing or ambiguous. Rather
-        # than dead-ending on "no verdict", hand the question to the UI and feed
-        # the answer back into the same session.
+        # Two reasons to hand the agent another turn before moving on: it
+        # stopped and asked something itself (missing/ambiguous detail —
+        # hand the question to the UI and feed the answer back), or the user
+        # left a steering note after the job started (get_note). Checked
+        # every round so a note dropped in while an earlier question is being
+        # answered still gets picked up on the next pass, up to the same cap.
         rounds = 0
-        while ask is not None and rounds < MAX_CLARIFY_ROUNDS:
-            if review.verdict_key and review.verdict_key != "unknown":
-                break
-            question = extract_question(raw)
-            if not question:
-                break
-            ck()
-            emit("\n💬 The reviewer is asking a question — waiting for your reply …")
-            answer = ask(question)
-            ck()
-            if not answer:
-                emit("▸ No reply given; continuing without one.")
-                break
+        while rounds < MAX_CLARIFY_ROUNDS:
+            note = get_note() if get_note else None
+            if not note:
+                if ask is None:
+                    break
+                if review.verdict_key and review.verdict_key != "unknown":
+                    break
+                question = extract_question(raw)
+                if not question:
+                    break
+                ck()
+                emit("\n💬 The reviewer is asking a question — waiting for your reply …")
+                answer = ask(question)
+                ck()
+                if not answer:
+                    emit("▸ No reply given; continuing without one.")
+                    break
+                emit(f"▸ You: {answer[:300]}")
+            else:
+                ck()
+                emit(f"\n📝 Steering note added mid-review — handing it to the reviewer: "
+                     f"{note[:300]}")
+                answer = note
             rounds += 1
-            emit(f"▸ You: {answer[:300]}")
             _rc, raw, session_id = _continue_turn(answer, project_dir, session_id,
                                                   emit, model, control, what="reply",
                                                   meter=meter)
@@ -2013,11 +2054,19 @@ def _stopped_reason(stopped):
     return _STOPPED_LABEL.get(stopped, stopped.replace("-", " "))
 
 
+# The only outcomes worth a Chat notification: a real, parsed verdict from
+# the reviewer. "skipped" (do_review=False) and "unknown" (no verdict could
+# be parsed from the agent's output) are both explicitly excluded — neither
+# is something the group chat should see next to an actual review outcome.
+_NOTIFIABLE_VERDICTS = {"approve", "approve-with-comments", "request-changes", "block"}
+
+
 def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
                   region=REGION_DEFAULT, do_review=True,
                   do_update_desc=True, do_merge=True, do_sync=True,
                   dry_run=False, model=None, webhook_url=None, progress=None,
-                  emit=_emit_plain, control=None, ask=None):
+                  emit=_emit_plain, control=None, ask=None,
+                  custom_instructions="", get_note=None):
     """Run the pipeline (see _run_pipeline), then post a brief outcome
     summary to Google Chat if a webhook is configured.
 
@@ -2033,7 +2082,9 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
     already surfaced to the person running PRISM through the job's own log/
     status (see jobs.py JobManager._work). Spamming the group chat with
     infrastructure noise indistinguishable from a real verdict was worse
-    than saying nothing.
+    than saying nothing. The same reasoning excludes a run whose verdict
+    could not be parsed, and one where review was skipped entirely — see
+    _NOTIFIABLE_VERDICTS.
     """
     # No try/except here on purpose: a hard failure propagates untouched
     # (Cancelled included) — see the note above on why it isn't notified.
@@ -2041,9 +2092,10 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
         project_dir, repo_name, pr_id, local_repo=local_repo, region=region,
         do_review=do_review, do_update_desc=do_update_desc, do_merge=do_merge,
         do_sync=do_sync, dry_run=dry_run, model=model, progress=progress,
-        emit=emit, control=control, ask=ask)
-    if webhook_url:
-        review = result.get("review")
+        emit=emit, control=control, ask=ask,
+        custom_instructions=custom_instructions, get_note=get_note)
+    review = result.get("review")
+    if webhook_url and getattr(review, "verdict_key", None) in _NOTIFIABLE_VERDICTS:
         notifier.post_summary(
             webhook_url, emit=emit, repo_name=repo_name, pr_id=pr_id,
             do_review=do_review,

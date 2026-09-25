@@ -167,7 +167,7 @@ job waiting on a question does not spin, because it is not progressing.
 ### 4.6 Jobs and parallelism
 
 Each pull request is an independent **job**. PRISM opens on a jobs list; a job
-is created from the New job screen and opens into a detail view. Up to three
+is created from the New job screen and opens into a detail view. Up to two
 jobs run at once (`MAX_PARALLEL_JOBS` in `jobs.py`) and further jobs queue,
 starting automatically as slots free.
 
@@ -201,14 +201,24 @@ already in flight may still complete server-side.
 
 ### 4.8 Answering the reviewer
 
-The agent stops and asks when an input is missing or ambiguous (no PR id, two
-plausible source branches, and so on). When that happens PRISM shows a
-**Reviewer needs your input** panel between the verdict and the log, carrying
-the question and a free-text box; the reply is sent into the same agent
-session, and the resulting output is re-parsed for a verdict. Up to four such
-rounds are allowed per run. **Skip** declines to answer and lets the run
-finish on whatever it has. The panel exists only while a question is
-outstanding and costs no space otherwise.
+Source and destination branches are resolved by PRISM itself from the PR id
+(`get-pull-request`'s `pullRequestTargets`) and handed to the agent in its
+prompt, so the agent is never left to guess between them. The agent still
+stops and asks when something else is genuinely missing or ambiguous. When
+that happens PRISM shows a **Reviewer needs your input** panel between the
+verdict and the log, carrying the question and a free-text box; the reply is
+sent into the same agent session, and the resulting output is re-parsed for a
+verdict. **Skip** declines to answer and lets the run finish on whatever it
+has. The panel exists only while a question is outstanding and costs no space
+otherwise.
+
+A second, always-available box above the conversation panel lets the user
+leave a free-text steering note at any point while the job is active, without
+waiting for the agent to ask anything — see `Job.queue_note`/`pop_note` in
+`jobs.py`. Both a user-initiated note and an agent-initiated question share
+one clarify-round loop in `orchestrator._run_pipeline`, capped at four rounds
+per run (`MAX_CLARIFY_ROUNDS`). A `custom_instructions` string set on the
+new-job screen is folded into the agent's very first prompt the same way.
 
 ---
 
