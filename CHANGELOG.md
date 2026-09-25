@@ -4,6 +4,26 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v3.3
+
+- **The reviewer is now actually handed the source and destination
+  branches** it resolves from the PR id, instead of being left to work
+  them out on its own — closing the gap that occasionally had it stop and
+  ask you which branch was which.
+- **Custom instructions.** A new field on the new-job screen lets you steer
+  a review before it starts ("focus on the auth changes", "skip the
+  generated files"), and a matching box on the detail screen lets you add
+  one while a job is running — the reviewer picks it up at its next turn.
+- **Retry now reruns the same job** instead of creating a new one — same
+  row, same id, log and verdict cleared, nothing extra added to the list.
+- **Google Chat notifications now post only on a real, parsed verdict** —
+  Approve, Approve with comments, Request changes, or Block. A skipped
+  review, an unparsed verdict, or an internal error no longer post.
+- **Two jobs run at a time now, not three** — the rest queue and start
+  automatically as before, just with a smaller live window to stay clear
+  of provider rate limits.
+- Manual updated to match all of the above.
+
 ## v3.2
 
 - Added `prism-aws-alerts`, a standalone Terraform sub-project bundled in

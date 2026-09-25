@@ -373,11 +373,25 @@ class ChatNotification(unittest.TestCase):
         self.assertFalse(kw["merged"])
         self.assertEqual(kw["reason"], "verdict blocks merge")
 
-    def test_review_skipped_is_reported_as_such_not_as_a_verdict(self):
+    def test_skipped_review_posts_nothing(self):
+        """A skipped review is an explicit approval as far as merging goes,
+        but it is not a review outcome — the group chat must not see it
+        presented next to a real reviewer verdict."""
         self._run(webhook_url="https://example.invalid/hook", do_review=False)
+        self.assertEqual(self.posted, [])
+
+    def test_unparsed_verdict_posts_nothing(self):
+        o.run_opencode_review = lambda *a, **k: ("no verdict line here", "ses_x")
+        self._run(webhook_url="https://example.invalid/hook")
+        self.assertEqual(self.posted, [])
+
+    def test_a_block_verdict_still_posts(self):
+        o.run_opencode_review = lambda *a, **k: ("**Verdict:** NO Block\n", "ses_x")
+        self._run(webhook_url="https://example.invalid/hook")
+        self.assertEqual(len(self.posted), 1)
         _url, kw = self.posted[0]
-        self.assertFalse(kw["do_review"])
-        self.assertTrue(kw["merged"])
+        self.assertFalse(kw["merged"])
+        self.assertEqual(kw["verdict_key"], "block")
 
     def test_a_hard_failure_reraises_and_posts_nothing(self):
         """An execution error (engine crash, AWS API error, ...) is not a
@@ -398,6 +412,60 @@ class ChatNotification(unittest.TestCase):
         with self.assertRaises(o.Cancelled):
             self._run(webhook_url="https://example.invalid/hook")
         self.assertEqual(self.posted, [], "the user's own action is not a notable outcome")
+
+
+class SteeringNotes(unittest.TestCase):
+    """A note left by the user after a job started (Job.queue_note in
+    jobs.py) is handed to the reviewer at the next turn boundary — the same
+    clarify-round loop in _run_pipeline that already handles the agent's own
+    questions, extended to also poll get_note()."""
+
+    def setUp(self):
+        importlib.reload(o)
+        self.addCleanup(importlib.reload, o)
+        self._tmp = tempfile.TemporaryDirectory()
+        self.clone = self._tmp.name
+        self.addCleanup(self._tmp.cleanup)
+        o._REVIEWED_STORE_PATH = Path(self._tmp.name) / "reviewed_commits.json"
+        o.ensure_bundled_agents = lambda *a, **k: ["pr-reviewer"]
+        o.resolve_repo = lambda r, p, l: (r, self.clone)
+        o.run_opencode_review = lambda *a, **k: (REPORT, "ses_x")
+        o.check_ff_mergeable = lambda *a, **k: (True, "ok")
+        o.try_fast_forward_merge = lambda *a, **k: {}
+        o.update_description_direct = lambda *a, **k: ""
+        o.get_pr = lambda *a, **k: {"status": "OPEN", "repositoryName": "repo",
+                                    "destinationReference": "main",
+                                    "sourceReference": "feat", "description": ""}
+
+    def _run(self, **kw):
+        return o._run_pipeline(self.clone, "repo", "7", local_repo=self.clone,
+                               emit=lambda *a, **k: None, **kw)
+
+    def test_a_pending_note_is_handed_to_the_reviewer_before_moving_on(self):
+        notes = ["please double-check the migration"]
+        def get_note():
+            return notes.pop(0) if notes else None
+        captured = []
+        def continue_turn(prompt, *a, **k):
+            captured.append(prompt)
+            return 0, REPORT, "ses_x"
+        o._continue_turn = continue_turn
+        res = self._run(ask=lambda *a, **k: None, get_note=get_note)
+        self.assertEqual(captured, ["please double-check the migration"])
+        self.assertTrue(res["merged"])
+
+    def test_no_note_leaves_the_normal_path_untouched(self):
+        def must_not_continue(*a, **k):
+            raise AssertionError("must not continue the turn with nothing to say")
+        o._continue_turn = must_not_continue
+        res = self._run(ask=lambda *a, **k: None, get_note=lambda: None)
+        self.assertTrue(res["merged"])
+
+    def test_works_with_no_get_note_supplied_at_all(self):
+        """Existing callers (tests, or a future runner) that don't pass
+        get_note must behave exactly as before — this is purely additive."""
+        res = self._run(ask=lambda *a, **k: None)
+        self.assertTrue(res["merged"])
 
 
 class LocaleIndependence(unittest.TestCase):
