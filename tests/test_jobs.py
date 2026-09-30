@@ -258,3 +258,15 @@ class CancellationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class PrMetaDisplay(unittest.TestCase):
+    def test_branches_and_summary_line_include_pr_facts(self):
+        import queue
+        spec = J.JobSpec(project_dir=".", repo_name="r", pr_id="5")
+        job = J.Job(1, spec, queue.Queue())
+        self.assertEqual(job.branches, "")
+        job.source, job.dest, job.author = "feat", "main", "alice"
+        self.assertEqual(job.branches, "feat → main")
+        self.assertIn("feat → main", job.summary_line())
+        self.assertIn("by alice", job.summary_line())

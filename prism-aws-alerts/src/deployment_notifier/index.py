@@ -114,7 +114,13 @@ def handler(event, context):
         item = table.get_item(Key={"commit_sha": commit_sha}).get("Item")
 
     repo_name = (item or {}).get("repository") or PIPELINE_REPOSITORIES.get(pipeline_name)
-    author = _get_commit_author(repo_name, commit_sha) if repo_name and commit_sha else None
+    # Prefer the PR author recorded by the merge alert so both messages name
+    # the same person; the commit author (a git name/email, often different
+    # from the IAM user who opened the PR) is only a fallback for deployments
+    # with no recorded PR.
+    author = (item or {}).get("author")
+    if not author:
+        author = _get_commit_author(repo_name, commit_sha) if repo_name and commit_sha else None
 
     if item:
         pr_id = item.get("pull_request_id")

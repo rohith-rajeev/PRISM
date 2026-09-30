@@ -137,6 +137,9 @@ class Job:
         self.verdict_raw = ""
         self.verdict_key = ""
         self.impact = ""
+        self.source = ""
+        self.dest = ""
+        self.author = ""
         self.tokens = {}
         self.pending_question = None
         self.result = None
@@ -194,9 +197,18 @@ class Job:
     def label(self):
         return self.spec.label
 
+    @property
+    def branches(self):
+        """"source → dest", or "" until the pipeline has looked the PR up."""
+        return f"{self.source} → {self.dest}" if self.source and self.dest else ""
+
     def summary_line(self):
         """One-line description for the detail screen header."""
         bits = [self.spec.label, self.spec.region]
+        if self.branches:
+            bits.append(self.branches)
+        if self.author:
+            bits.append(f"by {self.author}")
         if not self.spec.do_review:
             bits.append("no review")
         if self.spec.dry_run:
@@ -292,6 +304,7 @@ class JobManager:
         job.verdict_raw = ""
         job.verdict_key = ""
         job.impact = ""
+        job.source = job.dest = job.author = ""
         job.tokens = {}
         job.pending_question = None
         job.result = None

@@ -142,6 +142,9 @@ def handler(event, context):
             "branch": branch,
             "pull_request_id": str(pr_id),
             "pr_title": title,
+            # Stored so the deployment alert names the same person as this
+            # merge alert (the PR author), not the git commit author.
+            "author": author,
             "chat_threads": chat_threads,
             "created_at": int(time.time()),
             "ttl": ttl,
