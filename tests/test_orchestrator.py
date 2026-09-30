@@ -750,3 +750,133 @@ class LockDiscipline(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class VerdictParsingVariants(unittest.TestCase):
+    """The reviewer drifts from the exact template; it is still a verdict."""
+
+    def key(self, text):
+        return o.parse_review_output(text).verdict_key
+
+    def test_formatting_variants(self):
+        for text, want in [
+            ("**Verdict: ⚠️ Approve with comments**", "approve-with-comments"),
+            ("**Verdict**: 🔴 Request changes", "request-changes"),
+            ("Verdict: ⛔ Block", "block"),
+            ("- **Verdict:** ✅ Approve", "approve"),
+            ("| **Verdict** | ✅ Approve |", "approve"),
+            ("## Verdict\n**✅ Approve**", "approve"),
+            ("**Verdict:** ✅ Approve\r\n", "approve"),
+            ("**Verdict:** Approve w/ comments", "approve-with-comments"),
+        ]:
+            with self.subTest(text=text):
+                self.assertEqual(self.key(text), want)
+
+    def test_blocking_word_does_not_turn_an_approval_into_a_block(self):
+        self.assertEqual(self.key("**Verdict:** Approve — no blocking issues"), "approve")
+        self.assertEqual(self.key("**Verdict:** Block — do not approve"), "block")
+
+    def test_last_real_verdict_wins(self):
+        text = "Verdict: see above\n**Verdict:** ✅ Approve\nVerdict: see below\n"
+        self.assertEqual(self.key(text), "approve")
+
+    def test_a_sentence_mentioning_a_verdict_is_not_one(self):
+        self.assertEqual(self.key("I will give a verdict: later"), "")
+
+    def test_impact_variants(self):
+        r = o.parse_review_output("Verdict: Approve\nImpact: 4/10 - small\n")
+        self.assertEqual(r.impact_score, "4")
+
+
+class CustomInstructionsReachTheReviewer(unittest.TestCase):
+    """Instructions given before the job starts frame the review from the
+    first turn: a leading block in the prompt, not a trailing afterthought."""
+
+    def _prompt(self, incremental, instructions):
+        importlib.reload(o)
+        self.addCleanup(importlib.reload, o)
+        captured, logged = {}, []
+        o._incremental_context = lambda *a, **k: incremental
+        o.ensure_bundled_agents = lambda *a, **k: None
+        o.require_engine = lambda: "opencode"
+        o.engine_supports_json = lambda exe: False
+        o.get_pr = lambda *a, **k: {"sourceReference": "feat/x",
+                                    "destinationReference": "main"}
+
+        def fake_stream(cmd, cwd, emit, control=None, json_mode=False, meter=None):
+            captured["prompt"] = cmd[-1]
+            return 0, "**Verdict:** OK Approve\n", "sid"
+        o._run_stream_resilient = fake_stream
+        o.run_opencode_review("7", "repo", "/tmp/repo", "/tmp/proj",
+                              emit=lambda m, *a, **k: logged.append(m),
+                              custom_instructions=instructions)
+        return captured["prompt"], logged
+
+    def test_plain_review_leads_with_the_instructions(self):
+        prompt, logged = self._prompt(None, "focus on the auth changes")
+        self.assertTrue(prompt.startswith("REVIEWER INSTRUCTIONS"))
+        self.assertIn("focus on the auth changes", prompt)
+        self.assertLess(prompt.index("focus on the auth changes"),
+                        prompt.index("Review CodeCommit pull request"))
+        self.assertTrue(any("Custom instructions" in m for m in logged))
+
+    def test_incremental_review_leads_with_the_instructions_too(self):
+        prompt, _ = self._prompt({"commit": "old123", "current_commit": "new456",
+                                  "verdict": "approve", "block": "- f"},
+                                 "skip the generated files")
+        self.assertTrue(prompt.startswith("REVIEWER INSTRUCTIONS"))
+        self.assertIn("INCREMENTAL", prompt)
+        self.assertIn("skip the generated files", prompt)
+
+    def test_no_instructions_leaves_the_prompt_unchanged(self):
+        for blank in ("", "   ", None):
+            prompt, logged = self._prompt(None, blank)
+            self.assertNotIn("REVIEWER INSTRUCTIONS", prompt)
+            self.assertFalse(any("Custom instructions" in m for m in logged))
+
+
+class FollowUpRequests(unittest.TestCase):
+    def setUp(self):
+        importlib.reload(o)
+        self.addCleanup(importlib.reload, o)
+        o.resolve_repo = lambda r, p, l: (r, "/tmp/clone")
+        o.ensure_bundled_agents = lambda *a, **k: None
+
+    def test_prompt_is_scoped_read_only_and_carries_the_request(self):
+        p = o.followup_prompt("is it safe?", "7", "repo", "us-east-1", "/c", "merged")
+        for needle in ("is it safe?", "pull request 7", "merged", "DECLINED:",
+                       "read-only", "unrelated"):
+            self.assertIn(needle, p)
+
+    def test_declined_detection(self):
+        self.assertEqual(o.followup_declined("DECLINED: not about this PR"),
+                         "not about this PR")
+        self.assertEqual(o.followup_declined("ok\n**DECLINED:** off topic"), "off topic")
+        self.assertIsNone(o.followup_declined("The call was DECLINED: by the API"))
+        self.assertIsNone(o.followup_declined("All good."))
+
+    def test_continues_the_jobs_session_when_there_is_one(self):
+        seen = {}
+        def cont(prompt, project_dir, session_id, emit, model, control, what, **k):
+            seen.update(session=session_id, prompt=prompt, what=what)
+            return 0, "reply", "ses_new"
+        o._continue_turn = cont
+        text, sid = o.run_followup("q?", "/p", "repo", "7", session_id="ses_1",
+                                   emit=lambda *a, **k: None)
+        self.assertEqual((text, sid, seen["session"]), ("reply", "ses_new", "ses_1"))
+        self.assertIn("q?", seen["prompt"])
+
+    def test_starts_a_fresh_session_without_one(self):
+        o.require_engine = lambda: "opencode"
+        o.engine_supports_json = lambda exe: True
+        captured = {}
+        def stream(cmd, cwd, emit, control=None, json_mode=False, meter=None):
+            captured["cmd"] = cmd
+            return 0, "reply", "ses_fresh"
+        o._run_stream_resilient = stream
+        text, sid = o.run_followup("q?", "/p", "repo", "7", model="m1",
+                                   emit=lambda *a, **k: None)
+        self.assertEqual((text, sid), ("reply", "ses_fresh"))
+        self.assertIn("--agent", captured["cmd"])
+        self.assertNotIn("--session", captured["cmd"])
+        self.assertIn("m1", captured["cmd"])

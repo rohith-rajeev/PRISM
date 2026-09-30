@@ -64,19 +64,47 @@ def _get_commit_author(repo_name, commit_sha):
         return None
 
 
-def _build_message(environment, component, status, pr_id, commit_sha, thread_name, author=None):
-    header = f"{environment} deployment {status}"
-    if component:
-        header += f" ({component})"
-    lines = [header]
-    if pr_id:
-        lines.append(f"- PR #{pr_id}")
-    if commit_sha:
-        lines.append(f"- Commit: {commit_sha[:12]}")
-    if author:
-        lines.append(f"- Author: {author}")
+# Status colours for the card: Google's own success green and error red, dark
+# enough to read on both the light and dark Chat themes. The status is also
+# spelled out in the card title, so the colour is never the only signal.
+STATUS_STYLE = {
+    "succeeded": {"label": "SUCCEEDED", "color": "#137333"},
+    "failed": {"label": "FAILED", "color": "#C5221F"},
+}
 
-    payload = {"text": "\n".join(lines)}
+
+def _build_message(environment, component, status, pr_id, commit_sha, thread_name,
+                   author=None, repo_name=None, pr_title=None):
+    """A deployment card in the same shape as the PR-merge alert: a header
+    identifying what deployed and how it went, then labelled rows."""
+    style = STATUS_STYLE.get(status, {"label": status.upper(), "color": "#5F6368"})
+    subtitle = " · ".join(part for part in (repo_name, component) if part)
+    header = {"title": f"{environment} deployment {status}"}
+    if subtitle:
+        header["subtitle"] = subtitle
+
+    widgets = [
+        {"decoratedText": {
+            "topLabel": "Status",
+            "text": f'<b><font color="{style["color"]}">{style["label"]}</font></b>',
+        }},
+    ]
+    if pr_id:
+        pr_text = f"#{pr_id}" + (f" — {pr_title}" if pr_title else "")
+        widgets.append({"decoratedText": {"topLabel": "PR", "text": pr_text}})
+    if commit_sha:
+        widgets.append({"decoratedText": {"topLabel": "Commit", "text": commit_sha[:12]}})
+    if author:
+        widgets.append({"decoratedText": {"topLabel": "Author", "text": author}})
+
+    payload = {
+        "cardsV2": [
+            {
+                "cardId": f"deployment-{(commit_sha or 'unknown')[:12]}-{status}",
+                "card": {"header": header, "sections": [{"widgets": widgets}]},
+            }
+        ]
+    }
     if thread_name:
         payload["thread"] = {"name": thread_name}
     return payload
@@ -130,7 +158,8 @@ def handler(event, context):
                 print(f"WARNING: stored chat '{entry.get('chat_name')}' is no longer configured, skipping")
                 continue
             payload = _build_message(
-                environment, component, status, pr_id, commit_sha, entry.get("thread_name"), author
+                environment, component, status, pr_id, commit_sha, entry.get("thread_name"),
+                author, repo_name, item.get("pr_title"),
             )
             try:
                 _post_to_chat(chat["webhook_url"], payload, entry.get("thread_name"))
@@ -150,7 +179,9 @@ def handler(event, context):
         return
 
     for chat in targets:
-        payload = _build_message(environment, component, status, None, commit_sha, None, author)
+        payload = _build_message(
+            environment, component, status, None, commit_sha, None, author, repo_name
+        )
         try:
             _post_to_chat(chat["webhook_url"], payload, None)
             print(f"Posted standalone deployment message to chat '{chat['name']}' (no matching PR thread)")

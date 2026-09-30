@@ -72,8 +72,23 @@ STAGE_MERGE_CHECK = "merge_check"
 STAGE_SYNC = "sync"
 STAGE_MERGE = "merge"
 
-VERDICT_RE = re.compile(r"\*\*Verdict:\*\*\s*(.+)", re.IGNORECASE)
-IMPACT_RE = re.compile(r"\*\*Impact score:\*\*\s*(\d+)\s*/\s*10\s*[-–—:]?\s*(.*)", re.IGNORECASE)
+# The reviewer is asked for "**Verdict:** ✅ Approve", but models drift: the
+# bold can wrap the whole line, sit on the label only, move after the colon,
+# or vanish when the engine renders markdown. All of those are still a verdict
+# the reviewer delivered, so the patterns accept them — anchored to the start
+# of a line so a sentence merely mentioning a "verdict:" is not mistaken for one.
+_LABEL_LEAD = r"^[ \t>#*_\-•]*[*_]{0,2}\s*"
+_LABEL_SEP = r"\s*[*_]{0,2}\s*[:：\-–—]\s*[*_]{0,2}\s*"
+VERDICT_RE = re.compile(_LABEL_LEAD + r"Verdict" + _LABEL_SEP + r"(.+)$",
+                        re.IGNORECASE | re.MULTILINE)
+# "| **Verdict** | ✅ Approve |" and "## Verdict\n✅ Approve"
+_VERDICT_TABLE_RE = re.compile(r"^\s*\|\s*[*_]{0,2}Verdict[*_]{0,2}\s*\|\s*([^|\n]+?)\s*\|",
+                               re.IGNORECASE | re.MULTILINE)
+_VERDICT_HEADING_RE = re.compile(r"^#{1,6}\s*Verdict\s*:?\s*\n+\s*[*_]{0,2}([^\n]+)",
+                                 re.IGNORECASE | re.MULTILINE)
+IMPACT_RE = re.compile(_LABEL_LEAD + r"Impact(?:\s+score)?" + _LABEL_SEP +
+                       r"(\d+)(?:\.\d+)?\s*/\s*10\s*[*_]{0,2}\s*[-–—:]?\s*(.*)",
+                       re.IGNORECASE | re.MULTILINE)
 FINDING_RE = re.compile(r"^\s*-\s*\*\*\[(Critical|High|Medium|Low|Nit)\]", re.IGNORECASE | re.MULTILINE)
 # The engine renders its own chrome with ANSI colour codes; strip them before
 # pattern-matching the report so styled output can't hide the verdict line.
@@ -261,7 +276,7 @@ def extract_question(text):
     considered.
     """
     body = strip_ansi(text or "").strip()
-    if not body or VERDICT_RE.search(body):
+    if not body or _find_verdict(body):
         return ""
     blocks = [b.strip() for b in re.split(r"\n\s*\n", body) if b.strip()]
     if not blocks:
@@ -294,17 +309,49 @@ class ReviewResult:
         return v in ("approve", "approve-with-comments", "skipped")
 
 
+_AWC_RE = re.compile(r"approv\w*\W+(?:w/|with\b)")
+_REQUEST_RE = re.compile(r"request(?:ed)?[\s-]*changes?|changes?[\s-]*requested")
+_NEGATED_APPROVE_RE = re.compile(r"\b(?:do not|don't|not|cannot|can't|never)\s+approv")
+_APPROVE_RE = re.compile(r"approv\w*|✅")
+_BLOCK_RE = re.compile(r"\bblock\b|⛔")
+
+
 def normalise_verdict(raw: str) -> str:
     t = raw.lower()
-    if "approve with comments" in t or "⚠️" in raw:
+    if _AWC_RE.search(t) or "⚠" in raw:
         return "approve-with-comments"
-    if "request change" in t or "🔴" in raw:
+    if _REQUEST_RE.search(t) or "🔴" in raw:
         return "request-changes"
-    if "block" in t or "⛔" in raw:
-        return "block"
-    if "approve" in t or "✅" in raw:
+    # Whichever of approve/block the reviewer names first is the verdict:
+    # "Approve — no blocking issues" is an approval, "Block — do not approve"
+    # is a block. Substring matching on "block" got the first one wrong.
+    approve = _APPROVE_RE.search(_NEGATED_APPROVE_RE.sub("", t))
+    block = _BLOCK_RE.search(t)
+    if approve and (not block or approve.start() < block.start()):
         return "approve"
+    if block:
+        return "block"
     return "unknown"
+
+
+def _find_verdict(text: str) -> str:
+    """The reviewer's verdict text, or "" when the report has none.
+
+    The last recognisable verdict wins — the closing report, not anything the
+    agent said on the way — and an earlier one that reads as a real verdict
+    beats a later line that doesn't ("Verdict: see above").
+    """
+    found = []
+    for rx in (VERDICT_RE, _VERDICT_TABLE_RE, _VERDICT_HEADING_RE):
+        for m in rx.finditer(text or ""):
+            raw = m.group(1).strip().strip("*_").strip()
+            if raw:
+                found.append((m.start(), raw))
+    found.sort()
+    for _pos, raw in reversed(found):
+        if normalise_verdict(raw) != "unknown":
+            return raw
+    return found[-1][1] if found else ""
 
 
 def strip_ansi(text: str) -> str:
@@ -315,11 +362,12 @@ def parse_review_output(text: str) -> ReviewResult:
     """Parse the pr-reviewer agent's chat report (Step 4 shape)."""
     res = ReviewResult(raw_output=text, findings=[])
     text = strip_ansi(text)
-    m = VERDICT_RE.search(text or "")
-    if m:
-        res.verdict_raw = m.group(1).strip()
-        res.verdict_key = normalise_verdict(res.verdict_raw)
-    m2 = IMPACT_RE.search(text or "")
+    raw_verdict = _find_verdict(text)
+    if raw_verdict:
+        res.verdict_raw = raw_verdict
+        res.verdict_key = normalise_verdict(raw_verdict)
+    impacts = list(IMPACT_RE.finditer(text or ""))
+    m2 = impacts[-1] if impacts else None
     if m2:
         res.impact_score = m2.group(1).strip()
         res.impact_reason = m2.group(2).strip()
@@ -335,6 +383,31 @@ def parse_review_output(text: str) -> ReviewResult:
     if ms:
         res.summary = ms.group(1).strip()[:6000]
     return res
+
+
+def _carry_forward(previous, latest):
+    """Keep an earlier parsed verdict when a follow-up turn doesn't repeat it.
+
+    A reply to a clarifying question or steering note is usually prose about
+    that one point, not a fresh report. Replacing the review with its parse
+    would discard a verdict the reviewer already delivered and stop the job
+    as "unparsed" — so only a follow-up that actually carries a verdict
+    replaces it.
+    """
+    if latest.verdict_key and latest.verdict_key != "unknown":
+        return latest
+    if previous is not None and previous.verdict_key \
+            and previous.verdict_key != "unknown":
+        return previous
+    return latest
+
+
+_RESTATE_PROMPT = (
+    "PRISM could not read a verdict from your last reply. Restate your final "
+    "verdict and impact score for this pull request now, changing nothing about "
+    "your assessment, as exactly these two lines and nothing else:\n"
+    "**Verdict:** <✅ Approve | ⚠️ Approve with comments | 🔴 Request changes | ⛔ Block>\n"
+    "**Impact score:** <1-10>/10 — <one-line reason>")
 
 
 def ensure_bundled_agents(project_dir: str, emit=_emit_plain) -> list:
@@ -1039,15 +1112,26 @@ def run_opencode_review(pr_id, repo_name, local_repo, project_dir,
         source_ref = dest_ref = ""
     branch_line = (f"Source branch: {source_ref}. Destination branch: {dest_ref}. "
                    if source_ref and dest_ref else "")
-    instructions_line = (
-        f"Additional instructions from the person running this review — follow "
-        f"them alongside your usual workflow: {custom_instructions.strip()} "
-        if custom_instructions and custom_instructions.strip() else "")
+    # A leading, delimited block — not a sentence tacked on after "report the
+    # verdict, then stop". Trailing, it was easy for the reviewer to skim past
+    # and it never shaped what was examined; up front it frames the whole
+    # review, the way the same text does when sent as a steering note.
+    instructions = (custom_instructions or "").strip()
+    instructions_block = (
+        f"REVIEWER INSTRUCTIONS from the person who started this review. They are "
+        f"mandatory: apply them to what you examine and emphasise from the very "
+        f"start, and say in your Summary how you applied them. They never change "
+        f"the report format below, your read-only rules, or the honesty of your "
+        f"verdict.\n<<<\n{instructions}\n>>>\n\n"
+        if instructions else "")
+    if instructions:
+        emit(f"▸ Custom instructions given to the reviewer: {instructions[:300]}")
 
     if incremental:
         emit(f"▸ Incremental review since {incremental['commit'][:8]} "
              f"(previous verdict: {incremental['verdict']}).")
         prompt = (
+            instructions_block +
             f"Review CodeCommit pull request {pr_id} in CodeCommit repository "
             f"'{repo_name}' (AWS region {region}). Local clone path: {local_repo}. "
             f"Run directory: {project_dir}. " + branch_line +
@@ -1060,17 +1144,16 @@ def run_opencode_review(pr_id, repo_name, local_repo, project_dir,
             f"above was addressed, and do a quick --stat-level skim of any files outside "
             f"that delta solely to catch a newly introduced critical/blocker issue — not a "
             f"full re-review of files the delta didn't touch. Report the verdict in chat as "
-            f"usual, then stop and ask about updating the PR description. "
-            + instructions_line
+            f"usual, then stop and ask about updating the PR description."
         )
     else:
         prompt = (
+            instructions_block +
             f"Review CodeCommit pull request {pr_id} in CodeCommit repository "
             f"'{repo_name}' (AWS region {region}). Local clone path: {local_repo}. "
             f"Run directory: {project_dir}. " + branch_line +
             f"Follow your pr-reviewer workflow and report the verdict in chat, "
-            f"then stop and ask about updating the PR description. "
-            + instructions_line
+            f"then stop and ask about updating the PR description."
         )
     # No --session/--continue: a plain run always creates a fresh session, and
     # --format json is what lets us capture its id for the follow-up turns.
@@ -1099,6 +1182,79 @@ def run_opencode_reply(message, project_dir, session_id=None, emit=_emit_plain,
     """
     return _continue_turn(message, project_dir, session_id, emit, model, control,
                           what="reply")
+
+
+_FOLLOWUP_DECLINE = "DECLINED:"
+
+
+def followup_prompt(request, pr_id, repo_name, region, local_repo, outcome):
+    """The prompt for a question/request made after a job has finished.
+
+    Self-contained on purpose: it is used both inside the job's own reviewer
+    session (which already knows the PR) and, for a job that never ran a
+    review (review skipped), in a brand-new one that knows nothing.
+    """
+    return (
+        f"FOLLOW-UP on CodeCommit pull request {pr_id} in repository '{repo_name}' "
+        f"(AWS region {region}). Local clone path: {local_repo}. PRISM's pipeline "
+        f"for this pull request has already finished — outcome: {outcome}. The person "
+        f"running PRISM now asks:\n<<<\n{request.strip()}\n>>>\n\n"
+        f"Ground rules:\n"
+        f"1. Only handle requests about THIS pull request: its code and diff, "
+        f"your findings and verdict, its description, comments or merge status, or "
+        f"what to do next about it. If the request is unrelated to this pull "
+        f"request, do nothing it asks and reply with one line beginning exactly "
+        f"'{_FOLLOWUP_DECLINE}' followed by the reason.\n"
+        f"2. You are read-only: read the repository and run read-only git / aws "
+        f"codecommit get and list commands, but never edit, commit, push, merge, "
+        f"comment on or otherwise change the pull request. If the request needs "
+        f"such a change, say PRISM performs those itself and tell the person what "
+        f"to do in PRISM (for example Retry, which re-runs the pipeline and "
+        f"re-reviews only what changed) — never claim you did it.\n"
+        f"3. Answer briefly and concretely; do not repeat the whole report. Only "
+        f"give a new **Verdict:** / **Impact score:** if asked to re-assess — PRISM "
+        f"will not merge or write anything based on this answer.")
+
+
+def run_followup(request, project_dir, repo_name, pr_id, local_repo=None,
+                 region=REGION_DEFAULT, model=None, session_id=None,
+                 outcome="finished", emit=_emit_plain, control=None):
+    """One follow-up turn with the reviewer after a job has finished.
+
+    Returns (reply_text, session_id). Continues the job's own reviewer session
+    when one was captured, so the reviewer still has the whole review in
+    context; otherwise starts a fresh one from the self-contained prompt.
+    Read-only by construction — the reviewer agent's permissions deny every
+    write, and nothing here acts on what it says.
+    """
+    repo_name, local_clone = resolve_repo(repo_name, project_dir, local_repo)
+    ensure_bundled_agents(project_dir, emit=emit)
+    prompt = followup_prompt(request, pr_id, repo_name, region, local_clone, outcome)
+    if session_id:
+        _rc, text, sid = _continue_turn(prompt, project_dir, session_id, emit, model,
+                                        control, what="follow-up")
+        return text, (sid or session_id)
+    exe = require_engine()
+    json_mode = engine_supports_json(exe)
+    cmd = [exe, "run", "--agent", AGENT_NAME, "--dir", project_dir, "--auto"]
+    if json_mode:
+        cmd += ["--format", "json"]
+    if model:
+        cmd += ["--model", model]
+    cmd += [prompt]
+    _rc, text, sid = _run_stream_resilient(cmd, cwd=project_dir, emit=emit,
+                                           control=control, json_mode=json_mode)
+    return text, sid
+
+
+def followup_declined(text):
+    """The reviewer's reason when it declined an unrelated request, else None."""
+    body = strip_ansi(text or "").strip()
+    for line in body.splitlines():
+        line = line.strip().lstrip("*_ ")
+        if line.upper().startswith(_FOLLOWUP_DECLINE):
+            return line[len(_FOLLOWUP_DECLINE):].strip().strip("*_ ") or "not related to this pull request"
+    return None
 
 
 def _continue_turn(prompt, project_dir, session_id, emit, model, control, what,
@@ -1784,6 +1940,9 @@ def _run_pipeline(project_dir, repo_name, pr_id, local_repo=None,
                                               control=control, meter=meter,
                                               custom_instructions=custom_instructions)
         review = parse_review_output(raw)
+        if session_id:
+            # Lets the UI keep talking to this reviewer after the job ends.
+            emit(session_id, "session")
 
         # Two reasons to hand the agent another turn before moving on: it
         # stopped and asked something itself (missing/ambiguous detail —
@@ -1819,7 +1978,30 @@ def _run_pipeline(project_dir, repo_name, pr_id, local_repo=None,
             _rc, raw, session_id = _continue_turn(answer, project_dir, session_id,
                                                   emit, model, control, what="reply",
                                                   meter=meter)
-            review = parse_review_output(raw)
+            review = _carry_forward(review, parse_review_output(raw))
+
+        # The reviewer may well have delivered a verdict in a shape that still
+        # slipped past the parser. Ask once for it in the exact format before
+        # giving up on a review that was actually done — a stopped job costs
+        # the whole run. Skipped when there is no session to continue: without
+        # one the nudge would land on an unrelated conversation.
+        if (not review.verdict_key or review.verdict_key == "unknown") and session_id:
+            emit("\n⚠ No verdict could be read from the reviewer's report — "
+                 "asking it to restate the verdict once.")
+            ck()
+            _rc, raw2, session_id = _continue_turn(_RESTATE_PROMPT, project_dir,
+                                                   session_id, emit, model, control,
+                                                   what="verdict restatement",
+                                                   meter=meter)
+            restated = parse_review_output(raw2)
+            if restated.verdict_key and restated.verdict_key != "unknown":
+                # Keep the original report's findings; take the restated
+                # verdict/impact, falling back to the original impact.
+                review.verdict_raw = restated.verdict_raw
+                review.verdict_key = restated.verdict_key
+                if restated.impact_score:
+                    review.impact_score = restated.impact_score
+                    review.impact_reason = restated.impact_reason
 
         emit(f"\n◆ Verdict: {review.verdict_raw or review.verdict_key}   "
              f"Impact: {review.impact_score or '?'}/10 {review.impact_reason}")

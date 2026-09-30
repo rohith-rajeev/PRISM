@@ -15,7 +15,8 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from orchestrator import REGION_DEFAULT, RunControl, full_pipeline
+from orchestrator import (REGION_DEFAULT, Cancelled, RunControl, followup_declined,
+                          full_pipeline, run_followup)
 
 # Each job is a full agent run — model calls, AWS, git. Running an unbounded
 # number at once invites provider rate limits and spawns unbounded child
@@ -150,6 +151,13 @@ class Job:
         self.thread = None
         self._note_lock = threading.Lock()
         self._pending_note = None
+        # The reviewer's conversation, once it has one — lets the person keep
+        # asking about this PR after the job has finished (see
+        # JobManager.start_followup). followup_control is that turn's own
+        # token: the job's control is already spent by the time it is used.
+        self.session_id = ""
+        self.followup_busy = False
+        self.followup_control = None
 
     # ----- plumbing -----
     def emit_event(self, kind, payload):
@@ -230,8 +238,10 @@ class JobManager:
     queue — so the model can be read for repaint without locking.
     """
 
-    def __init__(self, out_q, runner=full_pipeline, max_parallel=None):
+    def __init__(self, out_q, runner=full_pipeline, max_parallel=None,
+                 followup_runner=run_followup):
         self.out_q = out_q
+        self._followup_runner = followup_runner
         self.jobs = {}           # insertion-ordered; doubles as display order
         self._next_id = 1
         self._runner = runner
@@ -305,6 +315,8 @@ class JobManager:
         job.verdict_key = ""
         job.impact = ""
         job.source = job.dest = job.author = ""
+        job.session_id = ""
+        self._cancel_followup(job)
         job.tokens = {}
         job.pending_question = None
         job.result = None
@@ -360,6 +372,66 @@ class JobManager:
             else:
                 job.emit_event("error", str(e)[:3000])
 
+    # ----- follow-up questions after a job has finished -----
+    def start_followup(self, job_id, text):
+        """Put a question or request to the reviewer about a finished job.
+
+        Returns the job when it was started, None when it can't be (unknown or
+        still-active job — an active one takes a steering note instead — empty
+        text, or a follow-up already in flight). The reviewer is read-only and
+        nothing acts on its answer, so this can never merge or write anything;
+        it only adds to the job's log. Call from the UI thread.
+        """
+        job = self.jobs.get(job_id)
+        text = (text or "").strip()
+        if job is None or not job.is_terminal or job.followup_busy or not text:
+            return None
+        job.followup_busy = True
+        job.followup_control = RunControl()
+        threading.Thread(target=self._followup_work, args=(job, text, job.followup_control),
+                         daemon=True).start()
+        return job
+
+    def _cancel_followup(self, job):
+        ctl, job.followup_control = job.followup_control, None
+        job.followup_busy = False
+        if ctl is not None:
+            ctl.cancel()
+
+    def _followup_work(self, job, text, control):
+        """Worker body for one follow-up turn. Posts messages only."""
+        def emit(m, tag=None):
+            # A follow-up that was cancelled (job retried or removed) must not
+            # write into whatever the job is doing now.
+            # Token lines are dropped: they would replace the job's total with
+            # this one turn's figure (there is no meter carrying the rest).
+            if tag != "tokens" and not control.cancelled():
+                job.emit_event("log", (m, tag))
+        try:
+            result = job.result if isinstance(job.result, dict) else {}
+            outcome = ("merged" if result.get("merged") is True
+                       else f"not merged ({result.get('stopped') or job.status})")
+            spec = job.spec
+            reply, sid = self._followup_runner(
+                text, spec.project_dir, spec.repo_name, spec.pr_id,
+                local_repo=spec.local_repo, region=spec.region, model=spec.model,
+                session_id=job.session_id or None, outcome=outcome,
+                emit=emit, control=control)
+            if sid:
+                emit(sid, "session")
+            reason = followup_declined(reply)
+            if reason:
+                emit(f"⛔ Not actioned — {reason}", "warn")
+            else:
+                emit("✔ Follow-up answered.", "ok")
+        except Cancelled:
+            emit("■ Follow-up stopped.", "warn")
+        except Exception as e:  # noqa: BLE001
+            emit(f"⚠ Follow-up failed: {str(e)[:500]}", "err")
+        finally:
+            if not control.cancelled():
+                job.emit_event("followup_done", None)
+
     # ----- control -----
     def stop(self, job_id):
         job = self.jobs.get(job_id)
@@ -376,6 +448,8 @@ class JobManager:
     def stop_all(self):
         for job_id in list(self.jobs):
             self.stop(job_id)
+        for job in self.jobs.values():
+            self._cancel_followup(job)
 
     def remove(self, job_id):
         """Drop a finished job. Active jobs are stopped first."""
@@ -384,6 +458,7 @@ class JobManager:
             return
         if job.is_active:
             self.stop(job_id)
+        self._cancel_followup(job)
         self.jobs.pop(job_id, None)
 
     def active_jobs(self):

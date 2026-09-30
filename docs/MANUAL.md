@@ -52,6 +52,8 @@ itself from the PR id and repository, so you never have to type a branch name.
 **5. (Optional) Add custom instructions.** A free-text box under the model
 picker lets you steer the review — "focus on the auth changes", "skip the
 generated files", anything relevant. Leave it empty for an ordinary review.
+The reviewer is given these instructions up front, before it starts
+reading, and notes in its summary how it applied them.
 
 **6. Click `▶ Start Prisming`.**
 
@@ -132,6 +134,15 @@ reviewer picks it up at its next turn — right after the current step it's on
 finishes, not mid-thought. It's handed over the same way a typed answer is,
 so anything you'd say to steer the review works here too.
 
+**Asking about a PR after the job has finished.** The same box stays usable
+once a job is finished or stopped — it becomes **"Ask about this pull
+request…"** and the button reads `Ask`. The reviewer answers from the job's
+own context (it still has the whole review in mind). It is read-only: it can
+explain a finding, look at another part of the diff or tell you what to do
+next, but it cannot merge, edit or change the PR — use **`↻ Retry`** for
+that. A request that isn't about this pull request is declined, and the log
+says why. The box greys out only while an answer is on its way.
+
 **Merge conflicts appear here too.** If syncing your branch with its base hits a
 conflict, PRISM does not resolve it. It undoes the merge, leaves your clone
 exactly as it found it, and shows you each conflict in turn with both versions
@@ -155,7 +166,10 @@ If this happens while you're looking at a different job, that job shows
 Create as many jobs as you like. **Two run at a time**; the rest wait their
 turn and start automatically.
 
-The jobs list shows every job at a glance:
+The jobs list shows every job at a glance, in two sections: **Running**
+(queued jobs included) on top, and **Completed** below it, newest first.
+Each row shows the pull request's source → destination branches and its
+author.
 
 ```
 ● example-service-be #12948   Running…   ⚠️ Approve with comments   ⚠️ 6/10   [Stop]    [✕]

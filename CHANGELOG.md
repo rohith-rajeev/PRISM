@@ -4,6 +4,25 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v3.5
+
+- **Fewer "could not parse a verdict" stops.** The verdict is now found
+  however the reviewer formats it, and a follow-up reply that doesn't repeat
+  it no longer wipes out the verdict it already gave. If a verdict still
+  can't be read, PRISM asks the reviewer once to restate it before stopping.
+  "Approve — no blocking issues" is no longer mistaken for a Block.
+- **Custom instructions set before you start are now honoured.** They are
+  handed to the reviewer up front as a clearly marked block (and logged),
+  instead of a trailing sentence it could skim past.
+- **Ask about a PR after its job has finished.** The instruction box stays
+  enabled on finished and stopped jobs and becomes a read-only follow-up
+  question to the reviewer; unrelated requests are declined with a reason.
+- **PRISM AWS Alerts: deployment alerts are now cards** like the merge alert,
+  with a colour-coded SUCCEEDED (green) / FAILED (red) status. Redeploy
+  `prism-aws-alerts` to pick this up.
+- **The jobs list is split into Running and Completed sections**, so live
+  work is always at the top.
+
 ## v3.4
 
 - **Sync + merge-only runs now notify Google Chat.** With review turned

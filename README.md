@@ -71,9 +71,10 @@ returns to idle. Source and destination branches are resolved by PRISM
 itself from the PR id, so the agent is never left guessing which one is
 which; if it asks a question for some other reason, a **Reviewer needs your
 input** panel appears with the question and a free-text box, and your reply
-goes straight back into the same agent session. A second box, always
-available while a job is active, lets you hand it a steering instruction of
-your own at any point — no need to wait for it to ask first — and a
+goes straight back into the same agent session. A second box lets you hand it a steering instruction of
+your own at any point while a job is active — no need to wait for it to ask
+first — and, once the job has finished, ask the reviewer follow-up questions
+about that PR (read-only; unrelated requests are declined). A
 **Custom instructions** field on the new-job screen does the same before a
 review even starts.
 
