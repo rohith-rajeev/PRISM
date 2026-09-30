@@ -39,7 +39,8 @@ def _display_author(author_arn):
 
 
 def build_card(repo_name, pr_id, do_review, verdict_raw=None, verdict_key=None,
-              impact_score=None, merged=None, reason=None, author=None):
+              impact_score=None, merged=None, reason=None, author=None,
+              source=None, dest=None):
     """A small Google Chat card: one header line, a few widget rows.
 
     Kept to this shape deliberately — a card that scrolls off a phone screen
@@ -55,6 +56,9 @@ def build_card(repo_name, pr_id, do_review, verdict_raw=None, verdict_key=None,
         outcome = "⚠️ Unknown outcome" + (f" — {reason}" if reason else "")
 
     widgets = [{"decoratedText": {"topLabel": "Outcome", "text": outcome}}]
+    if source and dest:
+        widgets.append({"decoratedText": {
+            "topLabel": "Branches", "text": f"{source} → {dest}"}})
     if author:
         widgets.append({"decoratedText": {
             "topLabel": "Author", "text": _display_author(author)}})

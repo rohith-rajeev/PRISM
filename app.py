@@ -1048,7 +1048,9 @@ class JobRow(RoundedCard):
                  J.DONE: "Finished"}.get(job.status, job.status)
         if job.status == J.DONE and (job.result or {}).get("merged") is True:
             label = "Merged ✓"
-        self.sub.config(text=f"{label}  ·  {job.spec.summary_bits()}")
+        self.sub.config(text="  ·  ".join(filter(None, [
+            label, job.branches, f"by {job.author}" if job.author else "",
+            job.spec.summary_bits()])))
         if job.verdict_raw:
             self.verdict.config(text=job.verdict_raw[:26],
                                 fg=PAL[_verdict_colour(job.verdict_key)])
@@ -3078,6 +3080,19 @@ class App(tk.Tk):
                 else:
                     if shown:
                         self._paint_tokens(job.tokens)
+                return True
+            if tag == "prmeta":
+                # Structured PR facts, not a transcript line (see
+                # orchestrator._emit_pr_meta).
+                try:
+                    meta = json.loads(line)
+                except (TypeError, ValueError):
+                    return False
+                job.source = meta.get("source") or ""
+                job.dest = meta.get("dest") or ""
+                job.author = meta.get("author") or ""
+                if shown:
+                    self.detail_title.config(text=job.summary_line())
                 return True
             text = line.strip()
             if tag is None:

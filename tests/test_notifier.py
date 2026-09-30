@@ -25,6 +25,15 @@ class CardShape(unittest.TestCase):
         self.assertIn("✅", widgets[1]["decoratedText"]["text"])
         self.assertEqual(widgets[2]["decoratedText"]["text"], "3/10")
 
+    def test_branches_and_author_rows(self):
+        card = n.build_card("repo", "12", do_review=False, merged=True,
+                            author="arn:aws:iam::1:user/alice",
+                            source="feat", dest="main")
+        texts = {w["decoratedText"]["topLabel"]: w["decoratedText"]["text"]
+                 for w in card["sections"][0]["widgets"]}
+        self.assertEqual(texts["Branches"], "feat → main")
+        self.assertEqual(texts["Author"], "alice")
+
     def test_not_merged_carries_a_reason(self):
         card = n.build_card("repo", "12", do_review=True, verdict_raw="Request changes",
                             verdict_key="request-changes", merged=False,

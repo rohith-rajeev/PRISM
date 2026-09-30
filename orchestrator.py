@@ -1190,14 +1190,37 @@ def get_pr(pr_id, region=REGION_DEFAULT):
     }
 
 
-def get_pr_author(pr_id, region=REGION_DEFAULT):
-    """Best-effort author ARN lookup for the courtesy chat notification —
-    a failure here must never affect the pipeline itself.
+def get_pr_info(pr_id, region=REGION_DEFAULT):
+    """Best-effort PR lookup (author ARN, branches) for the courtesy chat
+    notification — a failure here must never affect the pipeline itself.
     """
     try:
-        return get_pr(pr_id, region=region).get("authorArn", "")
+        return get_pr(pr_id, region=region)
     except Exception:  # noqa: BLE001
-        return ""
+        return {}
+
+
+def get_pr_author(pr_id, region=REGION_DEFAULT):
+    return get_pr_info(pr_id, region=region).get("authorArn", "")
+
+
+def _emit_pr_meta(pr_id, region, emit):
+    """Tell the UI which branches the PR moves and who opened it.
+
+    Sent as a structured, non-transcript line (tag "prmeta") the same way
+    token totals are, so the job row and detail header can show it without
+    scraping log text. Best-effort: a lookup failure only means the UI shows
+    no branch/author, never that the run fails.
+    """
+    try:
+        pr = get_pr(pr_id, region=region)
+    except Exception:  # noqa: BLE001
+        return
+    emit(json.dumps({
+        "source": pr.get("sourceReference", ""),
+        "dest": pr.get("destinationReference", ""),
+        "author": notifier._display_author(pr.get("authorArn", "")) or "",
+    }), "prmeta")
 
 
 def update_description_direct(pr_id, verdict_text, impact, findings, region=REGION_DEFAULT,
@@ -1735,6 +1758,7 @@ def _run_pipeline(project_dir, repo_name, pr_id, local_repo=None,
     repo_name, local_clone = resolve_repo(repo_name, project_dir, local_repo)
     emit(f"▸ Local clone: {local_clone}")
     ensure_bundled_agents(project_dir, emit=emit)
+    _emit_pr_meta(pr_id, region, emit)
 
     if not Path(local_clone).is_dir():
         raise RuntimeError(f"Local clone path not found: {local_clone}")
@@ -2054,11 +2078,13 @@ def _stopped_reason(stopped):
     return _STOPPED_LABEL.get(stopped, stopped.replace("-", " "))
 
 
-# The only outcomes worth a Chat notification: a real, parsed verdict from
-# the reviewer. "skipped" (do_review=False) and "unknown" (no verdict could
-# be parsed from the agent's output) are both explicitly excluded — neither
-# is something the group chat should see next to an actual review outcome.
-_NOTIFIABLE_VERDICTS = {"approve", "approve-with-comments", "request-changes", "block"}
+# Outcomes worth a Chat notification: a real, parsed verdict from the
+# reviewer, or a deliberate sync + merge-only run (do_review=False, verdict
+# "skipped") — the merge itself is the news there, and the card says the
+# review was skipped. "unknown" (no verdict could be parsed from the agent's
+# output) stays excluded: it is noise next to an actual review outcome.
+_NOTIFIABLE_VERDICTS = {"approve", "approve-with-comments", "request-changes",
+                        "block", "skipped"}
 
 
 def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
@@ -2083,8 +2109,8 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
     status (see jobs.py JobManager._work). Spamming the group chat with
     infrastructure noise indistinguishable from a real verdict was worse
     than saying nothing. The same reasoning excludes a run whose verdict
-    could not be parsed, and one where review was skipped entirely — see
-    _NOTIFIABLE_VERDICTS.
+    could not be parsed — see _NOTIFIABLE_VERDICTS. A review-skipped
+    (sync + merge only) run IS notified.
     """
     # No try/except here on purpose: a hard failure propagates untouched
     # (Cancelled included) — see the note above on why it isn't notified.
@@ -2096,6 +2122,7 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
         custom_instructions=custom_instructions, get_note=get_note)
     review = result.get("review")
     if webhook_url and getattr(review, "verdict_key", None) in _NOTIFIABLE_VERDICTS:
+        pr_info = get_pr_info(pr_id, region=region)
         notifier.post_summary(
             webhook_url, emit=emit, repo_name=repo_name, pr_id=pr_id,
             do_review=do_review,
@@ -2104,5 +2131,7 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
             impact_score=getattr(review, "impact_score", None),
             merged=result.get("merged"),
             reason=_stopped_reason(result.get("stopped")),
-            author=get_pr_author(pr_id, region=region))
+            author=pr_info.get("authorArn"),
+            source=pr_info.get("sourceReference"),
+            dest=pr_info.get("destinationReference"))
     return result

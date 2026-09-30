@@ -4,6 +4,19 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v3.4
+
+- **Sync + merge-only runs now notify Google Chat.** With review turned
+  off, a merge used to post nothing; it now posts the card (outcome,
+  branches, author, "Review: Skipped by configuration").
+- **Source → destination branches are shown** on each job in the list, in
+  the job's header, and on the Chat card.
+- **The PR author is shown** in the job list and inside the job.
+- **PRISM AWS Alerts: one author, both messages.** The merge alert now
+  records the PR author and the deployment alert reuses it, instead of
+  showing the git commit author — so the two no longer disagree. Redeploy
+  `prism-aws-alerts` to pick this up.
+
 ## v3.3
 
 - **The reviewer is now actually handed the source and destination

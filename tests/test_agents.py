@@ -194,7 +194,9 @@ class SafetyGates(unittest.TestCase):
         calls = {"n": 0}
         def get_pr(*a, **k):
             calls["n"] += 1
-            commit = "aaa111" if calls["n"] == 1 else "bbb222"
+            # Call 1 is the early PR-metadata lookup, call 2 the merge-time
+            # snapshot; only the later pre-merge re-fetch sees the move.
+            commit = "aaa111" if calls["n"] <= 2 else "bbb222"
             return {"status": "OPEN", "repositoryName": "repo",
                     "destinationReference": "main", "sourceReference": "feat",
                     "description": "", "sourceCommit": commit}
@@ -373,12 +375,14 @@ class ChatNotification(unittest.TestCase):
         self.assertFalse(kw["merged"])
         self.assertEqual(kw["reason"], "verdict blocks merge")
 
-    def test_skipped_review_posts_nothing(self):
-        """A skipped review is an explicit approval as far as merging goes,
-        but it is not a review outcome — the group chat must not see it
-        presented next to a real reviewer verdict."""
+    def test_skipped_review_still_posts_the_merge(self):
+        """Sync + merge only (review skipped) is a real merge the group chat
+        should hear about; the card says the review was skipped."""
         self._run(webhook_url="https://example.invalid/hook", do_review=False)
-        self.assertEqual(self.posted, [])
+        self.assertEqual(len(self.posted), 1)
+        _url, kw = self.posted[0]
+        self.assertTrue(kw["merged"])
+        self.assertFalse(kw["do_review"])
 
     def test_unparsed_verdict_posts_nothing(self):
         o.run_opencode_review = lambda *a, **k: ("no verdict line here", "ses_x")
