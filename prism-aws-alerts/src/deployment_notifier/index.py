@@ -1,3 +1,4 @@
+import html
 import json
 import os
 import urllib.error
@@ -78,10 +79,11 @@ def _build_message(environment, component, status, pr_id, commit_sha, thread_nam
     """A deployment card in the same shape as the PR-merge alert: a header
     identifying what deployed and how it went, then labelled rows."""
     style = STATUS_STYLE.get(status, {"label": status.upper(), "color": "#5F6368"})
-    subtitle = " · ".join(part for part in (repo_name, component) if part)
+    # The component ("Frontend"/"Backend") is already evident from the repo
+    # name, so the subtitle is the repo alone.
     header = {"title": f"{environment} deployment {status}"}
-    if subtitle:
-        header["subtitle"] = subtitle
+    if repo_name:
+        header["subtitle"] = repo_name
 
     widgets = [
         {"decoratedText": {
@@ -90,8 +92,10 @@ def _build_message(environment, component, status, pr_id, commit_sha, thread_nam
         }},
     ]
     if pr_id:
-        pr_text = f"#{pr_id}" + (f" — {pr_title}" if pr_title else "")
-        widgets.append({"decoratedText": {"topLabel": "PR", "text": pr_text}})
+        # "PR #7" on one line, the title on the next. Chat reads <br> as a
+        # line break and treats < > as markup, so the title is escaped.
+        pr_text = f"PR #{pr_id}" + (f"<br>{html.escape(pr_title)}" if pr_title else "")
+        widgets.append({"decoratedText": {"text": pr_text, "wrapText": True}})
     if commit_sha:
         widgets.append({"decoratedText": {"topLabel": "Commit", "text": commit_sha[:12]}})
     if author:

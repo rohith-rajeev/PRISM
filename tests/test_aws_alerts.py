@@ -64,7 +64,8 @@ class DeploymentCard(unittest.TestCase):
         self.d = load("deployment_notifier")
 
     def widgets(self, payload):
-        return {w["decoratedText"]["topLabel"]: w["decoratedText"]["text"]
+        # Keyed by label; the PR row has none (it opens with "PR #<id>").
+        return {w["decoratedText"].get("topLabel", "PR"): w["decoratedText"]["text"]
                 for w in payload["cardsV2"][0]["card"]["sections"][0]["widgets"]}
 
     def test_success_and_failure_are_visually_distinct_without_emoji(self):
@@ -89,12 +90,20 @@ class DeploymentCard(unittest.TestCase):
                                   "spaces/S/threads/T", "alice", "repo", "Fix login")
         card = p["cardsV2"][0]["card"]
         self.assertEqual(card["header"]["title"], "QA deployment succeeded")
-        self.assertEqual(card["header"]["subtitle"], "repo · Api")
+        self.assertEqual(card["header"]["subtitle"], "repo", "no Frontend/Backend repeat")
         w = self.widgets(p)
-        self.assertEqual(w["PR"], "#7 — Fix login")
+        self.assertEqual(w["PR"], "PR #7<br>Fix login")
         self.assertEqual(w["Commit"], "abc123def456")
         self.assertEqual(w["Author"], "alice")
         self.assertEqual(p["thread"], {"name": "spaces/S/threads/T"})
+
+    def test_pr_title_is_escaped_for_chat_markup(self):
+        p = self.d._build_message("QA", "", "succeeded", "7", "abc", None, None, "repo", "a <b> & c")
+        self.assertEqual(self.widgets(p)["PR"], "PR #7<br>a &lt;b&gt; &amp; c")
+
+    def test_pr_row_without_a_title_is_just_the_number(self):
+        p = self.d._build_message("QA", "", "succeeded", "7", "abc", None, None, "repo")
+        self.assertEqual(self.widgets(p)["PR"], "PR #7")
 
     def test_unlinked_deployment_omits_the_pr_row_and_thread(self):
         p = self.d._build_message("QA", "", "failed", None, "abc123def4567", None, None, "repo")
@@ -102,6 +111,7 @@ class DeploymentCard(unittest.TestCase):
         self.assertNotIn("Author", self.widgets(p))
         self.assertNotIn("thread", p)
         self.assertEqual(p["cardsV2"][0]["card"]["header"]["subtitle"], "repo")
+        self.assertNotIn("Api", json.dumps(p))
 
     def test_deploy_alert_uses_the_pr_author_recorded_by_the_merge_alert(self):
         posted = []
