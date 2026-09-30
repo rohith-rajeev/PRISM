@@ -386,6 +386,7 @@ class ChatNotification(unittest.TestCase):
 
     def test_unparsed_verdict_posts_nothing(self):
         o.run_opencode_review = lambda *a, **k: ("no verdict line here", "ses_x")
+        o._continue_turn = lambda *a, **k: (0, "still nothing", "ses_x")
         self._run(webhook_url="https://example.invalid/hook")
         self.assertEqual(self.posted, [])
 
@@ -470,6 +471,66 @@ class SteeringNotes(unittest.TestCase):
         get_note must behave exactly as before — this is purely additive."""
         res = self._run(ask=lambda *a, **k: None)
         self.assertTrue(res["merged"])
+
+
+class VerdictRecovery(unittest.TestCase):
+    """A verdict the reviewer delivered must never be lost to parsing."""
+
+    def setUp(self):
+        importlib.reload(o)
+        self.addCleanup(importlib.reload, o)
+        self._tmp = tempfile.TemporaryDirectory()
+        self.clone = self._tmp.name
+        self.addCleanup(self._tmp.cleanup)
+        o._REVIEWED_STORE_PATH = Path(self._tmp.name) / "reviewed_commits.json"
+        o.ensure_bundled_agents = lambda *a, **k: ["pr-reviewer"]
+        o.resolve_repo = lambda r, p, l: (r, self.clone)
+        o.check_ff_mergeable = lambda *a, **k: (True, "ok")
+        o.try_fast_forward_merge = lambda *a, **k: {}
+        o.update_description_direct = lambda *a, **k: ""
+        o.get_pr = lambda *a, **k: {"status": "OPEN", "repositoryName": "repo",
+                                    "destinationReference": "main",
+                                    "sourceReference": "feat", "description": ""}
+
+    def _run(self, **kw):
+        return o._run_pipeline(self.clone, "repo", "7", local_repo=self.clone,
+                               emit=lambda *a, **k: None, **kw)
+
+    def test_reply_without_a_verdict_keeps_the_earlier_one(self):
+        o.run_opencode_review = lambda *a, **k: (REPORT, "ses_x")
+        o._continue_turn = lambda *a, **k: (0, "Noted, that migration is fine.", "ses_x")
+        res = self._run(ask=lambda *a, **k: None, get_note=iter(["check it", None]).__next__)
+        self.assertTrue(res["merged"])
+        self.assertNotEqual(res.get("stopped"), "unparsed-verdict")
+
+    def test_unreadable_verdict_is_restated_once_then_used(self):
+        o.run_opencode_review = lambda *a, **k: ("Looks good to me, ship it.", "ses_x")
+        prompts = []
+        def continue_turn(prompt, *a, **k):
+            prompts.append(prompt)
+            return 0, "**Verdict:** ✅ Approve\n**Impact score:** 2/10 — tiny\n", "ses_x"
+        o._continue_turn = continue_turn
+        res = self._run(ask=lambda *a, **k: None)
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("Restate your final verdict", prompts[0])
+        self.assertTrue(res["merged"])
+
+    def test_still_unreadable_after_the_restatement_stops_safely(self):
+        o.run_opencode_review = lambda *a, **k: ("no verdict here", "ses_x")
+        calls = []
+        o._continue_turn = lambda *a, **k: calls.append(1) or (0, "still none", "ses_x")
+        res = self._run(ask=lambda *a, **k: None)
+        self.assertEqual(len(calls), 1, "asked once, not in a loop")
+        self.assertEqual(res["stopped"], "unparsed-verdict")
+        self.assertFalse(res["merged"])
+
+    def test_no_session_means_no_restatement_attempt(self):
+        o.run_opencode_review = lambda *a, **k: ("no verdict here", None)
+        def must_not(*a, **k):
+            raise AssertionError("no session to continue")
+        o._continue_turn = must_not
+        res = self._run(ask=None)
+        self.assertEqual(res["stopped"], "unparsed-verdict")
 
 
 class LocaleIndependence(unittest.TestCase):

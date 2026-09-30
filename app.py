@@ -1948,6 +1948,12 @@ class App(tk.Tk):
                       font=FONT_B).pack(side="right")
         self.jobs_list = ScrollFrame(parent)
         self.jobs_list.pack(fill="both", expand=True)
+        # Section headers for the two groups below; packed only while their
+        # group has jobs (see _refresh_jobs_list).
+        self.jobs_hdr_running = tk.Label(self.jobs_list.inner, text="", font=FONT_XS,
+                                         bg=PAL["page"], fg=PAL["muted"], anchor="w")
+        self.jobs_hdr_done = tk.Label(self.jobs_list.inner, text="", font=FONT_XS,
+                                      bg=PAL["page"], fg=PAL["muted"], anchor="w")
         self.jobs_empty = tk.Label(
             self.jobs_list.inner,
             text="No jobs yet.\n\nStart one with “New job” — each pull request "
@@ -2221,8 +2227,7 @@ class App(tk.Tk):
         nrow.pack(fill="x")
         self.note_entry = self._entry(nrow)
         self.note_entry.pack(side="left", fill="x", expand=True, ipady=3, padx=(0, 8))
-        _add_placeholder(self.note_entry,
-                         "Add an instruction — the reviewer picks it up at its next turn…")
+        _add_placeholder(self.note_entry, self._NOTE_PLACEHOLDER)
         self.note_entry.bind("<Return>", lambda _e: self._send_note())
         self.note_send_btn = RoundedButton(nrow, text="Send note", command=self._send_note,
                                            style="outline", height=30, width=90,
@@ -2655,12 +2660,16 @@ class App(tk.Tk):
 
     # ---------------- jobs list ----------------
     def _refresh_jobs_list(self):
+        """Running jobs (queued ones included) first, finished ones in a
+        section below, newest first — so live work is never buried under
+        history."""
         inner = self.jobs_list.inner
         created = False
         for job_id, row in list(self.rows.items()):
             if job_id not in self.manager.jobs:
                 row.destroy()
                 del self.rows[job_id]
+        running, finished = [], []
         for job in self.manager.jobs.values():
             row = self.rows.get(job.id)
             if row is None:
@@ -2669,9 +2678,27 @@ class App(tk.Tk):
                              on_retry=self._retry_job)
                 self.rows[job.id] = row
                 created = True
-            if not row.winfo_manager():
-                row.pack(fill="x", pady=(0, 6))
             row.refresh()
+            (running if job.is_active else finished).append(row)
+        finished.reverse()
+        self.jobs_hdr_running.config(text=f"RUNNING  ·  {len(running)}")
+        self.jobs_hdr_done.config(text=f"COMPLETED  ·  {len(finished)}")
+        desired = []
+        if running:
+            desired += [self.jobs_hdr_running] + running
+        if finished:
+            desired += [self.jobs_hdr_done] + finished
+        # Re-pack only when the order actually changed: this runs on every
+        # job event, and needlessly re-packing every row would flicker.
+        current = [w for w in inner.pack_slaves() if w is not self.jobs_empty]
+        if current != desired:
+            for w in current:
+                w.pack_forget()
+            for w in desired:
+                if w is self.jobs_hdr_running or w is self.jobs_hdr_done:
+                    w.pack(fill="x", pady=(0, 4) if w is desired[0] else (10, 4))
+                else:
+                    w.pack(fill="x", pady=(0, 6))
         if self.manager.jobs:
             if self.jobs_empty.winfo_manager():
                 self.jobs_empty.pack_forget()
@@ -2879,9 +2906,7 @@ class App(tk.Tk):
             self.stop_btn.set_command(self._stop)
             self.stop_btn.set_enabled(job.is_active)
         self._render_log(job)
-        note_enabled = job.is_active
-        self.note_entry.config(state="normal" if note_enabled else "disabled")
-        self.note_send_btn.set_enabled(note_enabled)
+        self._update_note_controls(job)
         if job.pending_question:
             # The ask event already fired while this job was unselected, so the
             # panel has to be driven from stored state, not from the event.
@@ -2936,12 +2961,48 @@ class App(tk.Tk):
         self._refresh_jobs_list()
         self._refresh_pill()
 
+    _NOTE_PLACEHOLDER = "Add an instruction — the reviewer picks it up at its next turn…"
+    _ASK_PLACEHOLDER = ("Ask about this pull request — the reviewer answers from this "
+                        "job's context…")
+    _ASK_BUSY_PLACEHOLDER = "Waiting for the reviewer's answer…"
+
+    def _update_note_controls(self, job):
+        """The one box serves a running job and a finished one.
+
+        While the job is active it queues a steering note for the reviewer's
+        next turn. Once it has finished, the same box asks the reviewer a
+        follow-up about this pull request (read-only — see
+        JobManager.start_followup); it only goes quiet while one is answering.
+        """
+        if job.is_terminal:
+            enabled = not job.followup_busy
+            _set_placeholder(self.note_entry, self._ASK_BUSY_PLACEHOLDER
+                             if job.followup_busy else self._ASK_PLACEHOLDER)
+            self.note_send_btn.set_text("Ask")
+        else:
+            enabled = job.is_active
+            _set_placeholder(self.note_entry, self._NOTE_PLACEHOLDER)
+            self.note_send_btn.set_text("Send note")
+        self.note_entry.config(state="normal" if enabled else "disabled")
+        self.note_send_btn.set_enabled(enabled)
+
     def _send_note(self):
         job = self.manager.jobs.get(self.selected_job_id)
-        if job is None or not job.is_active:
+        if job is None:
             return
         text = _entry_value(self.note_entry).strip()
         if not text:
+            return
+        if job.is_terminal:
+            if self.manager.start_followup(job.id, text) is None:
+                return
+            job.append_log(f"\n💬 You: {text[:300]}", "warn")
+            self.note_entry.delete(0, "end")
+            _restore_placeholder(self.note_entry)
+            self._render_log(job)
+            self._update_note_controls(job)
+            return
+        if not job.is_active:
             return
         job.queue_note(text)
         job.append_log(f"📝 Note queued — the reviewer picks it up at its next turn: "
@@ -3081,6 +3142,11 @@ class App(tk.Tk):
                     if shown:
                         self._paint_tokens(job.tokens)
                 return True
+            if tag == "session":
+                # The reviewer's conversation id (see orchestrator), kept so a
+                # follow-up after the job ends continues the same conversation.
+                job.session_id = (line or "").strip()
+                return False
             if tag == "prmeta":
                 # Structured PR facts, not a transcript line (see
                 # orchestrator._emit_pr_meta).
@@ -3113,6 +3179,12 @@ class App(tk.Tk):
                     self._paint_verdict()
                     self._paint_impact(job.impact)
                 return True
+            return False
+        if kind == "followup_done":
+            job.followup_busy = False
+            job.followup_control = None
+            if shown:
+                self._update_note_controls(job)
             return False
         if kind == "progress":
             stage, state = payload
@@ -3198,7 +3270,7 @@ def _add_placeholder(entry, text):
         # would then silently read "" back even though the field looks filled
         # in. Reconcile the flag from what's actually on screen instead of
         # trusting every event to have updated it.
-        if getattr(entry, "_has_ph", False) and entry.get() != text:
+        if getattr(entry, "_has_ph", False) and entry.get() != entry._ph_text:
             entry._has_ph = False
             entry.config(fg=PAL["text"])
     entry._ph_text = text  # noqa: SLF001 - so it can be restored later
@@ -3209,7 +3281,7 @@ def _add_placeholder(entry, text):
         clear_placeholder()
     def on_out(_e):
         if not entry.get():
-            entry.insert(0, text)
+            entry.insert(0, entry._ph_text)
             entry._has_ph = True
             entry.config(fg=PAL["muted"])
     def on_key(e):
@@ -3251,6 +3323,24 @@ def _restore_placeholder(entry):
     entry.insert(0, text)
     entry._has_ph = True  # noqa: SLF001
     entry.config(fg=PAL["muted"])
+
+
+def _set_placeholder(entry, text):
+    """Change an entry's placeholder, keeping anything the person typed.
+
+    The placeholder callbacks read `_ph_text` live, so a swap here is seen by
+    every later focus-out. The entry may be disabled (writes are ignored while
+    it is), so it is briefly made editable.
+    """
+    if getattr(entry, "_ph_text", None) == text:
+        return
+    state = str(entry.cget("state"))
+    entry.config(state="normal")
+    if getattr(entry, "_has_ph", False):
+        entry.delete(0, "end")
+        entry.insert(0, text)
+    entry._ph_text = text  # noqa: SLF001
+    entry.config(state=state)
 
 
 def _entry_value(entry):

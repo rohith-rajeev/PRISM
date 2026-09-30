@@ -47,9 +47,13 @@ application) — nothing here is imported from or attached to them.
    listed in `pipeline_branches`.
    - Calls `codepipeline:GetPipelineExecution` to read the commit SHA the
      pipeline actually built.
-   - Looks that commit up in DynamoDB. If found, posts a plain-text
-     `{environment} deployment {succeeded|failed}:` message **threaded onto**
-     the original message in each recorded chat.
+   - Looks that commit up in DynamoDB. If found, posts a card in the
+     same style as the merge card — titled `{environment} deployment
+     {succeeded|failed}`, with a colour-coded **SUCCEEDED** (green) or
+     **FAILED** (red) status row, the PR, commit and author — **threaded
+     onto** the original message in each recorded chat. The author is the PR
+     author recorded by the merge alert, so both messages name the same
+     person; the git commit author is only a fallback.
    - If the commit isn't found (e.g. a manual re-run on an old revision), it
      falls back to `pipeline_branches` to work out which branch was deployed
      and posts a standalone message to every chat watching that branch

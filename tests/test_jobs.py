@@ -270,3 +270,91 @@ class PrMetaDisplay(unittest.TestCase):
         self.assertEqual(job.branches, "feat → main")
         self.assertIn("feat → main", job.summary_line())
         self.assertIn("by alice", job.summary_line())
+
+
+class FollowUp(unittest.TestCase):
+    """Questions put to the reviewer once a job has finished."""
+
+    def setUp(self):
+        self.q = queue.Queue()
+        self.calls = []
+        self.release = threading.Event()
+
+        def followup_runner(text, project_dir, repo_name, pr_id, local_repo=None,
+                            region=None, model=None, session_id=None, outcome="",
+                            emit=None, control=None):
+            self.calls.append((text, session_id, outcome))
+            emit("answer line", "agent")
+            emit('{"total": 5}', "tokens")
+            self.release.wait(2)
+            return ("DECLINED: nope" if "weather" in text else "fine"), session_id
+
+        self.mgr = J.JobManager(self.q, runner=lambda **kw: {}, followup_runner=followup_runner)
+        self.job = self.mgr.create(J.JobSpec(project_dir=".", repo_name="r", pr_id="9"))
+
+    def _events(self, until="followup_done", timeout=3):
+        seen, end = [], time.time() + timeout
+        while time.time() < end:
+            try:
+                _id, kind, payload = self.q.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            seen.append((kind, payload))
+            if kind == until:
+                break
+        return seen
+
+    def test_not_allowed_while_the_job_is_still_active(self):
+        self.assertIsNone(self.mgr.start_followup(self.job.id, "hello"))
+
+    def test_runs_in_the_jobs_session_and_reports_the_outcome(self):
+        self.job.status = J.DONE
+        self.job.session_id = "ses_1"
+        self.job.result = {"merged": True}
+        self.release.set()
+        self.assertIs(self.mgr.start_followup(self.job.id, "  why?  "), self.job)
+        events = self._events()
+        self.assertEqual(self.calls, [("why?", "ses_1", "merged")])
+        logs = [p[0] for k, p in events if k == "log"]
+        self.assertIn("answer line", logs)
+        self.assertIn("✔ Follow-up answered.", logs)
+        self.assertEqual(events[-1][0], "followup_done")
+
+    def test_token_lines_never_reach_the_job(self):
+        self.job.status = J.DONE
+        self.release.set()
+        self.mgr.start_followup(self.job.id, "q")
+        tags = [p[1] for k, p in self._events() if k == "log"]
+        self.assertNotIn("tokens", tags)
+
+    def test_unrelated_request_is_reported_as_not_actioned(self):
+        self.job.status = J.DONE
+        self.release.set()
+        self.mgr.start_followup(self.job.id, "what's the weather")
+        logs = [p[0] for k, p in self._events() if k == "log"]
+        self.assertTrue(any(m.startswith("⛔ Not actioned — nope") for m in logs), logs)
+
+    def test_one_at_a_time_and_empty_text_ignored(self):
+        self.job.status = J.DONE
+        self.assertIsNone(self.mgr.start_followup(self.job.id, "   "))
+        self.assertIsNotNone(self.mgr.start_followup(self.job.id, "first"))
+        self.assertTrue(self.job.followup_busy)
+        self.assertIsNone(self.mgr.start_followup(self.job.id, "second"))
+        self.release.set()
+        self._events()
+
+    def test_retry_cancels_an_in_flight_followup_quietly(self):
+        self.job.status = J.DONE
+        self.mgr.start_followup(self.job.id, "first")
+        ctl = self.job.followup_control
+        self.job.session_id = "ses_old"
+        self.mgr.retry(self.job.id)
+        self.assertTrue(ctl.cancelled())
+        self.assertFalse(self.job.followup_busy)
+        self.assertEqual(self.job.session_id, "")
+        self.release.set()
+        time.sleep(0.3)
+        kinds = []
+        while not self.q.empty():
+            kinds.append(self.q.get()[1])
+        self.assertNotIn("followup_done", kinds, "a cancelled follow-up stays silent")
