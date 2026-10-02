@@ -1,21 +1,24 @@
-# Review consistency across stages
+# Consistent reviews of the same change
 
 ## The problem
 
-A change usually reaches production as several pull requests — feature →
-develop, develop → QA, QA → staging. Reviewing each one gave different
-findings. A defect missed on the first pass would surface at QA, and one missed
-by both would surface at staging — after QA had signed the code off — so the
-fix to it was never tested by QA.
+The same change often gets reviewed more than once: a retry, another pass on the
+same PR after edits, or another PR carrying it into a different branch. How that
+happens depends on the project's branching strategy — it might be a chain of
+environment branches, a release branch, a hotfix line or nothing like either —
+and PRISM assumes none of it. Reviewing each pass from scratch gave different
+findings each time. A defect missed on the first pass could surface on a later
+review, after the code had already been tested on the strength of the first, so
+the fix for it was never covered by that testing.
 
 ## Why it happened
 
-1. **No memory between PRs.** The only continuity PRISM had was the incremental
-   review, which applies to the *same PR id* when the earlier reviewed commit is
-   an ancestor of the current one. Promotion PRs have different ids, so each was
-   reviewed from scratch, as if new, by a model that explores freely and so
-   notices different things on different runs. The same held for Retry on an
-   unchanged commit.
+1. **No memory between reviews.** The only continuity PRISM had was the
+   incremental review, which applies to the *same PR id* when the earlier
+   reviewed commit is an ancestor of the current one. A different PR, a retry on
+   an unchanged commit, or the same change on another branch was reviewed from
+   scratch, as if new, by a model that explores freely and so notices different
+   things on different runs.
 2. **Open-ended coverage.** The reviewer was told six dimensions to consider but
    not *how* — no procedure for failure paths, for who depends on a changed
    contract, or for whether a bug is one instance of a repeated pattern. What it
@@ -45,14 +48,14 @@ rather than commit id is what makes it survive the things that change shas:
 
 | Situation | Matched? |
 |---|---|
-| Fast-forward promotion (same commits) | yes — by hunks, and by sha as a shortcut |
+| The same commits moved to another branch (fast-forward) | yes — by hunks, and by sha as a shortcut |
 | Rebase onto a moved base | yes — every sha changes, the hunks don't |
 | Squash | yes |
 | Cherry-pick onto another branch | yes |
-| Promotion that bundles several features (A reviewed alone, PR holds A+B+C) | yes — A's hunks are all present |
+| A PR that bundles several changes (A reviewed alone, this PR holds A+B+C) | yes — A's hunks are all present |
 | Follow-up fix on top of reviewed code | yes — the unchanged hunks match, the edited ones don't |
 | Heavily reworked code, or a conflict resolution that rewrites the lines | partly, or not at all — correctly, it is no longer the same change |
-| Unrelated PR | no (and a single shared boilerplate hunk is not enough: at least 25% of the earlier review's hunks must recur) |
+| Unrelated PR, whichever branch it targets | no (and a single shared boilerplate hunk is not enough: at least 25% of the earlier review's hunks must recur) |
 
 The reviewer receives the matched findings as a clearly marked `REVIEW HISTORY`
 block. Each finding is tagged `[same code in this PR]` or `[code has changed
@@ -101,12 +104,12 @@ reviewer weighs it: **Critical or High** (data loss, security, a crash or wrong
 result on a common path) still means **Request changes**; a **Medium, Low or Nit**
 late find is reported but on its own leaves the verdict at **Approve with
 comments**, to be fixed in the next normal cycle rather than as an untested
-change at the last stage. This is a judgment rule in the reviewer's instructions
+last-minute change. This is a judgment rule in the reviewer's instructions
 (Step 0.6) — see "Tuning" if you would rather it block.
 
-**The process answer is still yours:** a defect found late should be fixed at the
-*lowest* environment and promoted back up through QA, not patched in at staging.
-PRISM can flag a late find; it cannot make that happen.
+**The process answer is still yours:** a defect found late should be fixed where
+the code is first tested and carried forward from there, not patched in at the
+last point. PRISM can flag a late find; it cannot make that happen.
 
 ## Where it is kept
 
@@ -127,10 +130,10 @@ anyone else; otherwise it neither reads nor writes it. The file is mode 0600 on 
 
 - **It does not make the reviewer deterministic.** It narrows variance and makes
   the remaining differences visible; a model can still miss something.
-- **It is machine-local.** A stage reviewed on a different machine, or after the
+- **It is machine-local.** A review done on a different machine, or after the
   temp folder was cleared, has no record of the earlier ones. That is the accepted
   trade for PRISM never writing to a repository.
-- **It cannot match code that has really been rewritten** between stages, nor
+- **It cannot match code that has really been rewritten** between reviews, nor
   hunks whose lines a conflict resolution changed. A very large diff is
   fingerprinted only up to 2,000 hunks.
 - **Late-find tagging relies on the reviewer following its instructions.** An
@@ -180,6 +183,6 @@ anyone else; otherwise it neither reads nor writes it. The file is mode 0600 on 
   review and surfaces late finds; `update_description_direct(late=…)`.
 - `agents/pr-reviewer.md` — Step 0.6, Step 2 (2a/2b/2c), the report format.
 - `tests/test_review_history.py` — the memory, content matching on real git
-  repositories (rebase, squash, cherry-pick, bundled promotion, follow-up fix),
+  repositories (rebase, squash, cherry-pick, a PR bundling other changes, follow-up fix),
   prompt wiring, late finds, the "writes nothing to the repo" proof, and pins on
   the reviewer's instructions.

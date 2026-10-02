@@ -78,12 +78,12 @@ about that PR (read-only; unrelated requests are declined). A
 **Custom instructions** field on the new-job screen does the same before a
 review even starts.
 
-## Review consistency across stages
-A change that moves develop → QA → staging is several PRs carrying the *same
-change*. PRISM remembers what it concluded about it — a short-lived, per-user
+## Consistent reviews of the same change
+A change is often reviewed more than once — a retry, another PR, another branch,
+whatever your branching strategy. PRISM remembers what it concluded about it — a short-lived, per-user
 file in the OS temp folder; it never writes to a repository — matched by the code
 that changed, so it survives rebases and squashes. It gives the reviewer the
-earlier findings as context, so later stages stay consistent and anything missed
+earlier findings as context, so repeat reviews stay consistent and anything missed
 earlier is flagged as a **late find** — because a fix made that late is not
 covered by the testing in between. The reviewer is also
 required, on the very first pass, to check failure handling and edge cases, the

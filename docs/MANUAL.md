@@ -120,8 +120,8 @@ the same mistake occurs, so one fix can cover them all:
   It is listed for whoever fixes the bug; it never blocks the merge by itself.
 - *No other occurrences found.* — the reviewer looked and found none.
 - *(late find — missed in PR #n)* — a problem in code an earlier review (for
-  example at the previous stage) had already covered. See **Reviewing the same
-  change at several stages**, under Settings. When a review has any, the job log
+  example on an earlier PR) had already covered. See **Reviewing the same
+  change more than once**, under Settings. When a review has any, the job log
   and the PR description carry a warning, because a fix made now has not been
   through the testing done since that earlier review.
 
@@ -286,14 +286,14 @@ tells codegen. Untick **Merge approved pull requests from it** to
 review only and merge by hand. Pressing **Stop** on a codegen job tells codegen it
 was stopped. Nothing changes for jobs you start yourself.
 
-**Reviewing the same change at several stages.** When a PR carries changes
-PRISM has already reviewed — the develop → QA → staging promotions of one
-change, even after a rebase or squash — PRISM hands the reviewer its earlier
-findings, so the stages agree. This memory is a small temporary file on this
+**Reviewing the same change more than once.** When a PR carries changes PRISM
+has already reviewed — a retry, another PR, or the same change on another
+branch, even after a rebase or squash — PRISM hands the reviewer its earlier
+findings, so the reviews agree. It doesn't matter how your branches are laid out. This memory is a small temporary file on this
 machine (PRISM never writes to your repositories); if it has been cleared, or
 the earlier review was on another machine, PRISM just reviews afresh.
 The reviewer still checks the whole PR; the history is never an approval. If it
-finds a problem the earlier stages missed, it marks it as a **late find**, and
+finds a problem the earlier reviews missed, it marks it as a **late find**, and
 the job log and PR description say so: a fix made now was not covered by the
 testing since that review, so ideally it goes back through the lower
 environments. A late Critical or High finding still blocks the merge; a late
@@ -355,7 +355,7 @@ PRISM is deliberately cautious:
 | The code-generation tool never submits a PR | The integration is off, PRISM wasn't running, or the tool isn't set up for it. The tool retries for a while, then tells its own session |
 | A job *via codegen* sits at **Needs input** | The reviewer or the high-impact merge confirmation is waiting for **you**, same as any job |
 | "Review round limit" / PR handed back to you | The PR used all its automatic rounds without being approved. Review it by hand |
-| A *late finding* warning | A problem the earlier stage missed. Fix it at the lowest environment and promote it back up through testing |
+| A *late finding* warning | A problem an earlier review missed. The fix hasn't had the testing that followed that review, so test it again |
 
 ---
 
@@ -369,7 +369,7 @@ PRISM is deliberately cautious:
   **Retrying a job**, above — faster instead of starting over). A third, short-lived
   thing lives in your system's temporary folder, not under `~/.prism/`: PRISM's
   memory of what it concluded about earlier reviews, used for **Reviewing the same
-  change at several stages**. The system may clear it at any time; PRISM then just
+  change more than once**. The system may clear it at any time; PRISM then just
   reviews afresh.
 - Each job keeps the last 5,000 lines of its conversation.
 - Every job takes a snapshot of its settings when it starts, so changing the

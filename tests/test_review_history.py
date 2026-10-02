@@ -465,6 +465,16 @@ class RealGit(Isolated):
         self.assertEqual((m["hunk_overlap"], m["hunk_total"]), (3, 4))
         self.assertIn("app.py", m["matched_files"])
 
+    def test_matching_does_not_depend_on_branch_names_or_layout(self):
+        """Reviewed against one branch, seen again against a differently named
+        one (and again against the very same one): the code is what matches."""
+        tip = self.feature_a()
+        self.record("10", "qa", tip)
+        for name in ("hotfix-line", "release/2026.10", "trunk", "qa"):
+            git(self.clone, "push", "-q", "origin", f"{self.base}:refs/heads/{name}", "--force")
+            (m,) = self.related_for(name, tip)
+            self.assertEqual(m["hunk_overlap"], 4, name)
+
     def test_an_unrelated_pr_gets_nothing(self):
         tip = self.feature_a()
         self.record("10", "qa", tip)
@@ -698,6 +708,48 @@ class PipelineIntegration(Isolated):
         self.assertFalse(res["merged"])
         self.assertEqual(res["stopped"], "verdict-blocks-merge")
         self.assertEqual(self.merged, [])
+
+
+class NoAssumedBranchLayout(Isolated):
+    """PRISM is used with many branching strategies. Wording that names a
+    particular set of branches (or an order between them) quietly teaches the
+    reviewer, and the reader, that one layout is the norm."""
+
+    NAMES = __import__("re").compile(r"\b(develop|staging|qa)\b|lower environment", __import__("re").I)
+    ROOT = Path(__file__).resolve().parent.parent
+
+    def top_changelog_sections(self, n=2):
+        text = (self.ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        return "\n".join(text.split("\n## ")[1:1 + n])
+
+    def test_product_text_names_no_branches(self):
+        sources = {
+            "agents/pr-reviewer.md": (self.ROOT / "agents" / "pr-reviewer.md").read_text("utf-8"),
+            "docs/MANUAL.md": (self.ROOT / "docs" / "MANUAL.md").read_text("utf-8"),
+            "docs/REVIEW_CONSISTENCY.md": (self.ROOT / "docs" / "REVIEW_CONSISTENCY.md").read_text("utf-8"),
+            "docs/CODEGEN_INTEGRATION.md": (self.ROOT / "docs" / "CODEGEN_INTEGRATION.md").read_text("utf-8"),
+            "CHANGELOG.md (latest two releases)": self.top_changelog_sections(),
+        }
+        for name, text in sources.items():
+            hit = self.NAMES.search(text)
+            self.assertIsNone(hit, f"{name} assumes a branch layout: {hit and hit.group(0)!r}")
+
+    def test_messages_shown_to_users_and_the_reviewer_name_no_branches(self):
+        related = [{"record": {"repo": "r", "pr_id": "1", "commit": "a" * 40, "dest": "main",
+                               "verdict_raw": "x", "findings": []},
+                    "score": 1.0, "at": 1, "hunk_overlap": 1, "hunk_total": 1,
+                    "sha_overlap": 0, "sha_total": 0, "matched_files": []}]
+        shown = [o.history_block(related, "2")]
+        logged = []
+        o.get_pr = lambda *a, **k: {"description": ""}
+        written = {}
+        o.aws_cli = lambda *a, **k: written.update(d=a[a.index("--description") + 1]) or {}
+        o.update_description_direct("7", "Request changes", "5", ["- **[High] x** y"],
+                                    verdict_key="request-changes", source_commit="abc", late=1)
+        shown.append(written["d"])
+        for text in shown + logged:
+            self.assertIsNone(self.NAMES.search(text), text[:80])
+        self.assertIn("test it again", written["d"])
 
 
 class ReviewerInstructions(unittest.TestCase):

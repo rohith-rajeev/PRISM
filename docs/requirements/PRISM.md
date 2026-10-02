@@ -282,7 +282,7 @@ new-job screen is folded into the agent's very first prompt the same way.
 
 - **Review history is context, never a gate.** PRISM's short-lived, machine-local memory of earlier
   reviews (a temp-folder file; nothing is written to any repository, matched by
-  hunk fingerprints so rebases and squashes still match) is shown to the reviewer as fenced, bounded data so stages
+  hunk fingerprints so rebases and squashes still match) is shown to the reviewer as fenced, bounded data so repeat reviews
   of one change stay consistent and missed defects are flagged as late finds. It
   feeds no merge decision, and any failure to read or write it yields the
   pre-existing behaviour. See `docs/REVIEW_CONSISTENCY.md`.

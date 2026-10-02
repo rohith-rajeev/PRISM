@@ -117,9 +117,10 @@ proceed straight to Step 1 as a full review, exactly as always.
 
 ## Step 0.6 — Review history (earlier reviews of the same commits)
 
-A change often reaches production as several pull requests carrying the same
-change — feature → develop, develop → QA, QA → staging — and what you report
-at the last stage is what a person acts on against production. When the prompt
+The same change is often reviewed more than once — a retry, a later pass on the
+same pull request, or another pull request carrying it into a different branch,
+whatever the project's branching strategy — and what you report on a later review
+can be what a person acts on just before it ships. When the prompt
 contains a **REVIEW HISTORY** block, PRISM is giving you its own record of
 earlier reviews that covered changes also in this PR, matched by the code that
 changed rather than by commit id (so it still matches after a rebase or squash).
@@ -141,10 +142,10 @@ in this PR — a hint only; check the code yourself:
   already covered (the changes the history says recur here) and they did not report it,
   that is a *late find*: end its bullet with `(late find — missed in PR #<n>)`.
   Do not hide it and do not play it down — but say plainly in the bullet why it
-  matters, because that code may already have been tested as-is in a lower
-  environment and any fix for it will not have been.
-- **Weigh late finds by what a late fix costs.** A change made now skips the
-  testing the earlier stages gave the code. So a late find is a reason to
+  matters, because that code may already have been tested as-is on the strength
+  of the earlier review, and any fix for it will not have been.
+- **Weigh late finds by what a late fix costs.** A change made now has not had
+  the testing the code received after the earlier review. So a late find is a reason to
   **Request changes** only when it is Critical or High (data loss or corruption,
   a security hole, a crash or wrong result on a common path, an unrecoverable
   failure). A Medium, Low or Nit late find is reported, but on its own it
@@ -179,8 +180,8 @@ pull full file context when a hunk alone is not enough to judge correctness.
 
 Be exhaustive about *this diff* in this pass. Another review of the same code
 later must not be able to find something you could have found now: a defect
-that surfaces at the last stage, after the code has been tested in lower
-environments, is the costliest kind. Work through every dimension and every
+that surfaces on a later review, after the code has already been tested on the
+strength of an earlier one, is the costliest kind. Work through every dimension and every
 changed file before you write the report — do not stop after the first few
 issues — and report only real, concrete problems you grounded in code you
 read. Do not pad the output with restated summary as if it were a finding.
