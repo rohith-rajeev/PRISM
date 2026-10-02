@@ -32,6 +32,7 @@ verdict, never force-pushes, aborts cleanly on conflicts).
 PRISM/
 ├── app.py                  # UI (dark themed, ~1100 lines, stdlib only)
 ├── orchestrator.py         # Backend: agent runs, verdict parsing, AWS merge/sync
+├── codegen_bridge.py          # Optional loopback link to a code-generation tool (see docs/CODEGEN_INTEGRATION.md)
 ├── agents/
 │   └── pr-reviewer.md      # Bundled project-agnostic reviewer agent
 ├── docs/
@@ -278,6 +279,19 @@ new-job screen is folded into the agent's very first prompt the same way.
   finished jobs whose verdicts and conversations are only held in memory. The
   dialog defaults to **No**, so a stray Enter cannot discard a day's reviews.
   With no jobs at all it closes without asking.
+
+- **Review history is context, never a gate.** PRISM's short-lived, machine-local memory of earlier
+  reviews (a temp-folder file; nothing is written to any repository, matched by
+  hunk fingerprints so rebases and squashes still match) is shown to the reviewer as fenced, bounded data so stages
+  of one change stay consistent and missed defects are flagged as late finds. It
+  feeds no merge decision, and any failure to read or write it yields the
+  pre-existing behaviour. See `docs/REVIEW_CONSISTENCY.md`.
+- **The code-generation integration is opt-in and loopback-only.** Off by default. When on, an
+  codegen request becomes an ordinary job: every gate above (verdict, OPEN status,
+  fast-forward, unchanged source, high-impact confirmation) applies unchanged.
+  codegen can ask PRISM to merge *less*, never more; callbacks may only go to a
+  loopback address; the review loop is capped per PR and refuses a resubmission
+  with no new commits. See `docs/CODEGEN_INTEGRATION.md`.
 
 ---
 

@@ -56,6 +56,12 @@ class JobSpec:
     dry_run: bool = False
     webhook_url: str = None
     custom_instructions: str = ""
+    # Where the job came from: "manual" for the New-job form, "codegen" for a PR
+    # codegen handed over (see codegen_bridge). Display and routing only — these are
+    # deliberately absent from pipeline_kwargs(), so the review/merge pipeline
+    # behaves identically whoever asked for it.
+    origin: str = "manual"
+    origin_ref: str = ""
 
     @property
     def label(self):
@@ -73,6 +79,8 @@ class JobSpec:
     def summary_bits(self):
         """Short descriptor for a jobs-list row."""
         bits = [self.region]
+        if self.origin == "codegen":
+            bits.insert(0, "via codegen")
         if not self.do_review:
             bits.append("no review")
         if self.dry_run:
@@ -213,6 +221,8 @@ class Job:
     def summary_line(self):
         """One-line description for the detail screen header."""
         bits = [self.spec.label, self.spec.region]
+        if self.spec.origin == "codegen":
+            bits.append("via codegen")
         if self.branches:
             bits.append(self.branches)
         if self.author:
@@ -239,8 +249,13 @@ class JobManager:
     """
 
     def __init__(self, out_q, runner=full_pipeline, max_parallel=None,
-                 followup_runner=run_followup):
+                 followup_runner=run_followup, on_outcome=None):
         self.out_q = out_q
+        # Optional observer, called on the worker thread as
+        # on_outcome(job, summary=..., error=..., stopped=...) once a run ends.
+        # Observing only: it cannot change the job, and anything it raises is
+        # swallowed. None (the default) leaves behaviour exactly as it was.
+        self._on_outcome = on_outcome
         self._followup_runner = followup_runner
         self.jobs = {}           # insertion-ordered; doubles as display order
         self._next_id = 1
@@ -364,13 +379,24 @@ class JobManager:
                       for k, v in summary.items() if k not in ("review", "tokens")}
             payload["tokens"] = summary.get("tokens")
             job.emit_event("done", payload)
+            self._notify(job, summary=summary)
         except Exception as e:  # noqa: BLE001
             # Stopping kills the child process, so the failure it provokes is
             # the stop, not a real error — report it as such.
             if job.control.cancelled():
                 job.emit_event("stopped", None)
+                self._notify(job, stopped=True)
             else:
                 job.emit_event("error", str(e)[:3000])
+                self._notify(job, error=e)
+
+    def _notify(self, job, **outcome):
+        if self._on_outcome is None:
+            return
+        try:
+            self._on_outcome(job, **outcome)
+        except Exception:  # noqa: BLE001
+            pass
 
     # ----- follow-up questions after a job has finished -----
     def start_followup(self, job_id, text):

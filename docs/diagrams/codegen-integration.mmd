@@ -1,0 +1,21 @@
+sequenceDiagram
+    autonumber
+    participant I as codegen (code-generation tool + its PRISM plugin)
+    participant P as PRISM (bridge, UI thread, job)
+    participant C as CodeCommit
+    Note over I,P: Both sides optional. PRISM publishes ~/.prism/codegen-bridge.json when enabled.
+    I->>C: create pull request (aws codecommit create-pull-request)
+    I->>P: POST /v1/reviews (request_id, PR, callback, context, iteration=1)
+    P-->>I: 202 review_id
+    P->>P: UI thread admits → ordinary job (review → describe → merge pipeline)
+    P->>C: review, write findings to PR description
+    alt Request changes / Block
+        P->>I: POST callback (decision=changes-requested, feedback)
+        I->>I: findings → agent prompt; agent fixes, pushes to same branch
+        I->>P: POST /v1/reviews (iteration=2, new request_id)
+        Note over P: 409 no-new-commits if nothing was pushed;<br/>409 iteration-limit after max rounds
+    else Approve
+        P->>C: fast-forward merge (all gates apply; high impact asks a human)
+        P->>I: POST callback (decision=merged)
+    end
+    Note over I,P: Callback lost? codegen polls GET /v1/reviews/{id}

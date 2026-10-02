@@ -4,6 +4,33 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v3.6
+
+- **Reviews stay consistent from develop to QA to staging.** PRISM keeps a
+  short-lived record (a temp file on this machine; nothing is ever written to
+  your repositories) of what it concluded about each change, matched by the code
+  that changed so it survives rebases and squashes, and gives the reviewer the
+  earlier findings when the same change comes back in a later PR (or a Retry). A
+  defect the earlier stages missed is flagged as a **late find** in the job log
+  and the PR description, since a fix made that late hasn't been through the
+  testing in between. Only a late Critical/High finding blocks the merge; a
+  late Medium or lower is reported and approves with comments. Nothing changes
+  if there is no earlier review of those changes.
+- **Reviewers look harder the first time.** Every review now checks failure
+  handling and edge cases, the impact on callers, and searches the repository
+  for the same defect elsewhere: each finding lists the other places the pattern
+  occurs (or says none were found), so one fix can cover them all. Findings can
+  be longer as a result, and reviews use somewhat more tokens.
+- **Codegen tool integration (optional).** In Help, tick *Accept reviews from a
+  code-generation tool* and PRISM will review the pull requests a codegen tool
+  opens, send "request changes" findings back to it, and merge once the PR is
+  approved — repeating up to five rounds before it hands over to you. Off by
+  default and local to your machine; a job from the tool is an ordinary job
+  (marked *via codegen*) with every existing check, including the high-impact
+  confirmation, still in force. Nothing changes if you never turn it on.
+- **The manual is updated** for all of the above: how to read the new finding
+  markers, the new safety notes and troubleshooting entries.
+
 ## v3.5
 
 - **Fewer "could not parse a verdict" stops.** The verdict is now found

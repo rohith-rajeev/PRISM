@@ -78,6 +78,28 @@ about that PR (read-only; unrelated requests are declined). A
 **Custom instructions** field on the new-job screen does the same before a
 review even starts.
 
+## Review consistency across stages
+A change that moves develop → QA → staging is several PRs carrying the *same
+change*. PRISM remembers what it concluded about it — a short-lived, per-user
+file in the OS temp folder; it never writes to a repository — matched by the code
+that changed, so it survives rebases and squashes. It gives the reviewer the
+earlier findings as context, so later stages stay consistent and anything missed
+earlier is flagged as a **late find** — because a fix made that late is not
+covered by the testing in between. The reviewer is also
+required, on the very first pass, to check failure handling and edge cases, the
+impact on callers, and to **sweep the repo for the same defect pattern** so one
+fix covers every occurrence. See [`docs/REVIEW_CONSISTENCY.md`](docs/REVIEW_CONSISTENCY.md).
+
+## Code-generation integration (optional)
+PRISM can take over from an external **code-generation tool** (anything that builds a
+change and opens the PR and speaks PRISM's small local protocol — called *codegen*
+below): when codegen opens a pull request it hands it to PRISM, PRISM reviews it, and on "request
+changes" the findings go back to codegen, which fixes the PR and resubmits — round
+after round, up to a ceiling — until PRISM approves and merges it. Off by
+default; turn it on in **Help → Code-generation integration**. The review itself is the
+ordinary pipeline with every gate intact, local to this machine (loopback +
+token). See [`docs/CODEGEN_INTEGRATION.md`](docs/CODEGEN_INTEGRATION.md).
+
 ## Run
 
 From a source checkout (no install step — stdlib only):
@@ -209,6 +231,7 @@ disagrees with `version.py`.
 ## Files
 - `app.py` — PRISM UI (four screens, threaded, live log, dry-run toggle)
 - `jobs.py` — job model and scheduler (no Tkinter, unit-tested)
+- `codegen_bridge.py` — optional local link to codegen (no Tkinter, unit-tested); see `docs/CODEGEN_INTEGRATION.md`
 - `orchestrator.py` — backend: reviewer runs, verdict parsing, CodeCommit merge/sync
 - `updater.py` — release check, download, checksum and in-place swap (no Tkinter, unit-tested)
 - `version.py` — the version, in one place, plus the rule for what comes next

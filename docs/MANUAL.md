@@ -111,6 +111,23 @@ radius, not how big the diff is:
 
 The reviewer's reasoning is in the conversation panel.
 
+**Findings** are one line each, most severe first, and they are written to the PR
+description too. Besides what is wrong and where, a finding can say where else
+the same mistake occurs, so one fix can cover them all:
+
+- *Same pattern also at: …* — other places **in this PR** with the same problem.
+- *Outside this PR: …* — the same pattern in existing code the PR didn't touch.
+  It is listed for whoever fixes the bug; it never blocks the merge by itself.
+- *No other occurrences found.* — the reviewer looked and found none.
+- *(late find — missed in PR #n)* — a problem in code an earlier review (for
+  example at the previous stage) had already covered. See **Reviewing the same
+  change at several stages**, under Settings. When a review has any, the job log
+  and the PR description carry a warning, because a fix made now has not been
+  through the testing done since that earlier review.
+
+The reviewer's closing summary has a **Coverage** line saying what it checked and
+anything it could not verify.
+
 ---
 
 ## When the reviewer asks you something
@@ -257,6 +274,33 @@ those aren't review outcomes, and the group chat doesn't need to see them
 next to real ones. Leave the webhook field empty to turn notifications off
 entirely.
 
+**Code-generation integration**, also on the Help screen, is optional and off by default.
+Tick **Accept reviews from a code-generation tool** and PRISM listens (on this machine
+only) for pull requests an external code-generation tool (*codegen*) opens. Each one shows up in the
+Jobs list marked **via codegen** and is reviewed exactly like one you started
+yourself — including the pause that asks you before merging a high-impact
+change. If the verdict is *Request changes* or *Block*, PRISM sends the
+findings back to codegen, which fixes the PR and resubmits; this repeats up to
+five times, then stops for you. When the PR is approved PRISM merges it and
+tells codegen. Untick **Merge approved pull requests from it** to
+review only and merge by hand. Pressing **Stop** on a codegen job tells codegen it
+was stopped. Nothing changes for jobs you start yourself.
+
+**Reviewing the same change at several stages.** When a PR carries changes
+PRISM has already reviewed — the develop → QA → staging promotions of one
+change, even after a rebase or squash — PRISM hands the reviewer its earlier
+findings, so the stages agree. This memory is a small temporary file on this
+machine (PRISM never writes to your repositories); if it has been cleared, or
+the earlier review was on another machine, PRISM just reviews afresh.
+The reviewer still checks the whole PR; the history is never an approval. If it
+finds a problem the earlier stages missed, it marks it as a **late find**, and
+the job log and PR description say so: a fix made now was not covered by the
+testing since that review, so ideally it goes back through the lower
+environments. A late Critical or High finding still blocks the merge; a late
+Medium or lower one is reported but approves with comments. On every review,
+findings now also say where else the same defect pattern occurs, so one fix
+can cover them all.
+
 ---
 
 ## Stopping and closing
@@ -284,6 +328,14 @@ PRISM is deliberately cautious:
   you back on your original branch when it's done.
 - AWS errors are shown exactly as AWS reported them. PRISM never tries to fix
   your credentials.
+- **PRISM only reviews — it never writes to a repository.** Its memory of earlier
+  reviews is a small temporary file outside any repo, and the code-generation
+  integration never adds a file, branch or commit.
+- **The code-generation integration is off by default and local to your
+  machine.** It can ask PRISM to merge *less* than you allow, never more; it can't
+  skip the review, change the model or bypass a check, and the confirmation
+  before merging a high-impact PR still asks **you**. It stops after a fixed
+  number of rounds on one PR and hands over to you.
 
 ---
 
@@ -299,6 +351,11 @@ PRISM is deliberately cautious:
 | `… is already being reviewed` | That PR already has a job. Open it from the list |
 | Working clone has uncommitted changes | Commit or stash them, then re-run |
 | Model list is empty | PRISM couldn't list models; runs will use the default |
+| Help says the integration **could not start** | A fixed port is already in use or `~/.prism` isn't writable. Untick it and tick it again; the integration stays off, nothing else is affected |
+| The code-generation tool never submits a PR | The integration is off, PRISM wasn't running, or the tool isn't set up for it. The tool retries for a while, then tells its own session |
+| A job *via codegen* sits at **Needs input** | The reviewer or the high-impact merge confirmation is waiting for **you**, same as any job |
+| "Review round limit" / PR handed back to you | The PR used all its automatic rounds without being approved. Review it by hand |
+| A *late finding* warning | A problem the earlier stage missed. Fix it at the lowest environment and promote it back up through testing |
 
 ---
 
@@ -306,10 +363,14 @@ PRISM is deliberately cautious:
 
 - **No job history survives a restart** — closing PRISM discards every job's
   conversation and verdict, same as always. Two small things do persist
-  between sessions, both under `~/.prism/`: the Google Chat webhook setting,
-  and a local record of which commit PRISM last reviewed on each PR (what
-  makes retrying a job — see **Retrying a job**, above — faster instead of
-  starting over).
+  between sessions, both under `~/.prism/`: your settings (the Google Chat
+  webhook and the code-generation integration), and a local record of which
+  commit PRISM last reviewed on each PR (what makes retrying a job — see
+  **Retrying a job**, above — faster instead of starting over). A third, short-lived
+  thing lives in your system's temporary folder, not under `~/.prism/`: PRISM's
+  memory of what it concluded about earlier reviews, used for **Reviewing the same
+  change at several stages**. The system may clear it at any time; PRISM then just
+  reviews afresh.
 - Each job keeps the last 5,000 lines of its conversation.
 - Every job takes a snapshot of its settings when it starts, so changing the
   form afterwards never affects a job already running.

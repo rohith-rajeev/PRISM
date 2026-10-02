@@ -19,6 +19,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+# The review memory goes to a temp directory; keep these tests out of the real one.
+if "PRISM_HISTORY_DIR" not in os.environ:
+    os.environ["PRISM_HISTORY_DIR"] = tempfile.mkdtemp(prefix="prism-test-history-")
+    __import__("atexit").register(__import__("shutil").rmtree,
+                                  os.environ["PRISM_HISTORY_DIR"], True)
 import orchestrator as o  # noqa: E402
 
 REPORT = ("## PR #7\n**Verdict:** OK Approve\n"

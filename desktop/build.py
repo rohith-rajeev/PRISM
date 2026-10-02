@@ -182,6 +182,7 @@ def main():
         "--hidden-import", "version",
         "--hidden-import", "config",
         "--hidden-import", "notifier",
+        "--hidden-import", "codegen_bridge",
         # Tkinter is the whole UI; everything else the stdlib drags in is dead
         # weight in a GUI binary.
         "--exclude-module", "test",

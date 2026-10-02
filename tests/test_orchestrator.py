@@ -6,6 +6,7 @@ conversation to its own session, and serialising mutations of a shared clone.
 
     python3 -m unittest discover -s tests -v
 """
+import os
 import importlib
 import json
 import shutil
@@ -18,6 +19,11 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# The review memory goes to a temp directory; keep these tests out of the real one.
+if "PRISM_HISTORY_DIR" not in os.environ:
+    os.environ["PRISM_HISTORY_DIR"] = tempfile.mkdtemp(prefix="prism-test-history-")
+    __import__("atexit").register(__import__("shutil").rmtree,
+                                  os.environ["PRISM_HISTORY_DIR"], True)
 import orchestrator as o  # noqa: E402
 
 

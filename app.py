@@ -8,6 +8,7 @@ repository + local clone.
 
 Run:  python3 app.py   (or ./run.sh, or the packaged desktop build)
 """
+import collections
 import json
 import math
 import queue
@@ -25,6 +26,7 @@ from orchestrator import (  # noqa: E402
     STAGE_REVIEW, STAGE_DESCRIBE, STAGE_MERGE_CHECK, STAGE_SYNC, STAGE_MERGE,
 )
 import config as CFG  # noqa: E402
+import codegen_bridge as IB  # noqa: E402
 import jobs as J  # noqa: E402
 import updater as U  # noqa: E402
 from orchestrator import TOOL_DIR  # noqa: E402
@@ -1836,7 +1838,9 @@ class App(tk.Tk):
         self.minsize(900, 620)
         self.configure(bg=PAL["page"])
         self.log_q = queue.Queue()
-        self.manager = J.JobManager(self.log_q)
+        self.manager = J.JobManager(self.log_q, on_outcome=self._on_job_outcome)
+        self.codegen = None             # codegen bridge; only exists while enabled
+        self._codegen_events = collections.deque(maxlen=20)
         self.selected_job_id = None
         self.last_spec = None        # seeds the next new-job form
         self.rows = {}               # job id -> JobRow
@@ -1846,6 +1850,7 @@ class App(tk.Tk):
         self._verdict_key = ""
         self._drain_job = None
         self._build()
+        self._apply_codegen_settings()
         self._drain_job = self.after(80, self._drain_logs)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         # If the last run of PRISM updated itself, the copy it replaced is
@@ -1996,6 +2001,29 @@ class App(tk.Tk):
         self.webhook_status.pack(anchor="w", pady=(6, 0))
         self._refresh_webhook_status()
 
+        # Optional link to codegen (the code-generation tool): when on, PRISM
+        # listens on loopback for PRs codegen opens and reports verdicts back.
+        codegen = RoundedCard(parent)
+        codegen.pack(fill="x", pady=(0, 6))
+        ii = codegen.inner
+        ii.config(padx=12, pady=8)
+        self._lab(ii, "Code-generation integration", font=FONT_B, fg="text").pack(anchor="w")
+        self._lab(ii, "Let a code-generation tool hand PRISM the pull requests it opens, and get the "
+                      "verdict back. Local to this machine; off by default.").pack(
+                          anchor="w", pady=(0, 6))
+        self.codegen_var = tk.BooleanVar(value=CFG.get_codegen()["enabled"])
+        self.codegen_check = CheckRow(ii, "Accept reviews from a code-generation tool", self.codegen_var,
+                                   on_change=self._toggle_codegen)
+        self.codegen_check.pack(anchor="w")
+        self.codegen_merge_var = tk.BooleanVar(value=CFG.get_codegen()["auto_merge"])
+        self.codegen_merge_check = CheckRow(ii, "Merge approved pull requests from it "
+                                         "automatically", self.codegen_merge_var,
+                                         on_change=self._toggle_codegen_merge)
+        self.codegen_merge_check.pack(anchor="w", pady=(4, 0))
+        self.codegen_status = self._lab(ii, "", font=FONT_XS)
+        self.codegen_status.pack(anchor="w", pady=(6, 0))
+        self._refresh_codegen_status()
+
         card = RoundedCard(parent, stretch=True)
         card.pack(fill="both", expand=True)
         inner = card.inner
@@ -2034,6 +2062,81 @@ class App(tk.Tk):
         self.webhook_status.config(
             text="✓ Notifications on" if configured else "Notifications off — nothing saved yet",
             fg=PAL["good"] if configured else PAL["muted"])
+
+    # ---------------- codegen integration ----------------
+    def _toggle_codegen(self):
+        CFG.set_codegen(enabled=bool(self.codegen_var.get()))
+        self._apply_codegen_settings()
+
+    def _toggle_codegen_merge(self):
+        CFG.set_codegen(auto_merge=bool(self.codegen_merge_var.get()))
+        # Settings are snapshotted by the bridge; restart it to pick this up.
+        # Reviews already queued keep the merge setting they were admitted with.
+        if self.codegen is not None:
+            self._apply_codegen_settings()
+
+    def _apply_codegen_settings(self):
+        """Start or stop the bridge to match the saved setting.
+
+        Never raises: a busy port or a read-only home directory just leaves the
+        bridge off with the reason on screen — PRISM itself carries on.
+        """
+        settings = CFG.get_codegen()
+        if self.codegen is not None:
+            self.codegen.stop()
+            self.codegen = None
+            self._codegen_error = ""
+        if settings["enabled"]:
+            bridge = IB.CodegenBridge(self.manager, settings=settings,
+                                   log=self._codegen_events.append)
+            try:
+                bridge.start()
+            except Exception as e:  # noqa: BLE001
+                bridge.stop()
+                self._codegen_error = str(e)[:160]
+            else:
+                self.codegen = bridge
+                self._codegen_error = ""
+        if hasattr(self, "codegen_status"):
+            self._refresh_codegen_status()
+
+    def _refresh_codegen_status(self):
+        if self.codegen is not None:
+            last = self._codegen_events[-1] if self._codegen_events else ""
+            text = f"✓ Listening on 127.0.0.1:{self.codegen.port}" + (f"  ·  {last}" if last else "")
+            colour = PAL["good"]
+        elif getattr(self, "_codegen_error", ""):
+            text, colour = f"⚠ Could not start: {self._codegen_error}", PAL["bad"]
+        else:
+            text, colour = "Off — PRISM is not listening for a code-generation tool", PAL["muted"]
+        self.codegen_status.config(text=text, fg=colour)
+
+    def _drain_codegen(self):
+        """Admit what the bridge's HTTP threads queued. UI thread only — the
+        same rule as every other mutation of a job (see JobManager)."""
+        bridge = self.codegen
+        if bridge is None:
+            return
+        admitted = False
+        for _ in range(20):
+            try:
+                sub = bridge.inbox.get_nowait()
+            except queue.Empty:
+                break
+            bridge.admit(sub)
+            admitted = True
+        if admitted:
+            self._refresh_jobs_list()
+            self._refresh_pill()
+        if admitted or self._codegen_events:
+            self._refresh_codegen_status()
+
+    def _on_job_outcome(self, job, **outcome):
+        """JobManager hook, worker thread. Only forwards; the bridge ignores
+        any job that did not come from codegen."""
+        bridge = self.codegen
+        if bridge is not None:
+            bridge.job_finished(job, **outcome)
 
     def show_help(self):
         self._close_pickers()
@@ -3015,6 +3118,7 @@ class App(tk.Tk):
     def _drain_logs(self):
         try:
             self._drain_once()
+            self._drain_codegen()
             self._tick_animation()
         finally:
             # Always reschedule: one bad line must not kill the pump and leave
@@ -3037,6 +3141,8 @@ class App(tk.Tk):
                 pass
             self._drain_job = None
         self.manager.stop_all()
+        if self.codegen is not None:
+            self.codegen.stop()
         self.destroy()
 
     def _confirm_quit(self):
