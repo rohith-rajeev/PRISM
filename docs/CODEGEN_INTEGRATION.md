@@ -89,7 +89,7 @@ All traffic is JSON over HTTP on `127.0.0.1`.
 
 ### Discovery
 
-When enabled, PRISM writes `~/.prism/codegen-bridge.json` (mode `0600`) and removes
+When enabled, PRISM writes `~/.prism/codegen-bridge.json` (mode `0600` on Linux and macOS; on Windows, which has no such mode, it inherits the permissions of your user profile folder, which is private to your account by default) and removes
 it on exit:
 
 ```json

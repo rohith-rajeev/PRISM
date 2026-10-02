@@ -121,7 +121,7 @@ and machine-local:
 
 Because the temp folder is shared between users, PRISM trusts that directory only
 if it is a real directory (not a symlink), owned by you, and not writable by
-anyone else; otherwise it neither reads nor writes it. The file is mode 0600.
+anyone else; otherwise it neither reads nor writes it. The file is mode 0600 on Linux and macOS; Windows has no such mode, and its per-user temporary folder is already private to your account.
 
 ## What this does not do
 

@@ -6,6 +6,7 @@ auth, validation, hand-off to the "UI thread" (the test pumps the inbox the
 way app.App._drain_codegen does) and the callback to codegen.
 """
 import json
+import os
 import queue
 import sys
 import tempfile
@@ -270,10 +271,14 @@ class Live(Env):
         self.fail("review never finished")
 
     # -- discovery / auth --
-    def test_discovery_file_is_private_and_correct(self):
+    def test_discovery_file_is_correct(self):
         info = json.loads(IB.DISCOVERY_PATH.read_text())
         self.assertEqual(info["url"], f"http://127.0.0.1:{self.bridge.port}")
         self.assertEqual(info["token"], self.bridge.token)
+
+    @unittest.skipUnless(hasattr(os, "getuid"),
+                         "Windows has no POSIX permission bits - st_mode reports 0666")
+    def test_discovery_file_is_private_to_the_user(self):
         self.assertEqual(IB.DISCOVERY_PATH.stat().st_mode & 0o777, 0o600)
 
     def test_stop_removes_only_our_discovery_file(self):
