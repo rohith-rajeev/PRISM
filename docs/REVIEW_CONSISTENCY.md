@@ -81,15 +81,15 @@ review, including the very first:
   retry safety/idempotency); exception handling itself (swallowed or over-broad
   catches, missing cleanup, half-written state, un-awaited async, leaked
   internals); concurrency and state; and the unhappy path end to end.
-- **2b Impact analysis**: for every changed function, route, schema, config key,
-  default, env var or flag, find its callers and consumers and check they still
-  hold, including backwards compatibility and per-environment config.
-- **2c Sweep for the same defect elsewhere**: for each Critical/High/Medium
-  finding, work out the *pattern* and search the whole repo. The same one-line
-  finding then says `Same pattern also at: …` (in this PR),
-  `Outside this PR: …` (existing code the PR didn't touch — for the fixer, not a
-  blocker), or `No other occurrences found.` So a fixer repairs the pattern, not
-  one line, and the next pass has nothing left to find.
+- **2b Impact of the change**: that the PR is consistent with itself (callers it
+  also changes are updated, a schema change has its migration, new config exists
+  for the environments it targets), and — only for a contract the PR changes whose
+  callers the diff doesn't show — one targeted look at its direct usages, reported
+  only if the change breaks them.
+- **2c The same mistake more than once in this PR**: when a finding is an instance
+  of a pattern, the reviewer checks whether the rest of *this PR's diff* repeats
+  it and says so on the same line (`Same pattern also at: …`), so the fixer
+  repairs every occurrence in the PR at once.
 - a `Coverage:` line stating what was checked and what could not be verified, so
   a gap is stated rather than silent.
 
@@ -138,8 +138,9 @@ anyone else; otherwise it neither reads nor writes it. The file is mode 0600 on 
   fingerprinted only up to 2,000 hunks.
 - **Late-find tagging relies on the reviewer following its instructions.** An
   untagged late find still appears as an ordinary finding; it just isn't flagged.
-- **Reviews cost more tokens**: the checklist and the repo-wide sweeps are
-  deliberate extra work in exchange for fewer passes.
+- **It stays inside the PR.** The reviewer looks at the PR's diff and what that
+  diff newly breaks, nothing else, and is told to keep the review fast: no
+  repository-wide searches, no auditing of code the PR doesn't touch.
 
 ## Safety — why this cannot destabilise PRISM
 
@@ -164,7 +165,7 @@ anyone else; otherwise it neither reads nor writes it. The file is mode 0600 on 
   each) and written temp-then-rename.
 - The report format PRISM parses is unchanged. The only parser change is raising
   the per-finding ceiling from 800 to 1500 characters, so a finding can carry its
-  sweep result on its one line.
+  "same pattern also at" note on its one line.
 
 ## Tuning
 

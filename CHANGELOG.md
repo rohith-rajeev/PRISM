@@ -4,6 +4,10 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v3.8
+
+- **Stability and performance fixes.**
+
 ## v3.7
 
 - **Works with any branching setup.** The reviewer's guidance and PRISM's
@@ -16,8 +20,8 @@ release, so keep entries short and about what you'd actually notice.
   reviews a change it has seen before, even after a rebase or squash, so
   reviews agree and anything an earlier review missed is flagged as a
   "late find". Nothing is ever written to your repositories.
-- **Deeper first review.** Reviews now check error handling and edge cases,
-  what else depends on the change, and where else the same mistake appears.
+- **Deeper first review.** Reviews now check error handling and edge cases and
+  what the change breaks.
 - **Optional codegen tool integration.** Let a code-generation tool hand PRISM
   the pull requests it opens and get the verdict back. Off by default.
 

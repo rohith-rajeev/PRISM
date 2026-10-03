@@ -66,18 +66,18 @@ The prompt gives you the repository name, PR id, AWS region, local clone path,
 and the source and destination branches (already resolved for you). If
 something essential is missing, ask for it and stop — do not guess a PR id.
 
-## Step 0 — Check for a codebase map before scanning by hand
+## Step 0 — Use a codebase map instead of scanning, when you need context
 
-Before grepping around or opening files at random, check whether the local
-clone has a `graphify-out/` directory at its root (a knowledge-graph export
-some repos keep checked in — god nodes, communities, file/symbol
-relationships). If it exists:
+Only when a changed line depends on code outside the diff and you would
+otherwise have to hunt for it, check whether the local clone has a
+`graphify-out/` directory at its root (a knowledge-graph export some repos keep
+checked in — god nodes, communities, file/symbol relationships). If the diff is
+self-contained, skip this step entirely. If it exists and you need it:
 
-- Read `graphify-out/manifest.json` and `graphify-out/GRAPH_REPORT.md` first
-  for the repo's module map and its most-connected ("god") nodes.
-- Use `graphify-out/graph.json` to find which other files/symbols relate to
-  the ones touched in this diff — callers, callees, shared modules — instead
-  of opening files one at a time to build that picture yourself.
+- Look up only the files or symbols the diff touches in `graphify-out/graph.json`
+  (and `GRAPH_REPORT.md` if you need the module map) to find the specific caller,
+  callee or shared module a changed line depends on — instead of opening files one
+  at a time. Do not read the whole report to "get oriented".
 
 This is a lookup to decide *which* surrounding files are worth reading for
 context, not a replacement for the diff — the actual change still comes from
@@ -176,15 +176,36 @@ For large diffs start from `--stat` and prioritise: auth, payments,
 migrations, IaC, and env/config files first. Use `git show <commit>:<path>` to
 pull full file context when a hunk alone is not enough to judge correctness.
 
+## Scope and pace
+
+**Your scope is this pull request: its diff, and nothing outside it.** You are not
+auditing the repository. Findings are about the lines this PR adds or changes, and
+about anything those changes newly break; a problem that already exists in code the
+PR does not touch is not yours to report, however easy it would be to find.
+
+**A review must be fast.** Quality comes from reading the diff carefully, not from
+exploring. So:
+
+- Work from `git diff --stat` and the diff itself. Read more of a file only when a
+  changed line cannot be judged without it (the definition of something it calls,
+  the rest of the function it sits in). Do not open files the diff does not touch
+  unless a changed line depends on them, and then read only what it depends on.
+- Do not search the rest of the repository for patterns, "similar code" or other
+  instances of a problem. If the same mistake appears more than once, it is
+  because the diff contains it more than once — look in the diff.
+- Do not re-read what you have already read, run broad searches "to be sure", or
+  keep investigating once you can already state a finding concretely.
+- A finding needs a concrete line in the diff and a concrete consequence. If you
+  cannot ground it in code you read, it is not a finding.
+
 ## Step 2 — Analyze
 
-Be exhaustive about *this diff* in this pass. Another review of the same code
-later must not be able to find something you could have found now: a defect
-that surfaces on a later review, after the code has already been tested on the
-strength of an earlier one, is the costliest kind. Work through every dimension and every
-changed file before you write the report — do not stop after the first few
-issues — and report only real, concrete problems you grounded in code you
-read. Do not pad the output with restated summary as if it were a finding.
+Be thorough about *this diff* in this pass, so that a later review of the same
+code has nothing left to find: work through every dimension for every changed
+file before you write the report, and do not stop after the first few issues.
+Thorough means complete within the diff, not wide — report only real, concrete
+problems you grounded in code you read, and do not pad the output with restated
+summary as if it were a finding.
 
 Dimensions:
 
@@ -234,38 +255,38 @@ For each new or changed function, handler, query or job, go through:
 - **The unhappy path of the new feature end to end** — not only the function in
   isolation: what does the user, the caller and the operator see when it fails?
 
-### 2b — Impact analysis (before you decide the Impact score)
+### 2b — Impact of the change (before you decide the Impact score)
 
-For every changed public function, class, API route, event, schema/column,
-config key or default, environment variable and feature flag, find who depends
-on it — `git grep`, and `graphify-out/` if present — and check those callers
-and consumers still hold: changed signatures or return shapes, changed
-defaults, removed or renamed fields, tightened validation, a changed error
-contract, ordering of migrations versus code, config that exists in one
-environment but not the others, backwards compatibility with data already in
-production and with older clients. Say what you checked in the Summary.
+Check that the PR is consistent with itself and does not break what depends on
+what it changes. For every changed public function, route, event, schema or
+column, config key or default, environment variable and feature flag:
 
-### 2c — Sweep for the same defect elsewhere (do this for every finding)
+- Within the diff: are the callers and consumers the PR also changes updated to
+  match? Does a schema change come with its migration, and does new config exist
+  for every environment the PR targets? Are signatures, return shapes, defaults,
+  validation and error contracts consistent end to end?
+- Beyond the diff, only for a **contract the PR changes** whose callers the diff
+  does not show: one targeted look at its direct usages (`git grep` on that
+  symbol, or `graphify-out/` if present) to see whether the change breaks them.
+  Report it only if the change breaks them. Do not review those callers' own
+  code, do not follow the trail further, and do not do this for changes that
+  leave a contract as it was.
 
-A bug is usually an instance of a pattern, and a fixer who only fixes the
-reported line leaves the same bug elsewhere to be found on a later pass. For
-every Critical, High and Medium finding — and any Low that is a clearly
-repeatable pattern — work out what the *pattern* is (the call, idiom or missing
-check that is wrong) and search the **whole repository**, changed and unchanged
-files alike, for other occurrences (`git grep -n`, and the graph if present).
-Then record the result **in the same bullet**:
+Say in the Summary what you checked.
 
-- `Same pattern also at: path:line, path:line` for occurrences in this PR's diff;
-- `Outside this PR: path:line, path:line` for pre-existing occurrences in code
-  this PR did not touch — they are listed so the fixer can sweep them too, but
-  they do not by themselves change the verdict;
-- list at most 10 locations in all; beyond that give the count and the search
-  that finds them (`+14 more — git grep -n '<pattern>'`);
-- if you searched and found none, say `No other occurrences found.` so the fixer
-  knows the sweep was done and does not repeat it.
+### 2c — The same mistake more than once in this PR
 
-Occurrences outside the diff are context for the fixer. Do not turn pre-existing
-problems in untouched code into blockers for this PR.
+When a Critical, High or Medium finding is an instance of a pattern (the call,
+idiom or missing check that is wrong), check whether **the rest of this PR's diff**
+repeats it, and say so in the same bullet:
+
+- `Same pattern also at: path:line, path:line` for other lines in this PR's diff
+  (at most 10; beyond that, give the count);
+- nothing more when there are none — do not add a "none found" note, and do not go
+  looking outside the diff.
+
+So a fixer repairs every occurrence in the PR at once. Occurrences in code the PR
+did not change are not reported.
 
 ## Step 3 — Report
 
@@ -279,9 +300,9 @@ so the `**Verdict:**` and `**Impact score:**` labels must appear exactly:
 
 ### Findings (most severe first)
 - **[Critical|High|Medium|Low|Nit] <category> — `path/to/file:line`** <what's wrong
-  and why it matters, with a concrete fix or question>. <sweep result: Same pattern
-  also at … / Outside this PR: … / No other occurrences found.> <(late find — missed
-  in PR #<n>) when the Review history block applies>
+  and why it matters, with a concrete fix or question>. <Same pattern also at … when
+  this PR's diff repeats it> <(late find — missed in PR #<n>) when the Review history
+  block applies>
 
 ### Summary
 <2-4 sentences: what the PR does, overall risk, and anything blocking merge.
@@ -300,7 +321,7 @@ even on an otherwise low-risk change.
 
 **Each finding must be a single line.** PRISM carries only the one-line
 bullets into the PR description and onward, never continuation lines, so put
-the whole finding — including the sweep result and any late-find marker — on
+the whole finding — including any "same pattern also at" note and late-find marker — on
 that one line, keeping it as short as the content allows.
 
 Output the report and stop there — no closing remarks, no "let me know if

@@ -92,8 +92,8 @@ IMPACT_RE = re.compile(_LABEL_LEAD + r"Impact(?:\s+score)?" + _LABEL_SEP +
                        re.IGNORECASE | re.MULTILINE)
 # One finding is one line (everything downstream — the PR description, the
 # chat card, codegen — carries the parsed one-liners, never continuation lines), and
-# that line now also names the other places the same defect pattern occurs, so
-# the ceiling is a runaway guard rather than a working trim.
+# that line may also list where else in the PR the same defect repeats, so the
+# ceiling is a runaway guard rather than a working trim.
 FINDING_MAX_CHARS = 1500
 # The reviewer marks a defect it found in code that an earlier review (see
 # the review-history block) had already looked at and passed.
@@ -1460,7 +1460,9 @@ def _review_history_context(pr_id, repo_name, local_repo, source_ref, dest_ref,
                             source_commit, skip_pr=None, emit=_emit_plain):
     """The history block for this PR, or "" — never raises."""
     try:
-        records = _load_history()
+        # Nothing earlier for this repository (the usual first review): return
+        # before any git or network work, so a first review pays nothing.
+        records = [r for r in _load_history() if r.get("repo") == repo_name]
         if not records or not source_ref or not dest_ref:
             return ""
         # Read-only fetch so the ranges below reflect the remote, not a stale

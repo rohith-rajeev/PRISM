@@ -614,13 +614,13 @@ class LateFinds(Isolated):
         self.assertEqual(o.count_late_findings(findings), 2)
         self.assertEqual(o.count_late_findings(None), 0)
 
-    def test_a_long_one_line_finding_with_a_sweep_survives_parsing(self):
+    def test_a_long_one_line_finding_with_a_same_pattern_note_survives_parsing(self):
         line = ("- **[High] error-handling — `a.py:3`** swallowed " + "x" * 900 +
-                " Same pattern also at: b.py:1, c.py:2. Outside this PR: d.py:9.")
+                " Same pattern also at: b.py:1, c.py:2.")
         res = o.parse_review_output("**Verdict:** 🔴 Request changes\n"
                                     "**Impact score:** 5/10 — r\n" + line + "\n")
         (kept,) = res.findings
-        self.assertIn("Outside this PR: d.py:9.", kept)
+        self.assertIn("Same pattern also at: b.py:1, c.py:2.", kept)
         self.assertLessEqual(len(kept), o.FINDING_MAX_CHARS)
 
     def test_description_flags_late_finds_only_when_there_are_some(self):
@@ -715,7 +715,7 @@ class NoAssumedBranchLayout(Isolated):
     particular set of branches (or an order between them) quietly teaches the
     reviewer, and the reader, that one layout is the norm."""
 
-    NAMES = __import__("re").compile(r"\b(develop|staging|qa)\b|lower environment", __import__("re").I)
+    NAMES = __import__("re").compile(r"\b(develop|staging|qa)\b|lower\s+environment", __import__("re").I)
     ROOT = Path(__file__).resolve().parent.parent
 
     def top_changelog_sections(self, n=2):
@@ -752,6 +752,35 @@ class NoAssumedBranchLayout(Isolated):
         self.assertIn("test it again", written["d"])
 
 
+class FirstReviewIsCheap(Isolated):
+    """A first review of a repository must not pay for the history feature."""
+
+    def test_no_git_or_network_work_without_an_earlier_review_of_this_repo(self):
+        o._record_review_history("some-other-repo", "1", "/nx", "f", "d", SHA(1), review())
+        self.assertEqual(len(o._load_history()), 1)
+        calls = []
+        real = o.subprocess.run
+        o.subprocess.run = lambda *a, **k: calls.append(a) or real(*a, **k)
+        try:
+            self.assertEqual(o._review_history_context(
+                "9", "this-repo", "/nonexistent", "feat", "main", SHA(2), emit=QUIET), "")
+        finally:
+            o.subprocess.run = real
+        self.assertEqual(calls, [], "no git/network call for a repo with no history")
+
+    def test_it_still_runs_when_this_repo_has_history(self):
+        o._record_review_history("this-repo", "1", "/nx", "f", "d", SHA(1), review())
+        calls = []
+        real = o.subprocess.run
+        o.subprocess.run = lambda *a, **k: calls.append(a) or real(*a, **k)
+        try:
+            o._review_history_context("9", "this-repo", "/nonexistent", "feat", "main",
+                                      SHA(2), emit=QUIET)
+        finally:
+            o.subprocess.run = real
+        self.assertTrue(calls, "a repo with history is looked up")
+
+
 class ReviewerInstructions(unittest.TestCase):
     """The agent file is the other half of the fix; pin what must stay true."""
 
@@ -777,7 +806,7 @@ class ReviewerInstructions(unittest.TestCase):
             "## PR #7 — repo (a → b)\n**Verdict:** 🔴 Request changes\n"
             "**Impact score:** 6/10 — shared module\n\n### Findings (most severe first)\n"
             "- **[High] error-handling — `svc.py:40`** exception swallowed. Same pattern also "
-            "at: svc.py:88. Outside this PR: old.py:5. (late find — missed in PR #3)\n\n"
+            "at: svc.py:88. (late find — missed in PR #3)\n\n"
             "### Summary\nDoes X.\nCoverage: all dimensions; skimmed docs.\n")
         self.assertEqual(res.verdict_key, "request-changes")
         self.assertEqual(res.impact_score, "6")
@@ -786,11 +815,22 @@ class ReviewerInstructions(unittest.TestCase):
 
     def test_the_first_pass_procedures_are_present(self):
         for needle in ("Step 0.6", "Failure handling and edge cases", "2a", "2b", "2c",
-                       "Sweep for the same defect elsewhere", "Same pattern also at",
-                       "Outside this PR", "No other occurrences found", "late find",
+                       "Same pattern also at", "late find",
                        "Each finding must be a single line", "Coverage:",
-                       "Impact analysis"):
+                       "Impact of the change", "Scope and pace"):
             self.assertIn(needle, self.body, needle)
+
+    def test_the_review_is_limited_to_the_diff_and_told_to_be_fast(self):
+        for needle in ("Your scope is this pull request", "A review must be fast",
+                       "Do not search the rest of the repository",
+                       "Occurrences in code the PR\ndid not change are not reported"):
+            self.assertIn(needle, self.body, needle)
+
+    def test_no_instruction_sends_the_reviewer_across_the_repository(self):
+        for banned in ("whole repository", "Outside this PR", "No other occurrences found",
+                       "Sweep for the same defect elsewhere", "changed and unchanged",
+                       "git grep -n '<pattern>'", "pre-existing occurrences"):
+            self.assertNotIn(banned, self.body, banned)
 
     def test_history_is_never_an_approval(self):
         self.assertIn("lowers the bar", self.body)

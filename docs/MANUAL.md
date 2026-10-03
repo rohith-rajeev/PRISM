@@ -112,13 +112,10 @@ radius, not how big the diff is:
 The reviewer's reasoning is in the conversation panel.
 
 **Findings** are one line each, most severe first, and they are written to the PR
-description too. Besides what is wrong and where, a finding can say where else
-the same mistake occurs, so one fix can cover them all:
+description too. A finding is about the lines **this PR** changes. It can also
+say where else in the PR the same mistake repeats, so one fix covers them all:
 
-- *Same pattern also at: …* — other places **in this PR** with the same problem.
-- *Outside this PR: …* — the same pattern in existing code the PR didn't touch.
-  It is listed for whoever fixes the bug; it never blocks the merge by itself.
-- *No other occurrences found.* — the reviewer looked and found none.
+- *Same pattern also at: …* — other places in this PR with the same problem.
 - *(late find — missed in PR #n)* — a problem in code an earlier review (for
   example on an earlier PR) had already covered. See **Reviewing the same
   change more than once**, under Settings. When a review has any, the job log
@@ -295,11 +292,9 @@ the earlier review was on another machine, PRISM just reviews afresh.
 The reviewer still checks the whole PR; the history is never an approval. If it
 finds a problem the earlier reviews missed, it marks it as a **late find**, and
 the job log and PR description say so: a fix made now was not covered by the
-testing since that review, so ideally it goes back through the lower
-environments. A late Critical or High finding still blocks the merge; a late
-Medium or lower one is reported but approves with comments. On every review,
-findings now also say where else the same defect pattern occurs, so one fix
-can cover them all.
+testing since that review, so test it again. A late Critical or High finding
+still blocks the merge; a late Medium or lower one is reported but approves with
+comments.
 
 ---
 

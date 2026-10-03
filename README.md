@@ -86,9 +86,8 @@ that changed, so it survives rebases and squashes. It gives the reviewer the
 earlier findings as context, so repeat reviews stay consistent and anything missed
 earlier is flagged as a **late find** — because a fix made that late is not
 covered by the testing in between. The reviewer is also
-required, on the very first pass, to check failure handling and edge cases, the
-impact on callers, and to **sweep the repo for the same defect pattern** so one
-fix covers every occurrence. See [`docs/REVIEW_CONSISTENCY.md`](docs/REVIEW_CONSISTENCY.md).
+required, on the very first pass, to check failure handling and edge cases and
+what the change breaks — staying within the PR's diff, so reviews stay fast. See [`docs/REVIEW_CONSISTENCY.md`](docs/REVIEW_CONSISTENCY.md).
 
 ## Code-generation integration (optional)
 PRISM can take over from an external **code-generation tool** (anything that builds a
