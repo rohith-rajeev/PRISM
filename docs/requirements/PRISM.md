@@ -263,6 +263,16 @@ new-job screen is folded into the agent's very first prompt the same way.
   a default.
 - AWS auth failures stop the run with the exact CLI error; PRISM never
   attempts to repair credentials.
+- **A partial review never authorises a merge.** If PRISM has to stop the reviewer
+  (nothing heard from the model for 10 minutes, or 45 minutes in total) it asks the
+  reviewer once to report what it covered. The result is labelled "(partial
+  review)", its findings are written, but it is never merged automatically and is
+  not recorded as reviewed, so a retry cannot skip the part that was never
+  examined.
+- **The reviewer reads code; it does not run it.** Tests, builds, installers,
+  virtualenvs and containers are denied, along with `git push/commit/merge/rebase/
+  checkout` and the CodeCommit write commands. The rules are ordered with the
+  catch-all first because the engine applies the last matching rule.
 - **No agent can merge, push or write.** The two remaining agents
   (`pr-reviewer`, `conflict-analyst`) each carry their own `permission:` block
   denying those commands outright, and every irreversible action — merging,

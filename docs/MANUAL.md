@@ -323,6 +323,10 @@ PRISM is deliberately cautious:
   you back on your original branch when it's done.
 - AWS errors are shown exactly as AWS reported them. PRISM never tries to fix
   your credentials.
+- **The reviewer reads your code; it never runs it.** It can't run a pull
+  request's tests, builds or installers, can't create virtualenvs or containers,
+  and can't commit, push or merge. (A PR's code is untrusted, and running it was
+  what made some reviews very slow.)
 - **PRISM only reviews — it never writes to a repository.** Its memory of earlier
   reviews is a small temporary file outside any repo, and the code-generation
   integration never adds a file, branch or commit.
@@ -340,6 +344,9 @@ PRISM is deliberately cautious:
 |---|---|
 | `Review engine is not installed or not on PATH` | Install `opencode`, or make sure it's on your PATH |
 | `AccessDenied` or an expired token | Log in to AWS again, then re-run the job |
+| `⏳ Still working — 3m10s since the reviewer last reported` | Normal. Models sometimes pause for minutes between steps. PRISM keeps waiting and only stops a review that has been silent for 10 minutes or has run for 45 |
+| `(partial review)` next to a verdict | The review had to be stopped (the model stalled or ran out of time) and reported what it had covered. Its findings are written, but PRISM won't merge it automatically. Retry the job to finish it |
+| `The review did not finish` | The model gave no usable answer even when asked to wrap up. Nothing was changed on the pull request. Retry — the model's provider may be slow right now |
 | `Could not parse a verdict` | The reviewer didn't produce a clear verdict. Check the conversation, try a different model, run it again |
 | `Backend and Frontend point to the same clone` | Pick two different clones in Repository mapping |
 | A conflict appears in the question panel | Choose `Keep current` or `Take incoming` for each one, or `Abort sync` to stop and leave your clone untouched |

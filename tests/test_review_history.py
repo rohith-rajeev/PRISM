@@ -788,6 +788,8 @@ class ReviewerInstructions(unittest.TestCase):
     def setUpClass(cls):
         cls.text = (Path(o.AGENTS_DIR) / "pr-reviewer.md").read_text(encoding="utf-8")
         cls.front, _, cls.body = cls.text[4:].partition("\n---\n")
+        # Pins are about wording, not where a line happens to wrap.
+        cls.flat = " ".join(cls.body.split())
 
     def test_it_is_still_read_only(self):
         for denied in ('edit: deny', '"git push*": deny', '"git commit*": deny',
@@ -823,8 +825,8 @@ class ReviewerInstructions(unittest.TestCase):
     def test_the_review_is_limited_to_the_diff_and_told_to_be_fast(self):
         for needle in ("Your scope is this pull request", "A review must be fast",
                        "Do not search the rest of the repository",
-                       "Occurrences in code the PR\ndid not change are not reported"):
-            self.assertIn(needle, self.body, needle)
+                       "Occurrences in code the PR did not change are not reported"):
+            self.assertIn(needle, self.flat, needle)
 
     def test_no_instruction_sends_the_reviewer_across_the_repository(self):
         for banned in ("whole repository", "Outside this PR", "No other occurrences found",
@@ -837,7 +839,7 @@ class ReviewerInstructions(unittest.TestCase):
         self.assertIn("independently", self.body)
 
     def test_a_high_or_critical_late_find_still_blocks(self):
-        self.assertIn("Never use this to wave through a High or Critical issue", self.body)
+        self.assertIn("Never use this to wave through a High or Critical issue", self.flat)
 
     def test_it_installs_into_a_project(self):
         with tempfile.TemporaryDirectory() as proj:

@@ -4,6 +4,15 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v3.9
+
+- **Faster, steadier reviews.** A review no longer fails after a fixed 20
+  minutes when the model is simply slow, and PRISM says it is still working
+  while it waits. If a review does have to be stopped, you still get its
+  findings, marked as a partial review.
+- **The reviewer no longer runs a PR's tests or installs packages.** It reads
+  the code only, which is faster and safer.
+
 ## v3.8
 
 - **Stability and performance fixes.**

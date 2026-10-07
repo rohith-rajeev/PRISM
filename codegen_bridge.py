@@ -274,6 +274,9 @@ def outcome_from_summary(summary, review):
     if verdict == "block":
         return DECISION_BLOCKED, ""
     if verdict in ("approve", "approve-with-comments"):
+        if stopped == "partial-review":
+            return DECISION_NEEDS_HUMAN, ("The review was cut short before it finished, "
+                                          "so PRISM did not merge it.")
         if stopped in ("merge-disabled", "dry-run"):
             return DECISION_APPROVED, "Approved; PRISM was not allowed to merge."
         if stopped == "not-fast-forwardable":

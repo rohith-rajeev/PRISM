@@ -158,7 +158,11 @@ skill, agent, or checkout outside this folder.
 No agent's output goes to the pull request directly — PRISM parses the
 reviewer's own report and composes the PR description itself (see above).
 Every agent denies `edit`, `task`, `webfetch`, and — where it has a shell at
-all — the specific `git push` and `aws codecommit merge/update` commands.
+all — the specific `git push` and `aws codecommit merge/update` commands. The
+reviewer additionally cannot run a pull request's code: tests, builds, package
+installs, virtualenvs and containers are all denied (they were slow, and ran
+untrusted code on your machine). A test in the suite asks the real engine to run
+those commands as the reviewer and checks that it refuses.
 `agents/_shared-contract.md` documents the decision block they all answer
 with.
 
@@ -252,7 +256,11 @@ disagrees with `version.py`.
   restored, and each hunk is put to you — keep current, take incoming, or
   abort — before the merge is replayed with your answers.
 - No agent can merge, push or write. Agents decide; PRISM acts, behind gates in
-  code that a prompt cannot reach.
+  code that a prompt cannot reach. (The reviewer's deny rules are verified against
+  the real engine in the test suite.)
+- A review that has to be stopped (the model stalled, or it ran out of time) ends
+  as a clearly marked partial report: the findings are written, but it is never
+  merged automatically and never recorded as "reviewed".
 - Closing the window asks first whenever any job exists — PRISM keeps nothing
   on disk, so that is the only copy of your verdicts — and defaults to *No*.
 - A sync refuses to start on a dirty working tree, refuses to push commits that
