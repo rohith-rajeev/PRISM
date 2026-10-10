@@ -130,8 +130,8 @@ jobs:
 
       - name: Sanity-check the sources before packaging
         run: |
-          python -m compileall -q app.py orchestrator.py jobs.py updater.py version.py desktop/
-          python -c "import ast; [ast.parse(open(f, encoding='utf-8').read()) for f in ('app.py','orchestrator.py','jobs.py','updater.py','version.py')]"
+          python -m compileall -q app.py orchestrator.py jobs.py updater.py version.py prism_cli.py cli_jobs.py folderpicker.py desktop/
+          python -c "import ast; [ast.parse(open(f, encoding='utf-8').read()) for f in ('app.py','orchestrator.py','jobs.py','updater.py','version.py','prism_cli.py','cli_jobs.py','folderpicker.py')]"
 
       - name: Unit tests
         # Model, scheduler and engine-protocol tests. No Tk and no network, so

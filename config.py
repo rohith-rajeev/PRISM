@@ -79,3 +79,46 @@ def set_codegen(**changes):
     current.update({k: v for k, v in changes.items() if k in CODEGEN_DEFAULTS})
     cfg["codegen"] = current
     save(cfg)
+
+
+# ---- command-line defaults -----------------------------------------------------
+# What `prism run <pr>` assumes when a flag is not given, so the same few
+# choices are not retyped on every run (or on every machine reached over ssh).
+# Stored under one "cli" key in this same file — the desktop app reads the file
+# too and ignores keys it does not use. Empty text means "not set": the CLI then
+# works it out from the current folder (see prism_cli.resolve_target).
+CLI_TEXT_KEYS = ("project_dir", "repo", "region", "model", "instructions")
+CLI_FLAG_KEYS = ("review", "describe", "merge", "sync", "dry_run")
+CLI_DEFAULTS = dict({k: "" for k in CLI_TEXT_KEYS},
+                    review=True, describe=True, merge=True, sync=True, dry_run=False)
+
+
+def get_cli():
+    """The CLI defaults with every key present and coerced to a safe type."""
+    raw = load().get("cli")
+    raw = raw if isinstance(raw, dict) else {}
+    out = dict(CLI_DEFAULTS)
+    for key in CLI_TEXT_KEYS:
+        value = raw.get(key)
+        out[key] = value.strip() if isinstance(value, str) else ""
+    for key in CLI_FLAG_KEYS:
+        value = raw.get(key)
+        out[key] = value if isinstance(value, bool) else CLI_DEFAULTS[key]
+    return out
+
+
+def set_cli(**changes):
+    """Merge `changes` into the saved CLI defaults; unknown keys are ignored."""
+    cfg = load()
+    current = cfg.get("cli") if isinstance(cfg.get("cli"), dict) else {}
+    current = dict(current)
+    current.update({k: v for k, v in changes.items() if k in CLI_DEFAULTS})
+    cfg["cli"] = current
+    save(cfg)
+
+
+def unset_cli(*keys):
+    cfg = load()
+    current = cfg.get("cli") if isinstance(cfg.get("cli"), dict) else {}
+    cfg["cli"] = {k: v for k, v in current.items() if k not in keys}
+    save(cfg)

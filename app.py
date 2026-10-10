@@ -13,7 +13,9 @@ import json
 import math
 import queue
 import re
+import socket
 import threading
+import time
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog
@@ -27,6 +29,9 @@ from orchestrator import (  # noqa: E402
 )
 import config as CFG  # noqa: E402
 import codegen_bridge as IB  # noqa: E402
+import cli_jobs as CJ  # noqa: E402
+import folderpicker  # noqa: E402
+import prism_cli as PC  # noqa: E402
 import jobs as J  # noqa: E402
 import updater as U  # noqa: E402
 from orchestrator import TOOL_DIR  # noqa: E402
@@ -1078,6 +1083,176 @@ class JobRow(RoundedCard):
         self.del_btn.set_enabled(True)
 
 
+class Tooltip:
+    """Small hover note for a widget, shown after a short pause.
+
+    The text is fetched when it is shown, not when the tooltip is made, so it
+    always describes the moment the pointer arrived.
+    """
+
+    def __init__(self, widget, text_fn, delay=350):
+        self.widget = widget
+        self._text_fn = text_fn
+        self._delay = delay
+        self._job = None
+        self._tip = None
+        widget.bind("<Enter>", self._enter, add="+")
+        widget.bind("<Leave>", self._leave, add="+")
+        widget.bind("<Button-1>", self._leave, add="+")
+
+    def _enter(self, _e):
+        self._cancel()
+        self._job = self.widget.after(self._delay, self._show)
+
+    def _leave(self, _e=None):
+        self._cancel()
+        if self._tip is not None:
+            try:
+                self._tip.destroy()
+            except Exception:  # noqa: BLE001
+                pass
+            self._tip = None
+
+    def _cancel(self):
+        if self._job is not None:
+            try:
+                self.widget.after_cancel(self._job)
+            except Exception:  # noqa: BLE001
+                pass
+            self._job = None
+
+    def _show(self):
+        self._job = None
+        text = self._text_fn()
+        if not text or self._tip is not None:
+            return
+        tip = tk.Toplevel(self.widget)
+        tip.wm_overrideredirect(True)
+        tip.configure(bg=PAL["border"])
+        tk.Label(tip, text=text, font=FONT_S, justify="left", bg=PAL["card"],
+                 fg=PAL["text"], padx=10, pady=6).pack(padx=1, pady=1)
+        tip.update_idletasks()
+        x = self.widget.winfo_rootx() + self.widget.winfo_width() - tip.winfo_reqwidth()
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        tip.wm_geometry(f"+{max(0, x)}+{y}")
+        self._tip = tip
+
+
+class CliJobRow(RoundedCard):
+    """One command-line job: status, target, stage or result, Stop / Retry.
+
+    Deliberately shallow. The list says what is running and lets the person
+    stop or retry it; the transcript is read where the job runs (`prism logs`).
+    """
+
+    def __init__(self, parent, on_stop, on_retry, on_remove):
+        super().__init__(parent)
+        self.record = {}
+        self._cb_stop, self._cb_retry, self._cb_remove = on_stop, on_retry, on_remove
+        self.starting = False
+        inner = self.inner
+        inner.config(padx=12, pady=7)
+        inner.columnconfigure(1, weight=1)
+        self.dot = tk.Canvas(inner, width=14, height=14, highlightthickness=0,
+                             bd=0, bg=PAL["card"])
+        self.dot.grid(row=0, column=0, rowspan=2, padx=(0, 10))
+        self.title = tk.Label(inner, text="", font=FONT_B, bg=PAL["card"],
+                              fg=PAL["text"], anchor="w")
+        self.title.grid(row=0, column=1, sticky="w")
+        self.sub = tk.Label(inner, text="", font=FONT_XS, bg=PAL["card"],
+                            fg=PAL["muted"], anchor="w")
+        self.sub.grid(row=1, column=1, sticky="w")
+        self.verdict = tk.Label(inner, text="", font=FONT_S, bg=PAL["card"],
+                                fg=PAL["muted"], anchor="w", width=24)
+        self.verdict.grid(row=0, column=2, rowspan=2, sticky="w", padx=(10, 6))
+        self.action_btn = RoundedButton(inner, text="Stop", style="outline", height=26,
+                                        width=76, font=FONT_XS, command=lambda: None)
+        self.action_btn.grid(row=0, column=3, rowspan=2, padx=(0, 6))
+        self.del_btn = RoundedButton(inner, text="✕", style="ghost", height=26, width=30,
+                                     font=FONT_XS, command=self._remove)
+        self.del_btn.grid(row=0, column=4, rowspan=2)
+        self._spin = False
+        self._dot_colour = "muted"
+
+    def _id(self):
+        return self.record.get("id")
+
+    def _remove(self):
+        self._cb_remove(self._id())
+
+    def tick(self, frame):
+        if not self._spin:
+            return
+        self._frame = frame
+        self.dot.delete("all")
+        _spinner(self.dot, 7, 7, 5, frame, PAL[self._dot_colour])
+
+    def refresh(self, record, starting=False):
+        self.record = record
+        self.starting = starting
+        status = CJ.status_of(record)
+        active = status in J.ACTIVE_STATES or starting
+        colour = {J.RUNNING: "accent", J.NEEDS_INPUT: "warn", J.STOPPING: "warn",
+                  J.STOPPED: "muted", J.ERROR: "bad", J.DONE: "good",
+                  CJ.INTERRUPTED: "bad"}.get(status, "muted")
+        if starting:
+            colour = "accent"
+        self.dot.delete("all")
+        self.dot.config(bg=PAL["card"])
+        self._spin = status in (J.RUNNING, J.STOPPING) or starting
+        self._dot_colour = colour
+        if self._spin:
+            _spinner(self.dot, 7, 7, 5, getattr(self, "_frame", 0), PAL[colour])
+        else:
+            self.dot.create_oval(3, 3, 12, 12, fill=PAL[colour], outline="")
+        word = {J.NEEDS_INPUT: "Needs input", J.RUNNING: "Running…",
+                J.STOPPING: "Stopping…", J.STOPPED: "Stopped", J.ERROR: "Error",
+                J.DONE: "Finished", CJ.INTERRUPTED: "Interrupted"}.get(status, status)
+        if starting and status not in J.ACTIVE_STATES:
+            word = "Starting…"
+        if status == J.DONE and record.get("merged") is True:
+            word = "Merged ✓"
+        where = record.get("host") if record.get("host") not in (None, socket.gethostname()) \
+            else ""
+        bits = [word]
+        if status in J.ACTIVE_STATES and record.get("stage"):
+            bits.append(record["stage"])
+        started = record.get("started")
+        if started:
+            bits.append(_since(time.time() - started))
+        bits += [record.get("branches") or "", where or ""]
+        spec = record.get("spec") or {}
+        bits.append(spec.get("region") or "")
+        self.title.config(text=CJ.label(record))
+        self.sub.config(text="  ·  ".join(b for b in bits if b))
+        if record.get("verdict") and not active:
+            key = _verdict_key_of(record["verdict"])
+            self.verdict.config(text=record["verdict"][:26], fg=PAL[_verdict_colour(key)])
+        elif status == J.ERROR and record.get("error"):
+            self.verdict.config(text=record["error"].splitlines()[0][:26], fg=PAL["bad"])
+        else:
+            self.verdict.config(text="", fg=PAL["muted"])
+        if active:
+            self.action_btn.set_text("Stop")
+            self.action_btn.set_command(lambda: self._cb_stop(self._id()))
+            self.action_btn.set_enabled(status in (J.RUNNING, J.NEEDS_INPUT) and not starting)
+        else:
+            self.action_btn.set_text("↻ Retry")
+            self.action_btn.set_command(lambda: self._cb_retry(self._id()))
+            self.action_btn.set_enabled(True)
+        self.del_btn.set_enabled(not active)
+
+
+def _since(seconds):
+    """"42s", "7m", "2h 05m" - how long a job has been going."""
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    return f"{seconds // 3600}h {seconds % 3600 // 60:02d}m"
+
+
 class Picker(tk.Frame):
     """Fixed-style selector: rounded field + searchable popup.
 
@@ -1844,6 +2019,11 @@ class App(tk.Tk):
         self.selected_job_id = None
         self.last_spec = None        # seeds the next new-job form
         self.rows = {}               # job id -> JobRow
+        self.cli_rows = {}           # CLI job id -> CliJobRow
+        self.cli_records = []        # latest read of the CLI job registry
+        self.cli_pending = {}        # CLI job id -> when a retry was launched
+        self._cli_poll_at = 0.0
+        self._browsing = False
         self.screen = None
         self.stage_state = {}        # mirrors the displayed job, for the bar
         self._anim = 0               # spinner frame, advanced by the pump
@@ -1907,6 +2087,10 @@ class App(tk.Tk):
         self.help_btn = RoundedButton(h, text="?  Help", style="outline", height=30,
                                       width=92, font=FONT_S, command=self.show_help)
         self.help_btn.pack(side="right", padx=(0, 10))
+        self.cli_btn = RoundedButton(h, text="CLI jobs", style="outline", height=30,
+                                     width=110, font=FONT_S, command=self.show_cli)
+        self.cli_btn.pack(side="right", padx=(0, 10))
+        Tooltip(self.pill, self._tally_tooltip)
         self.back_btn = RoundedButton(h, text="←  Jobs", style="outline", height=30,
                                       width=100, font=FONT_S, command=self.show_jobs)
         # packed/unpacked by the router
@@ -1929,8 +2113,10 @@ class App(tk.Tk):
         self.new_screen = tk.Frame(self.container, bg=PAL["page"])
         self.detail_screen = tk.Frame(self.container, bg=PAL["page"])
         self.help_screen = tk.Frame(self.container, bg=PAL["page"])
+        self.cli_screen = tk.Frame(self.container, bg=PAL["page"])
 
         self._build_jobs_screen(self.jobs_screen)
+        self._build_cli_screen(self.cli_screen)
         self._build_new_screen(self.new_screen)
         self._build_detail_screen(self.detail_screen)
         self._build_help_screen(self.help_screen)
@@ -1963,6 +2149,25 @@ class App(tk.Tk):
             self.jobs_list.inner,
             text="No jobs yet.\n\nStart one with “New job” — each pull request "
                  "runs as its own job,\nand several can run at the same time.",
+            font=FONT_S, bg=PAL["page"], fg=PAL["muted"], justify="center")
+
+    # ---------------- screen 5: jobs started from the command line ----------------
+    def _build_cli_screen(self, parent):
+        head = tk.Frame(parent, bg=PAL["page"])
+        head.pack(fill="x", pady=(0, 8))
+        tk.Label(head, text="CLI JOBS", font=FONT_XS, bg=PAL["page"],
+                 fg=PAL["muted"]).pack(side="left")
+        self.cli_list = ScrollFrame(parent)
+        self.cli_list.pack(fill="both", expand=True)
+        self.cli_hdr_running = tk.Label(self.cli_list.inner, text="", font=FONT_XS,
+                                        bg=PAL["page"], fg=PAL["muted"], anchor="w")
+        self.cli_hdr_done = tk.Label(self.cli_list.inner, text="", font=FONT_XS,
+                                     bg=PAL["page"], fg=PAL["muted"], anchor="w")
+        self.cli_empty = tk.Label(
+            self.cli_list.inner,
+            text="No command-line jobs.\n\nRun  prism run <pr-id>  in a terminal — here or "
+                 "over ssh — and it shows up here.\nThis list is for stopping and "
+                 "retrying; follow a job's output with  prism logs <id> -f.",
             font=FONT_S, bg=PAL["page"], fg=PAL["muted"], justify="center")
 
     # ---------------- screen 4: the manual, built in ----------------
@@ -2471,7 +2676,41 @@ class App(tk.Tk):
 
     # ----- repos: scan root, single mode or BE/FE mapping -----
     def _browse(self):
-        d = filedialog.askdirectory(title="Select project root folder")
+        """Pick the project folder with the platform's own chooser.
+
+        On Linux that is the desktop's modern dialog (see folderpicker); Tk's
+        old built-in one is only the fallback. The native dialog blocks, so it
+        runs on a thread while the window keeps painting, and the answer is
+        collected by polling - Tk must only be touched from this thread.
+        """
+        if self._browsing:
+            return
+        title = "Select project root folder"
+        start = self.proj_var.get().strip()
+        if not folderpicker.native_available():
+            return self._apply_browsed(
+                filedialog.askdirectory(title=title, initialdir=start or None))
+        self._browsing = True
+        box = {}
+
+        def work():
+            box["path"] = folderpicker.pick_folder(title, start)
+
+        worker = threading.Thread(target=work, daemon=True)
+        worker.start()
+
+        def poll():
+            if worker.is_alive():
+                self.after(100, poll)
+                return
+            self._browsing = False
+            path = box.get("path")
+            if path is None:        # the native dialog could not open at all
+                path = filedialog.askdirectory(title=title, initialdir=start or None)
+            self._apply_browsed(path)
+        self.after(100, poll)
+
+    def _apply_browsed(self, d):
         if d:
             self.repo_var.set("")
             self.proj_var.set(d)  # the trace re-runs detection
@@ -2676,7 +2915,7 @@ class App(tk.Tk):
     # ---------------- navigation ----------------
     def _show_screen(self, screen):
         for s in (self.jobs_screen, self.new_screen, self.detail_screen,
-                  self.help_screen):
+                  self.help_screen, self.cli_screen):
             if s is not screen and s.winfo_manager():
                 s.pack_forget()
         if not screen.winfo_manager():
@@ -2737,6 +2976,13 @@ class App(tk.Tk):
         self.selected_job_id = None
         self._show_screen(self.jobs_screen)
         self._refresh_jobs_list()
+        self._refresh_pill()
+
+    def show_cli(self):
+        self._close_pickers()
+        self.selected_job_id = None
+        self._show_screen(self.cli_screen)
+        self._poll_cli(force=True)
         self._refresh_pill()
 
     def show_new(self):
@@ -2812,19 +3058,177 @@ class App(tk.Tk):
             # rather than wait for one.
             self._repaint(self.jobs_list.inner)
 
-    def _refresh_pill(self):
-        """Header tally — app-level, since no single job owns the header."""
+    def _desktop_counts(self):
+        """(running, queued, needing input) over this window's own jobs."""
         jobs = self.manager.jobs.values()
-        asking = sum(1 for j in jobs if j.status == J.NEEDS_INPUT)
-        running = sum(1 for j in jobs if j.status in (J.RUNNING, J.STOPPING))
-        queued = sum(1 for j in jobs if j.status == J.QUEUED)
+        return (sum(1 for j in jobs if j.status in (J.RUNNING, J.STOPPING)),
+                sum(1 for j in jobs if j.status == J.QUEUED),
+                sum(1 for j in jobs if j.status == J.NEEDS_INPUT))
+
+    def _cli_counts(self):
+        """(running, needing input) over live command-line jobs."""
+        running = asking = 0
+        for record in self.cli_records:
+            status = CJ.status_of(record)
+            if status == J.NEEDS_INPUT:
+                asking += 1
+            elif status in J.ACTIVE_STATES:
+                running += 1
+        return running, asking
+
+    def _refresh_pill(self):
+        """Header tally — app-level, since no single job owns the header.
+
+        Counts desktop and command-line jobs together: both are PRISM at work
+        on this machine's behalf. The split is in the hover text.
+        """
+        d_run, d_queued, d_ask = self._desktop_counts()
+        c_run, c_ask = self._cli_counts()
+        asking, running = d_ask + c_ask, d_run + c_run
         if asking:
             self.pill.set(f"{asking} need input", "warn", spin=bool(running))
-        elif running or queued:
-            txt = f"{running} running" + (f" · {queued} queued" if queued else "")
+        elif running or d_queued:
+            txt = f"{running} running" + (f" · {d_queued} queued" if d_queued else "")
             self.pill.set(txt, "accent", spin=bool(running))
         else:
             self.pill.set("Idle", "muted")
+        live = c_run + c_ask
+        self.cli_btn.set_text(f"CLI jobs · {live}" if live else "CLI jobs")
+
+    @staticmethod
+    def _tally_line(label, running, queued=0, asking=0):
+        bits = []
+        if running:
+            bits.append(f"{running} running")
+        if queued:
+            bits.append(f"{queued} queued")
+        if asking:
+            bits.append(f"{asking} need input")
+        return f"{label}  {' · '.join(bits) if bits else 'idle'}"
+
+    def _tally_tooltip(self):
+        d_run, d_queued, d_ask = self._desktop_counts()
+        c_run, c_ask = self._cli_counts()
+        return "\n".join([self._tally_line("Desktop", d_run, d_queued, d_ask),
+                          self._tally_line("CLI      ", c_run, 0, c_ask)])
+
+    # ---------------- command-line jobs ----------------
+    def _poll_cli(self, force=False):
+        """Re-read the CLI job registry (at most every couple of seconds).
+
+        The jobs live in other processes, so the registry on disk is the only
+        place to see them. A failed read keeps the last good picture rather
+        than blanking the list.
+        """
+        now = time.time()
+        if not force and now - self._cli_poll_at < 2.0:
+            return
+        self._cli_poll_at = now
+        try:
+            records = CJ.list_jobs()
+        except Exception:  # noqa: BLE001
+            return
+
+        def signature(rs):
+            return [(r.get("id"), CJ.status_of(r, now), r.get("stage"), r.get("verdict"),
+                     r.get("merged"), r.get("error")) for r in rs]
+        changed = signature(records) != signature(self.cli_records)
+        self.cli_records = records
+        for job_id in list(self.cli_pending):
+            record = next((r for r in records if r.get("id") == job_id), None)
+            started = self.cli_pending[job_id]
+            if (record is not None and CJ.is_active(record, now)
+                    and (record.get("started") or 0) >= started - 1) or now - started > 20:
+                del self.cli_pending[job_id]
+                changed = True
+        if changed:
+            self._refresh_pill()
+        if changed or self.screen is self.cli_screen:
+            if self.screen is self.cli_screen:
+                self._refresh_cli_list()
+
+    def _refresh_cli_list(self):
+        inner = self.cli_list.inner
+        by_id = {r.get("id"): r for r in self.cli_records}
+        for job_id, row in list(self.cli_rows.items()):
+            if job_id not in by_id:
+                row.destroy()
+                del self.cli_rows[job_id]
+        running, finished, created = [], [], False
+        for record in self.cli_records:           # newest first
+            job_id = record.get("id")
+            row = self.cli_rows.get(job_id)
+            if row is None:
+                row = CliJobRow(inner, on_stop=self._stop_cli_job,
+                                on_retry=self._retry_cli_job,
+                                on_remove=self._remove_cli_job)
+                self.cli_rows[job_id] = row
+                created = True
+            starting = job_id in self.cli_pending
+            row.refresh(record, starting=starting)
+            (running if CJ.is_active(record) or starting else finished).append(row)
+        self.cli_hdr_running.config(text=f"RUNNING  ·  {len(running)}")
+        self.cli_hdr_done.config(text=f"COMPLETED  ·  {len(finished)}")
+        desired = []
+        if running:
+            desired += [self.cli_hdr_running] + running
+        if finished:
+            desired += [self.cli_hdr_done] + finished
+        current = [w for w in inner.pack_slaves() if w is not self.cli_empty]
+        if current != desired:
+            for w in current:
+                w.pack_forget()
+            for w in desired:
+                if w in (self.cli_hdr_running, self.cli_hdr_done):
+                    w.pack(fill="x", pady=(0, 4) if w is desired[0] else (10, 4))
+                else:
+                    w.pack(fill="x", pady=(0, 6))
+        if self.cli_records:
+            if self.cli_empty.winfo_manager():
+                self.cli_empty.pack_forget()
+        elif not self.cli_empty.winfo_manager():
+            self.cli_empty.pack(pady=40)
+        if created:
+            self._repaint(self.cli_list.inner)
+
+    def _stop_cli_job(self, job_id):
+        if not CJ.request_stop(job_id):
+            show_warning(self, "Not running", "That job is no longer running.")
+        self._poll_cli(force=True)
+
+    def _retry_cli_job(self, job_id):
+        """Run a finished CLI job again with its saved settings.
+
+        The new run is a separate process (this window does not own it), so it
+        is launched the way `prism retry` would be and then simply shows up in
+        the list once it registers itself.
+        """
+        record = CJ.load(job_id)
+        if record is None:
+            return self._poll_cli(force=True)
+        spec = record.get("spec") or {}
+        dup = CJ.find_active(spec.get("repo_name"), spec.get("pr_id"))
+        if dup is not None and dup.get("id") != job_id:
+            show_warning(self, "Already running",
+                         f"{CJ.label(record)} is already being reviewed (job {dup['id']}).")
+            return
+        if self.manager.duplicate_of(J.JobSpec(
+                project_dir="", repo_name=spec.get("repo_name") or "",
+                pr_id=str(spec.get("pr_id") or ""))) is not None:
+            show_warning(self, "Already running",
+                         f"{CJ.label(record)} is already being reviewed in this window.")
+            return
+        try:
+            CJ.spawn_detached(["retry", job_id, "--quiet"])
+        except OSError as e:
+            show_warning(self, "Could not start", f"Could not start the CLI: {e}")
+            return
+        self.cli_pending[job_id] = time.time()
+        self._poll_cli(force=True)
+
+    def _remove_cli_job(self, job_id):
+        CJ.remove(job_id)
+        self._poll_cli(force=True)
 
     # ---------------- creating a job ----------------
     def _build_spec(self):
@@ -2910,6 +3314,12 @@ class App(tk.Tk):
                 f"Both jobs can run — git operations on a shared checkout are "
                 f"serialised — but one may wait for the other.",
                 confirm="Start anyway", cancel="Cancel"):
+            return
+        elsewhere = CJ.find_active(spec.repo_name, spec.pr_id)
+        if elsewhere is not None:
+            show_warning(self, "Already running",
+                         f"{spec.label} is already being reviewed from the command "
+                         f"line (job {elsewhere['id']}).")
             return
         try:
             job = self.manager.create(spec)
@@ -3119,6 +3529,7 @@ class App(tk.Tk):
         try:
             self._drain_once()
             self._drain_codegen()
+            self._poll_cli()
             self._tick_animation()
         finally:
             # Always reschedule: one bad line must not kill the pump and leave
@@ -3216,11 +3627,16 @@ class App(tk.Tk):
         costs nothing — the pump still runs, it just has no frames to draw."""
         working = [j for j in self.manager.jobs.values()
                    if j.status in (J.RUNNING, J.STOPPING)]
-        if not working:
+        cli_working = [r for r in self.cli_records
+                       if CJ.status_of(r) in (J.RUNNING, J.STOPPING)]
+        if not working and not cli_working and not self.cli_pending:
             self._anim = 0
             return
         self._anim = (self._anim + 1) % 12
         self.pill.tick(self._anim)
+        if self.screen is self.cli_screen:
+            for row in self.cli_rows.values():
+                row.tick(self._anim)
         if self.screen is self.jobs_screen:
             for job in working:
                 row = self.rows.get(job.id)
@@ -3546,5 +3962,18 @@ def _guess_role(folder_name):
     return ""
 
 
+def _run_as_command():
+    """True when the arguments are a PRISM command rather than "open the window".
+
+    The same program is the desktop app and the command line, so the packaged
+    build can be used over ssh too: `PRISM run 214`. With no arguments the
+    window opens as it always has.
+    """
+    return len(sys.argv) > 1 and (sys.argv[1] in PC.COMMANDS
+                                  or sys.argv[1] in ("-h", "--help", "--version"))
+
+
 if __name__ == "__main__":
+    if _run_as_command():
+        sys.exit(PC.main(["version"] if sys.argv[1] == "--version" else sys.argv[1:]))
     App().mainloop()

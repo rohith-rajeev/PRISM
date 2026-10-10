@@ -62,6 +62,7 @@ def preflight():
         fail(f"PyInstaller is missing — install it with:\n"
              f"    {sys.executable} -m pip install -r {Path('desktop') / 'requirements-build.txt'}")
     for rel in ("app.py", "orchestrator.py", "jobs.py", "updater.py",
+                "prism_cli.py", "cli_jobs.py", "folderpicker.py",
                 "version.py", Path("agents") / "pr-reviewer.md",
                 Path("docs") / "MANUAL.md"):
         if not (ROOT / rel).is_file():
@@ -183,6 +184,9 @@ def main():
         "--hidden-import", "config",
         "--hidden-import", "notifier",
         "--hidden-import", "codegen_bridge",
+        "--hidden-import", "prism_cli",
+        "--hidden-import", "cli_jobs",
+        "--hidden-import", "folderpicker",
         # Tkinter is the whole UI; everything else the stdlib drags in is dead
         # weight in a GUI binary.
         "--exclude-module", "test",

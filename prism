@@ -1,0 +1,19 @@
+#!/bin/sh
+# PRISM on the command line, from a source checkout:  ./prism run 214
+# Link it onto your PATH once to use it from any folder:
+#     ln -s "$PWD/prism" ~/.local/bin/prism
+# (stdlib only, no display needed - this is the one to use over ssh.)
+set -e
+SELF=$0
+while [ -L "$SELF" ]; do                      # follow the symlink back to the checkout
+    LINK=$(readlink "$SELF")
+    case "$LINK" in /*) SELF=$LINK ;; *) SELF=$(dirname "$SELF")/$LINK ;; esac
+done
+DIR=$(CDPATH= cd -- "$(dirname -- "$SELF")" && pwd)
+for PY in python3 python; do
+    if command -v "$PY" >/dev/null 2>&1; then
+        exec "$PY" "$DIR/prism_cli.py" "$@"
+    fi
+done
+echo "PRISM needs Python 3.8+ on PATH (tried: python3, python)." >&2
+exit 1

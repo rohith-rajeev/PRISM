@@ -4,6 +4,24 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v4.0
+
+- **PRISM on the command line.** `prism run 214` reviews PR 214 of the
+  repository in the folder you are in, with everything the desktop app does:
+  review, description update, sync, merge, dry run, model and region choice,
+  custom instructions, and the same safety gates. It needs no display, so you
+  can ssh into the machine that runs PRISM and review from anywhere. Add `-d`
+  to run in the background and survive logging out; `prism jobs`, `logs -f`,
+  `stop`, `retry` and `ask` manage the rest. Defaults live in
+  `~/.prism/config.json` — set them once with `prism config set`, and the
+  repository and region are read from the clone's CodeCommit remote.
+- **A CLI jobs screen in the desktop app.** Jobs started from the command line
+  are listed there with Stop and Retry. The header tally now counts desktop and
+  CLI jobs together, with the split shown when you hover over it.
+- **A modern folder chooser on Linux.** "Browse" now opens your desktop's own
+  folder dialog (zenity, kdialog or yad) instead of the old Tk one, falling back
+  to it only when none is installed.
+
 ## v3.9
 
 - **Faster, steadier reviews.** A review no longer fails after a fixed 20

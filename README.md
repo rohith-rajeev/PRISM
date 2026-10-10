@@ -119,9 +119,59 @@ PyInstaller can't cross-compile, so each OS builds on its own machine — push t
 `main`/`develop` and the bundled GitHub Actions workflow builds all three and
 uploads them as artifacts. See [`desktop/README.md`](desktop/README.md).
 
-## UI
-Four screens behind one header (badge, live job tally, Help, back to the list):
+## Command line
 
+The same pipeline, no window and no display — for ssh sessions and scripts. From
+a source checkout use `./prism`; link it once to use it anywhere
+(`ln -s "$PWD/prism" ~/.local/bin/prism`). The packaged build answers to the same
+commands (`PRISM run 214`).
+
+```bash
+cd ~/work/my-service            # a clone of the CodeCommit repository
+prism run 214                   # review PR 214 here (Ctrl-C stops it cleanly)
+prism run 214 -d                # same, in the background; survives logout
+prism run 214 --dry-run --no-merge -i "check the migration"
+
+prism jobs [--all]              # what is running / finished
+prism logs 7f3a9c -f            # follow a job's transcript
+prism stop 7f3a9c               # or: prism stop --all
+prism retry 7f3a9c              # run it again with the same settings
+prism ask 7f3a9c "why block?"   # read-only follow-up to the reviewer
+prism models | prism repos | prism update | prism version
+```
+
+`prism run` works out what it needs from where you are: the git repository you
+are inside (from any subdirectory), the CodeCommit repository name and region
+from its `origin` remote, then your saved defaults. A folder holding several
+clones needs `--repo <name>`; PRISM never guesses between them.
+
+Defaults are kept in `~/.prism/config.json` (the file the desktop app already
+uses) under a `cli` key, and a flag always beats a saved default:
+
+```bash
+prism config                         # show
+prism config set region eu-west-1
+prism config set model anthropic/claude-sonnet-5-5
+prism config set merge no            # review only, unless --merge is given
+prism config set webhook https://chat.googleapis.com/…
+prism config unset model
+```
+
+Run in a terminal, questions (merge conflicts, the high-impact merge
+confirmation) are asked right there. Run detached there is nobody to ask, so
+PRISM takes the cautious answer: conflicts are not resolved and a high-impact
+merge is not confirmed.
+
+Each CLI job keeps a record and a log under `~/.prism/cli-jobs/`. That is how the
+desktop app's **CLI jobs** screen lists them, stops them (a `<id>.stop` file the
+running job notices within a second) and retries them (`prism retry`), and why
+the header tally can count both kinds. Nothing is written to your repositories.
+
+## UI
+Screens behind one header (badge, live job tally with a desktop/CLI split on hover, CLI jobs, Help, back to the list):
+
+- **CLI jobs** — jobs started with `prism` (here or over ssh): status, stage, result,
+  Stop and Retry. Output is read with `prism logs`.
 - **Jobs** — one row per job: status, target, verdict, impact, Stop, dismiss.
 - **New job** — Project card plus a two-column row pairing Repository mapping
   with Model & behavior (the model card spans the row for single-repo

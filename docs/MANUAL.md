@@ -30,7 +30,7 @@ from the project folder.
 
 **1. Click `+ New job`.**
 
-**2. Choose your working folder** with `Browse`.
+**2. Choose your working folder** with `Browse`. On Linux this opens your desktop's own folder dialog (it needs `zenity`, `kdialog` or `yad`; without one PRISM falls back to its basic built-in chooser). You can also type or paste the path.
 
 This is the folder holding your code. PRISM looks inside it for git clones and
 sets itself up accordingly:
@@ -295,6 +295,45 @@ the job log and PR description say so: a fix made now was not covered by the
 testing since that review, so test it again. A late Critical or High finding
 still blocks the merge; a late Medium or lower one is reported but approves with
 comments.
+
+---
+
+## The command line
+
+Everything above also works without the window, which is how you review from
+another machine: ssh in and run `prism`.
+
+    cd ~/work/my-service
+    prism run 214              review PR 214 of the repository you are in
+    prism run 214 -d           the same, in the background (survives logout)
+    prism jobs                 what is running      (--all for finished ones)
+    prism logs <id> -f         follow a job's output
+    prism stop <id>            stop it              (--all stops every one)
+    prism retry <id>           run it again with the same settings
+    prism ask <id> "…"         ask the reviewer about a finished job
+
+PRISM reads the repository name and region from the clone's CodeCommit remote,
+so the folder you are in is usually all it needs. Options mirror the New job
+screen: `--no-review`, `--no-describe`, `--no-merge`, `--no-sync`, `--dry-run`,
+`--model`, `--region`, `-i "extra instructions"`. If a folder holds several
+clones, say which with `--repo <name>`.
+
+**Saved defaults** live in `~/.prism/config.json`. Set them once:
+
+    prism config set region eu-west-1
+    prism config set merge no
+    prism config                show them
+
+A flag on the command always wins over a saved default.
+
+**Questions.** In a terminal, PRISM asks you where the desktop app would show
+its question box. A detached job has nobody to ask, so it takes the cautious
+answer: it does not resolve a conflict and does not confirm a high-impact merge.
+
+**In the desktop app.** The **CLI jobs** button in the header opens a list of
+jobs started from the command line, with **Stop** and **↻ Retry**. The list
+is for control — read a job's output with `prism logs`. The status pill counts
+desktop and CLI jobs together; hover over it to see the split.
 
 ---
 
