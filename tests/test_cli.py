@@ -508,6 +508,7 @@ class FolderChooser(unittest.TestCase):
 
 
 class Entrypoints(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "the launcher is a POSIX shell script")
     def test_launcher_script_runs_the_cli(self):
         out = subprocess.run([str(ROOT / "prism"), "version"], stdout=subprocess.PIPE,
                              universal_newlines=True, timeout=60)
