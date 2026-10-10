@@ -30,3 +30,6 @@ Thumbs.db
 # --- local run artifacts ---
 logs/
 screenshots/
+
+# --- local tutorials (kept out of the repo) ---
+docs/tutorial/

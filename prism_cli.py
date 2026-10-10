@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -34,7 +35,7 @@ import config as CFG  # noqa: E402
 import cli_jobs as CJ  # noqa: E402
 import jobs as J  # noqa: E402
 from orchestrator import (  # noqa: E402
-    REGION_DEFAULT, Cancelled, RunControl, detect_local_repos, followup_declined,
+    REGION_DEFAULT, TOOL_DIR, Cancelled, RunControl, detect_local_repos, followup_declined,
     full_pipeline, list_available_models, normalise_verdict, run_followup,
     STAGE_REVIEW, STAGE_DESCRIBE, STAGE_MERGE_CHECK, STAGE_SYNC, STAGE_MERGE,
 )
@@ -45,7 +46,7 @@ PROG = "prism"
 # Words the first argument can be. The desktop binary uses this to decide
 # whether it was started as a command or as the application.
 COMMANDS = ("run", "jobs", "logs", "stop", "retry", "ask", "rm", "models", "repos",
-            "config", "version", "update", "help")
+            "config", "man", "version", "update", "help")
 
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_STOPPED = 0, 1, 2, 130
 
@@ -528,6 +529,12 @@ def build_parser():
     c.add_argument("key", nargs="?")
     c.add_argument("value", nargs="*")
 
+    mp = sub.add_parser("man", help="install the manual page (then: man prism)")
+    mp.add_argument("--install", action="store_true",
+                    help="copy it into your man directory (the default action)")
+    mp.add_argument("--dir", help="man1 directory to install into "
+                                  "(default: ~/.local/share/man/man1)")
+    mp.add_argument("--path", action="store_true", help="only print where the page is")
     sub.add_parser("version", help="print the version")
     u = sub.add_parser("update", help="check for (and optionally install) a newer release")
     u.add_argument("--install", action="store_true", help="download and install it")
@@ -842,6 +849,30 @@ def cmd_config(args):
     return EXIT_OK
 
 
+MAN_PAGE = TOOL_DIR / "man" / "prism.1"
+
+
+def cmd_man(args):
+    if not MAN_PAGE.is_file():
+        print(f"The manual page is missing from this install ({MAN_PAGE}).", file=sys.stderr)
+        return EXIT_ERROR
+    if args.path:
+        print(MAN_PAGE)
+        return EXIT_OK
+    target = Path(args.dir).expanduser() if args.dir else (
+        Path.home() / ".local" / "share" / "man" / "man1")
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(str(MAN_PAGE), str(target / "prism.1"))
+    except OSError as e:
+        print(f"Could not install into {target}: {e.strerror or e}", file=sys.stderr)
+        return EXIT_ERROR
+    print(f"Installed {target / 'prism.1'}")
+    if not args.dir:
+        print("Try:  man prism    (if it is not found, add ~/.local/share/man to MANPATH)")
+    return EXIT_OK
+
+
 def cmd_update(args):
     import updater as U
     try:
@@ -876,7 +907,8 @@ def cmd_update(args):
 
 HANDLERS = {"run": cmd_run, "jobs": cmd_jobs, "logs": cmd_logs, "stop": cmd_stop,
             "retry": cmd_retry, "ask": cmd_ask, "rm": cmd_rm, "models": cmd_models,
-            "repos": cmd_repos, "config": cmd_config, "update": cmd_update}
+            "repos": cmd_repos, "config": cmd_config, "man": cmd_man,
+            "update": cmd_update}
 
 
 def main(argv=None):

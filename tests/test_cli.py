@@ -507,6 +507,53 @@ class FolderChooser(unittest.TestCase):
             self.assertNotIn("LD_LIBRARY_PATH", FP._clean_env())
 
 
+class ManPage(Isolated):
+    page = (ROOT / "man" / "prism.1").read_text(encoding="utf-8")
+
+    def long_options(self, parser):
+        import argparse
+        found = set()
+        stack = [parser]
+        while stack:
+            p = stack.pop()
+            for action in p._actions:
+                if isinstance(action, argparse._SubParsersAction):
+                    stack.extend(action.choices.values())
+                elif action.help is not argparse.SUPPRESS:
+                    found.update(o for o in action.option_strings if o.startswith("--"))
+        found.discard("--help")
+        return found
+
+    def test_every_command_is_documented(self):
+        for word in P.COMMANDS:
+            self.assertRegex(self.page, r'(?m)^\.TP\n\.B[IR]? "?%s\b' % word)
+
+    def test_every_option_is_documented(self):
+        flat = self.page.replace("\\-", "-")
+        for option in self.long_options(P.build_parser()):
+            self.assertIn(option, flat, option)
+
+    def test_every_config_key_is_documented(self):
+        for key in P.CONFIG_KEYS_HELP:
+            self.assertIn(key, self.page, key)
+
+    def test_page_is_well_formed_roff(self):
+        if not shutil.which("groff"):
+            self.skipTest("groff is not installed")
+        out = subprocess.run(["groff", "-man", "-ww", "-z", str(ROOT / "man" / "prism.1")],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             universal_newlines=True)
+        self.assertEqual(out.stderr.strip(), "")
+
+    def test_man_command_installs_it(self):
+        target = self.home / "man1"
+        out = io.StringIO()
+        with mock.patch.object(sys, "stdout", out):
+            code = P.main(["man", "--dir", str(target)])
+        self.assertEqual(code, 0)
+        self.assertEqual((target / "prism.1").read_text(encoding="utf-8"), self.page)
+
+
 class Entrypoints(unittest.TestCase):
     @unittest.skipIf(os.name == "nt", "the launcher is a POSIX shell script")
     def test_launcher_script_runs_the_cli(self):

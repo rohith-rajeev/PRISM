@@ -177,6 +177,7 @@ def main():
         "--paths", str(ROOT),
         "--add-data", f"{agent_src}{os.pathsep}agents",
         "--add-data", f"{manual_src}{os.pathsep}docs",
+        "--add-data", f"{ROOT / 'man'}{os.pathsep}man",
         "--hidden-import", "orchestrator",
         "--hidden-import", "jobs",
         "--hidden-import", "updater",

@@ -121,46 +121,127 @@ uploads them as artifacts. See [`desktop/README.md`](desktop/README.md).
 
 ## Command line
 
-The same pipeline, no window and no display — for ssh sessions and scripts. From
-a source checkout use `./prism`; link it once to use it anywhere
-(`ln -s "$PWD/prism" ~/.local/bin/prism`). The packaged build answers to the same
-commands (`PRISM run 214`).
+The same pipeline and safety gates as the desktop app, with no window and no
+display — for ssh sessions and scripts. Needs Python 3.8+, the AWS CLI and the
+reviewer engine; Tkinter is not required.
+
+### Install
 
 ```bash
-cd ~/work/my-service            # a clone of the CodeCommit repository
-prism run 214                   # review PR 214 here (Ctrl-C stops it cleanly)
-prism run 214 -d                # same, in the background; survives logout
-prism run 214 --dry-run --no-merge -i "check the migration"
+ln -s "$PWD/prism" ~/.local/bin/prism     # from a source checkout; or just ./prism
+prism man                                 # installs the man page -> `man prism`
+prism version
+```
 
-prism jobs [--all]              # what is running / finished
-prism logs 7f3a9c -f            # follow a job's transcript
-prism stop 7f3a9c               # or: prism stop --all
-prism retry 7f3a9c              # run it again with the same settings
-prism ask 7f3a9c "why block?"   # read-only follow-up to the reviewer
-prism models | prism repos | prism update | prism version
+The packaged desktop build answers to the same commands (`PRISM run 214`).
+`prism man` copies the page to `~/.local/share/man/man1` (`--dir` picks another
+place, `--path` prints where the bundled page is). If `man prism` cannot find it,
+add `~/.local/share/man` to `MANPATH`.
+
+### Review a pull request
+
+```bash
+cd ~/work/my-service        # a clone of the CodeCommit repository
+prism run 214               # review PR 214 here; Ctrl-C stops it cleanly
+prism run 214 -d            # same, in the background; survives logout
+prism run 214 --dry-run --no-merge -i "check the migration"
 ```
 
 `prism run` works out what it needs from where you are: the git repository you
-are inside (from any subdirectory), the CodeCommit repository name and region
-from its `origin` remote, then your saved defaults. A folder holding several
-clones needs `--repo <name>`; PRISM never guesses between them.
+are inside (from any subdirectory), then the CodeCommit repository name and
+region from its `origin` remote, then your saved defaults. A folder holding
+several clones needs `--repo <name>`; PRISM never guesses between them.
+Precedence is always: flag → saved default → inferred from the clone → built-in
+(`us-east-1`).
 
-Defaults are kept in `~/.prism/config.json` (the file the desktop app already
-uses) under a `cli` key, and a flag always beats a saved default:
+### `prism run` flags
+
+| Flag | Meaning |
+|---|---|
+| `--path DIR` | project folder (default: the git repository you are in) |
+| `--repo NAME` | CodeCommit repository name |
+| `--clone DIR` | local clone, when it is not the folder itself |
+| `--region R` | AWS region |
+| `--model NAME` | reviewer model (`prism models` lists them) |
+| `--review` / `--no-review` | run the review, or only sync and merge |
+| `--describe` / `--no-describe` | write findings into the PR description |
+| `--merge` / `--no-merge` | merge on approval, or review only |
+| `--sync` / `--no-sync` | sync the destination branch into the source first |
+| `--dry-run` | review, but change nothing in AWS or git |
+| `-i`, `--instructions TEXT` | extra instructions for the reviewer |
+| `--instructions-file FILE` | read the extra instructions from a file |
+| `-d`, `--detach` | run in the background and return |
+| `-q`, `--quiet` | print nothing (the log is still kept) |
+
+### Other commands
+
+| Command | Does |
+|---|---|
+| `prism jobs [-a] [--json]` | list running jobs (`-a`: finished too) |
+| `prism logs ID [-f] [-n N]` | show a job's transcript; `-f` follows until it ends |
+| `prism stop ID` / `stop --all` | stop a running job |
+| `prism retry ID [-d] [-q]` | run a finished job again with the same settings |
+| `prism ask ID "question"` | read-only follow-up question to the reviewer |
+| `prism rm ID… [--all]` | delete finished jobs' records and logs |
+| `prism models [--refresh]` | list reviewer models |
+| `prism repos [PATH]` | show the git clones PRISM finds in a folder |
+| `prism config …` | show or change saved defaults (below) |
+| `prism man` | install the man page |
+| `prism update [--install]` | check for / install a newer release |
+| `prism version`, `prism help` | version, command summary |
+
+Exit status: `0` finished (merged or not), `1` the job failed, `2` usage error or
+the PR is already being reviewed, `130` stopped.
+
+### Configuration
+
+Defaults live in `~/.prism/config.json` — the file the desktop app already uses —
+under a `cli` key. Edit it by hand, or use `prism config`:
+
+```json
+{
+  "cli": {
+    "project_dir": "/home/me/work",
+    "repo": "my-service",
+    "region": "eu-west-1",
+    "model": "anthropic/claude-sonnet-5-5",
+    "instructions": "Flag missing tests",
+    "review": true,
+    "describe": true,
+    "merge": false,
+    "sync": true,
+    "dry_run": false
+  },
+  "google_chat_webhook_url": "https://chat.googleapis.com/…"
+}
+```
+
+| Key | Type | Meaning |
+|---|---|---|
+| `project_dir` | text | folder to use instead of the current one |
+| `repo` | text | CodeCommit repository name |
+| `region` | text | AWS region |
+| `model` | text | reviewer model |
+| `instructions` | text | extra instructions added to every review |
+| `review`, `describe`, `merge`, `sync`, `dry_run` | yes/no | defaults for the matching flags |
+
+Empty text means "not set". Every key is optional; a wrong type is ignored.
 
 ```bash
-prism config                         # show
+prism config                              # show
 prism config set region eu-west-1
-prism config set model anthropic/claude-sonnet-5-5
-prism config set merge no            # review only, unless --merge is given
-prism config set webhook https://chat.googleapis.com/…
+prism config set merge no                 # review only unless --merge is given
+prism config set webhook https://chat.googleapis.com/…   # Google Chat webhook
 prism config unset model
+prism config path                         # where the file is
 ```
+
+### Background jobs and questions
 
 Run in a terminal, questions (merge conflicts, the high-impact merge
 confirmation) are asked right there. Run detached there is nobody to ask, so
 PRISM takes the cautious answer: conflicts are not resolved and a high-impact
-merge is not confirmed.
+merge is not confirmed — run in the foreground if you want to answer.
 
 Each CLI job keeps a record and a log under `~/.prism/cli-jobs/`. That is how the
 desktop app's **CLI jobs** screen lists them, stops them (a `<id>.stop` file the

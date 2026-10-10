@@ -4,6 +4,10 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v4.2
+
+- PRISM CLI integration
+
 ## v4.1
 
 - **PRISM on the command line.** `prism run 214` reviews PR 214 of the

@@ -1,0 +1,278 @@
+.TH PRISM 1 "" "PRISM" "PRISM Manual"
+.SH NAME
+prism \- review and safely merge AWS CodeCommit pull requests from the command line
+.SH SYNOPSIS
+.B prism
+.I command
+.RI [ options ]
+.br
+.B prism run
+.I pr_id
+.RB [ \-\-path
+.IR DIR ]
+.RB [ \-\-repo
+.IR NAME ]
+.RB [ \-\-no\-merge ]
+.RB [ \-\-dry\-run ]
+.RB [ \-d ]
+.SH DESCRIPTION
+.B prism
+runs the same review, description and merge pipeline as the PRISM desktop
+application, with the same safety checks, but needs no display. Use it locally,
+or ssh into the machine that has AWS access and the reviewer engine and review
+from anywhere.
+.PP
+.B prism run
+works out what it needs from the folder you are in: the git repository (from
+any subdirectory), the CodeCommit repository name and region from its
+.B origin
+remote, then your saved defaults. A folder that holds several clones needs
+.BR \-\-repo ;
+PRISM never guesses between them.
+.PP
+Every run keeps a record and a log under
+.IR ~/.prism/cli\-jobs/ ,
+which is how the desktop application lists, stops and retries jobs started here.
+The packaged desktop build accepts the same commands, for example
+.BR "PRISM run 214" .
+.SH COMMANDS
+.TP
+.BI "run " pr_id
+Review pull request
+.IR pr_id .
+Runs in the foreground; Ctrl\-C stops it cleanly (twice to leave at once).
+.TP
+.B jobs
+List running jobs.
+.TP
+.BI "logs " id
+Show a job's transcript.
+.TP
+.BI "stop " id
+Stop a running job.
+.TP
+.BI "retry " id
+Run a finished job again with the same settings.
+.TP
+.BI "ask " "id question"
+Ask the reviewer about a finished job. Read\-only: nothing is changed or merged.
+.TP
+.BI "rm " id ...
+Delete finished jobs' records and logs.
+.TP
+.B models
+List the reviewer models available.
+.TP
+.B repos
+Show the git clones PRISM finds in a folder.
+.TP
+.B config
+Show or change saved defaults.
+.TP
+.B update
+Check for a newer release.
+.TP
+.B man
+Install this manual page.
+.TP
+.B version
+Print the version.
+.TP
+.B help
+Show the built\-in command summary.
+.SH OPTIONS FOR RUN
+.TP
+.BI \-\-path " DIR"
+Project folder. Default: the git repository you are in, else the saved
+.BR project_dir .
+.TP
+.BI \-\-repo " NAME"
+CodeCommit repository name. Default: saved
+.BR repo ,
+else the clone's remote, else the folder's name.
+.TP
+.BI \-\-clone " DIR"
+Local clone to use when it is not the folder itself.
+.TP
+.BI \-\-region " REGION"
+AWS region. Default: saved
+.BR region ,
+else the remote's region, else us\-east\-1.
+.TP
+.BI \-\-model " NAME"
+Reviewer model; see
+.BR "prism models" .
+.TP
+.BR \-\-review ", " \-\-no\-review
+Run the review (default), or skip it and only sync and merge.
+.TP
+.BR \-\-describe ", " \-\-no\-describe
+Write the findings into the PR description (default), or not. Always off
+without a review.
+.TP
+.BR \-\-merge ", " \-\-no\-merge
+Merge on approval (default), or review only.
+.TP
+.BR \-\-sync ", " \-\-no\-sync
+Sync the destination branch into the source first (default), or not.
+.TP
+.B \-\-dry\-run
+Review, but change nothing in AWS or git.
+.TP
+.BR \-i ", " \-\-instructions " \fITEXT\fR"
+Extra instructions for the reviewer.
+.TP
+.BI \-\-instructions\-file " FILE"
+Read the extra instructions from a file.
+.TP
+.BR \-d ", " \-\-detach
+Run in the background and return; the job survives logging out.
+.TP
+.BR \-q ", " \-\-quiet
+Print nothing. The log is still kept.
+.PP
+A flag always beats a saved default.
+.SH OTHER OPTIONS
+.TP
+.B jobs \-a, \-\-all
+Include finished jobs.
+.TP
+.B jobs \-\-json
+Machine\-readable output.
+.TP
+.B logs \-f, \-\-follow
+Keep following until the job ends.
+.TP
+.B logs \-n, \-\-lines \fIN\fR
+Only the last N lines.
+.TP
+.B stop \-\-all
+Stop every running CLI job.
+.TP
+.B retry \-d, \-q
+Detach, or run quietly.
+.TP
+.B rm \-\-all
+Delete every finished job.
+.TP
+.B models \-\-refresh
+Ask the engine again instead of using the cached list.
+.TP
+.B update \-\-install
+Download and install a newer release (packaged builds only).
+.TP
+.B man \-\-install, \-\-dir \fIDIR\fR, \-\-path
+Install the manual page (default directory
+.IR ~/.local/share/man/man1 ),
+or print where it is.
+.SH CONFIGURATION
+Defaults live in
+.I ~/.prism/config.json
+(the file the desktop application also uses) under a
+.B cli
+key:
+.PP
+.RS
+.nf
+{
+  "cli": {
+    "project_dir": "/home/me/work",
+    "repo": "my\-service",
+    "region": "eu\-west\-1",
+    "model": "anthropic/claude\-sonnet\-5\-5",
+    "instructions": "Flag missing tests",
+    "review": true,
+    "describe": true,
+    "merge": false,
+    "sync": true,
+    "dry_run": false
+  },
+  "google_chat_webhook_url": "https://chat.googleapis.com/..."
+}
+.fi
+.RE
+.PP
+Text keys are
+.BR project_dir ,
+.BR repo ,
+.BR region ,
+.B model
+and
+.BR instructions ;
+an empty value means "not set". Yes/no keys are
+.BR review ,
+.BR describe ,
+.BR merge ,
+.B sync
+and
+.BR dry_run .
+Edit the file by hand or use:
+.PP
+.RS
+.B prism config
+.br
+.B prism config set
+.I key value
+.br
+.B prism config unset
+.I key
+.br
+.B prism config path
+.RE
+.PP
+The extra key
+.B webhook
+sets the Google Chat webhook shared with the desktop application.
+.SH QUESTIONS
+In a terminal, PRISM asks you directly when it needs an answer (merge conflicts,
+the confirmation for a high\-impact merge). A detached or non\-interactive job
+has nobody to ask and takes the cautious answer: conflicts are not resolved and
+a high\-impact merge is not confirmed.
+.SH EXAMPLES
+Review PR 214 of the repository in the current folder:
+.PP
+.RS
+prism run 214
+.RE
+.PP
+Review only, without merging, in the background, then follow it:
+.PP
+.RS
+prism run 214 \-\-no\-merge \-d
+.br
+prism logs 7f3a9c \-f
+.RE
+.PP
+Set defaults once:
+.PP
+.RS
+prism config set region eu\-west\-1
+.br
+prism config set model anthropic/claude\-sonnet\-5\-5
+.RE
+.SH EXIT STATUS
+.TP
+.B 0
+Success (a finished review, merged or not).
+.TP
+.B 1
+The job failed.
+.TP
+.B 2
+Usage error, or the pull request is already being reviewed.
+.TP
+.B 130
+The job was stopped.
+.SH FILES
+.TP
+.I ~/.prism/config.json
+Saved settings.
+.TP
+.I ~/.prism/cli\-jobs/
+A record (\fIid\fR.json), log (\fIid\fR.log) and stop request (\fIid\fR.stop) per job.
+.SH ENVIRONMENT
+.TP
+.B NO_COLOR
+Turns off coloured output.
+.SH SEE ALSO
+The README and docs/MANUAL.md in the PRISM repository.
