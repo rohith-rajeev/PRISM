@@ -134,6 +134,10 @@ class Conflicts(unittest.TestCase):
             emit=lambda *a, **k: None))
 
 
+def PROCEED(question, choices=None):
+    return "proceed"
+
+
 class SafetyGates(unittest.TestCase):
     """A reviewer 'go' verdict must never be sufficient on its own — PRISM's
     own deterministic checks (status, verdict, fast-forward, PR-unchanged)
@@ -217,10 +221,39 @@ class SafetyGates(unittest.TestCase):
     def test_skipping_review_still_merges_a_clean_fast_forward(self):
         """The whole point of do_review=False: sync-and-merge with no
         reviewer call, treated as an approval rather than a missing verdict."""
-        res = self._run(do_review=False)
+        res = self._run(do_review=False, ask=PROCEED)
         self.assertEqual(len(self.merged), 1)
         self.assertTrue(res["merged"])
         self.assertEqual(res["review"].verdict_key, "skipped")
+
+    def test_unreviewed_merge_asks_first_and_stops_unless_confirmed(self):
+        asked = []
+        def ask(q, choices=None):
+            asked.append((q, choices))
+            return "abort"
+        res = self._run(do_review=False, ask=ask)
+        self.assertEqual(len(asked), 1)
+        self.assertIn("NOT been reviewed", asked[0][0])
+        self.assertEqual(self.merged, [])
+        self.assertFalse(res["merged"])
+        self.assertEqual(res["stopped"], "unreviewed-not-confirmed")
+
+    def test_unreviewed_merge_with_nobody_to_ask_does_not_merge(self):
+        res = self._run(do_review=False)
+        self.assertEqual(self.merged, [])
+        self.assertEqual(res["stopped"], "unreviewed-not-confirmed")
+
+    def test_unreviewed_gate_is_not_raised_when_nothing_would_merge(self):
+        def ask(*a, **k):
+            raise AssertionError("no merge is planned, so nothing to confirm")
+        for kw in ({"do_merge": False}, {"dry_run": True}):
+            res = self._run(do_review=False, ask=ask, **kw)
+            self.assertFalse(res["merged"])
+
+    def test_reviewed_merge_never_raises_the_unreviewed_gate(self):
+        def ask(*a, **k):
+            raise AssertionError("a reviewed PR must not be asked about review")
+        self.assertTrue(self._run(ask=ask)["merged"])
 
     def test_skipping_review_forces_the_description_update_off_too(self):
         """There is nothing to describe without a review having run."""
@@ -240,7 +273,7 @@ class SafetyGates(unittest.TestCase):
             return {"status": "OPEN", "repositoryName": "repo",
                     "destinationReference": "main", "sourceReference": "feat",
                     "description": "", "sourceCommit": commit}
-        res = self._run(get_pr=get_pr, do_review=False)
+        res = self._run(get_pr=get_pr, do_review=False, ask=PROCEED)
         self.assertEqual(len(self.merged), 1)
         self.assertTrue(res["merged"])
 
@@ -313,13 +346,16 @@ class HighImpactConfirmation(unittest.TestCase):
         self.assertEqual(len(self.merged), 1)
         self.assertTrue(res["merged"])
 
-    def test_skipped_review_never_asks(self):
-        """No review means no impact score to gate on — the do_review=False
-        fast path must be completely unaffected by this gate."""
-        def ask(*a, **k):
-            raise AssertionError("must not ask when review was skipped")
+    def test_skipped_review_asks_only_the_unreviewed_question(self):
+        """No review means no impact score to gate on; the only question is
+        whether to merge without a review."""
+        asked = []
+        def ask(q, choices=None):
+            asked.append(q)
+            return "proceed"
         res = self._run(ask=ask, do_review=False)
-        self.assertEqual(len(self.merged), 1)
+        self.assertEqual(len(asked), 1)
+        self.assertNotIn("impact", asked[0])
         self.assertTrue(res["merged"])
 
 
@@ -383,7 +419,8 @@ class ChatNotification(unittest.TestCase):
     def test_skipped_review_still_posts_the_merge(self):
         """Sync + merge only (review skipped) is a real merge the group chat
         should hear about; the card says the review was skipped."""
-        self._run(webhook_url="https://example.invalid/hook", do_review=False)
+        self._run(webhook_url="https://example.invalid/hook", do_review=False,
+                  ask=PROCEED)
         self.assertEqual(len(self.posted), 1)
         _url, kw = self.posted[0]
         self.assertTrue(kw["merged"])

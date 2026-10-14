@@ -239,9 +239,9 @@ prism config path                         # where the file is
 ### Background jobs and questions
 
 Run in a terminal, questions (merge conflicts, the high-impact merge
-confirmation) are asked right there. Run detached there is nobody to ask, so
-PRISM takes the cautious answer: conflicts are not resolved and a high-impact
-merge is not confirmed — run in the foreground if you want to answer.
+confirmation, merging without a review) are asked right there. Run detached there is nobody to ask, so
+PRISM takes the cautious answer: conflicts are not resolved, and a high-impact
+or unreviewed merge is not confirmed — run in the foreground if you want to answer.
 
 Each CLI job keeps a record and a log under `~/.prism/cli-jobs/`. That is how the
 desktop app's **CLI jobs** screen lists them, stops them (a `<id>.stop` file the
@@ -383,6 +383,9 @@ disagrees with `version.py`.
 ## Safety
 - Dry-run toggle previews without any writes/merges.
 - Merge only on Approve verdicts + PR status OPEN.
+- A run that skips the review (sync + merge only, or merge alone) asks
+  "Merge without a review?" before merging, every time. Declining — or having
+  nobody to ask — stops without merging.
 - Sync conflicts are never resolved by PRISM: they are captured, the clone is
   restored, and each hunk is put to you — keep current, take incoming, or
   abort — before the merge is replayed with your answers.
