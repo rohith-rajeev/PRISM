@@ -2968,6 +2968,30 @@ def _run_pipeline(project_dir, repo_name, pr_id, local_repo=None,
                 return {"review": review, "merged": False,
                         "stopped": "high-impact-not-confirmed", "tokens": meter.total()}
             emit("▸ Merge confirmed.")
+    else:
+        # Review was switched off, so nothing has looked at this PR. That is a
+        # legitimate "just sync and merge" run, but also an easy one to start
+        # by accident (the option sticks from a previous run), so a person
+        # confirms every time. As with the high-impact gate, no one to ask
+        # means no merge.
+        ck()
+        emit("\n⚠ This PR has not been reviewed — the review step was skipped.")
+        question = (
+            f"PR #{pr_id} has NOT been reviewed: the review (and description "
+            f"update) steps were skipped for this run.\n\n"
+            f"Merging will go ahead without any AI review of the changes.\n\n"
+            f"Merge this PR without a review?"
+        )
+        answer = ask(question, choices=[
+            ("proceed", "Merge without a review"),
+            ("abort", "Abort — I'll review it first"),
+        ]) if ask is not None else None
+        if answer != "proceed":
+            emit("■ Unreviewed merge not confirmed — stopping without merging.")
+            pg(STAGE_MERGE, "skipped")
+            return {"review": review, "merged": False,
+                    "stopped": "unreviewed-not-confirmed", "tokens": meter.total()}
+        emit("▸ Merge without review confirmed.")
 
     if not mergeable:
         # A fast-forward is not possible up front. Same handling as a
@@ -3009,6 +3033,7 @@ _STOPPED_LABEL = {
     "pr-changed-since-review": "PR changed since review",
     "not-fast-forwardable": "not fast-forwardable",
     "high-impact-not-confirmed": "high-impact merge not confirmed",
+    "unreviewed-not-confirmed": "merge without review not confirmed",
     "partial-review": "review cut short",
 }
 

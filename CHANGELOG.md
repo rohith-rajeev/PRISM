@@ -4,6 +4,14 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v4.3
+
+- **A warning before merging a PR that was never reviewed.** If a run skips the
+  review (sync + merge only, or merge alone), PRISM now stops and asks before
+  it merges: "Merge without a review?", with the option to abort. It asks every
+  time, so a setting left over from an earlier run can no longer merge a PR
+  unreviewed by accident. A background run, with nobody to ask, does not merge.
+
 ## v4.2
 
 - PRISM CLI integration
