@@ -543,6 +543,15 @@ _DB_PATH = None
 _DB_PATH_GUARD = threading.Lock()
 
 
+def _db_from_debug_paths(text):
+    """The `db` row of `opencode debug paths` output, or "" when absent."""
+    for line in text.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2 and parts[0] == "db":
+            return parts[1].strip()
+    return ""
+
+
 def _engine_db_path():
     """Path to the review engine's own database, or None when unavailable.
 
@@ -559,14 +568,22 @@ def _engine_db_path():
             if exe is None:
                 _DB_PATH = False
             else:
-                try:
-                    proc = subprocess.run([exe, "db", "path"], capture_output=True,
-                                          text=True, encoding="utf-8",
-                                          errors="replace", timeout=20)
-                    out = (proc.stdout or "").strip()
-                    _DB_PATH = out if (proc.returncode == 0 and out) else False
-                except Exception:  # noqa: BLE001
-                    _DB_PATH = False
+                _DB_PATH = False
+                # `db path` on 1.x; 2.x dropped it and lists the same path as
+                # the `db` row of `debug paths`.
+                for args, parse in (
+                        (("db", "path"), lambda s: s.strip()),
+                        (("debug", "paths"), _db_from_debug_paths)):
+                    try:
+                        proc = subprocess.run([exe, *args], capture_output=True,
+                                              text=True, encoding="utf-8",
+                                              errors="replace", timeout=20)
+                        out = parse(proc.stdout or "") if proc.returncode == 0 else ""
+                    except Exception:  # noqa: BLE001
+                        out = ""
+                    if out:
+                        _DB_PATH = out
+                        break
     return _DB_PATH or None
 
 
@@ -584,13 +601,20 @@ def _session_usage(db_path, session_id):
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1)
     except Exception:  # noqa: BLE001
         return None
+    row = None
     try:
-        row = conn.execute(
-            "SELECT tokens_input, tokens_output, tokens_reasoning, "
-            "tokens_cache_read, tokens_cache_write, cost FROM session "
-            "WHERE id = ?", (session_id,)).fetchone()
-    except Exception:  # noqa: BLE001
-        return None
+        # 2.x keeps live sessions in `session_v2`; 1.x (and 2.x's migrated
+        # history) in `session`. Same columns in both.
+        for table in ("session_v2", "session"):
+            try:
+                row = conn.execute(
+                    "SELECT tokens_input, tokens_output, tokens_reasoning, "
+                    "tokens_cache_read, tokens_cache_write, cost FROM " + table +
+                    " WHERE id = ?", (session_id,)).fetchone()
+            except Exception:  # noqa: BLE001
+                continue
+            if row:
+                break
     finally:
         conn.close()
     if not row:
@@ -1040,7 +1064,7 @@ def run_agent(agent, prompt, project_dir, emit=_emit_plain, model=None,
     ensure_bundled_agents(project_dir, emit=emit)
     json_mode = engine_supports_json(exe)
     emit(f"\n▸ {label or agent} …")
-    cmd = [exe, "run", "--agent", agent, "--dir", project_dir, "--auto"]
+    cmd = [exe, "run", "--agent", agent, "--auto"]
     if json_mode:
         cmd += ["--format", "json"]
     if model:
@@ -1868,7 +1892,7 @@ def run_opencode_review(pr_id, repo_name, local_repo, project_dir,
     # No --session/--continue: a plain run always creates a fresh session, and
     # --format json is what lets us capture its id for the follow-up turns.
     json_mode = engine_supports_json(exe)
-    cmd = [exe, "run", "--agent", agent, "--dir", project_dir, "--auto"]
+    cmd = [exe, "run", "--agent", agent, "--auto"]
     if json_mode:
         cmd += ["--format", "json"]
     if model:
@@ -1954,7 +1978,7 @@ def run_followup(request, project_dir, repo_name, pr_id, local_repo=None,
         return text, (sid or session_id)
     exe = require_engine()
     json_mode = engine_supports_json(exe)
-    cmd = [exe, "run", "--agent", AGENT_NAME, "--dir", project_dir, "--auto"]
+    cmd = [exe, "run", "--agent", AGENT_NAME, "--auto"]
     if json_mode:
         cmd += ["--format", "json"]
     if model:
@@ -1987,7 +2011,7 @@ def _continue_turn(prompt, project_dir, session_id, emit, model, control, what,
     """
     exe = require_engine()
     json_mode = engine_supports_json(exe)
-    cmd = [exe, "run", "--agent", agent or AGENT_NAME, "--dir", project_dir, "--auto"]
+    cmd = [exe, "run", "--agent", agent or AGENT_NAME, "--auto"]
     if json_mode:
         cmd += ["--format", "json"]
     if model:

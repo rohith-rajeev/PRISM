@@ -4,6 +4,10 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v4.4
+
+- Stability fixes
+
 ## v4.3
 
 - **A warning before merging a PR that was never reviewed.** If a run skips the
