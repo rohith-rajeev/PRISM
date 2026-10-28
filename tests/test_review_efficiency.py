@@ -7,6 +7,7 @@ model/engine, which cannot run in a test.
 """
 import importlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -586,6 +587,12 @@ class ReviewerPermissions(unittest.TestCase):
             self.assertIn(rule, self.front)
 
     @unittest.skipUnless(o.engine_path(), "needs the review engine installed")
+    @unittest.skipUnless(
+        o.engine_path() and re.search(
+            r"^\s+agent\s", subprocess.run([o.engine_path(), "debug", "--help"],
+                                            capture_output=True, text=True).stdout,
+            re.M),
+        "engine has no `debug agent` (removed in 2.x)")
     def test_the_real_engine_enforces_them(self):
         """Ask the actual engine to run commands as this agent — no model involved."""
         with tempfile.TemporaryDirectory() as tmp:
