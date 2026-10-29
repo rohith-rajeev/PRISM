@@ -238,7 +238,10 @@ new-job screen is folded into the agent's very first prompt the same way.
   Backend and Frontend stacked on their own lines so long clone names stay
   readable) and *Model and behavior* (model picker + four checkboxes). When
   the mapping card is absent the model card spans the full row.
-- **Action row:** `▶ Start Prisming` plus the `■ Stop` kill switch.
+- **Action row:** `▶ Start Prisming` (also `Ctrl+Enter`, only when every
+  mandatory field is filled in) plus the `■ Stop` kill switch. A job's detail
+  view also carries a `+ New job` button that opens the form seeded from that
+  job; Cancel returns to it.
 - **Progress bar** directly beneath the action it reports on.
 - **Verdict + Impact** in one compact row.
 - **Reviewer needs your input** panel — conditional (see 4.7).
@@ -328,7 +331,7 @@ new-job screen is folded into the agent's very first prompt the same way.
 | `Backend and Frontend point to the same clone` | Pick two different clones in Repository mapping |
 | `Sync merge hit conflicts … Aborted` | Resolve destination→source conflicts manually, then re-run |
 | `No local clone detected` | Point Working folder at a clone, or type the repo name and let the API fallback work |
-| Model dropdown empty / `could not list models` | Engine model listing failed; runs use the default model |
+| Model dropdown empty / `could not list models` | The engine could not list models. PRISM retries (including against a private engine server), falls back to the last good list saved in `~/.prism/models.json`, and re-asks every few seconds; press ↻ to retry by hand. Runs use the default model meanwhile |
 
 ---
 

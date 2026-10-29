@@ -55,9 +55,11 @@ generated files", anything relevant. Leave it empty for an ordinary review.
 The reviewer is given these instructions up front, before it starts
 reading, and notes in its summary how it applied them.
 
-**6. Click `▶ Start Prisming`.**
+**6. Click `▶ Start Prisming`** — or press `Ctrl+Enter` from anywhere on the form. The shortcut does nothing until the PR id, working folder, region and repository (or clone mapping) are all filled in.
 
 That's it. PRISM opens the job's detail view and starts working.
+
+**Starting another job while one is running:** every job's detail view has its own `+ New job` button, so you don't have to go back to the list first. The form opens with that job's settings, so usually only the PR id changes; `Cancel` takes you back to the job you were looking at.
 
 ---
 

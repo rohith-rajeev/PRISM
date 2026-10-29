@@ -280,6 +280,16 @@ class ModelListCaching(unittest.TestCase):
         self.orig_subprocess_run = o.subprocess.run
         self.addCleanup(setattr, o.subprocess, "run", self.orig_subprocess_run)
         o.subprocess.run = fake_run
+        # Never touch the real ~/.prism/models.json, and never really sleep.
+        self.tmp = tempfile.mkdtemp(prefix="prism-test-models-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.orig_models_file = o._models_file
+        self.addCleanup(setattr, o, "_models_file", self.orig_models_file)
+        o._models_file = lambda: Path(self.tmp) / "models.json"
+        self.orig_sleep = o.time.sleep
+        self.addCleanup(setattr, o.time, "sleep", self.orig_sleep)
+        self.sleeps = []
+        o.time.sleep = self.sleeps.append
 
     def test_second_call_reuses_the_cache(self):
         first = o.list_available_models()
@@ -303,6 +313,55 @@ class ModelListCaching(unittest.TestCase):
             return _Proc()
         o.subprocess.run = failing_run
         self.assertEqual(o.list_available_models(force=True), good)
+
+    def test_a_transient_failure_is_retried_and_succeeds(self):
+        answers = [1, 1, 0]            # two failures, then the engine is ready
+
+        def flaky(cmd, **kwargs):
+            self.calls.append(cmd)
+            rc = answers.pop(0)
+
+            class _Proc:
+                returncode = rc
+                stdout = "" if rc else "opencode/big-pickle\n"
+            return _Proc()
+        o.subprocess.run = flaky
+        self.assertEqual(o.list_available_models(), ["opencode/big-pickle"])
+        self.assertEqual(len(self.calls), 3)
+        self.assertEqual(len(self.sleeps), 2, "it waits between attempts")
+
+    def test_the_last_attempt_uses_a_private_server(self):
+        def failing(cmd, **kwargs):
+            self.calls.append(cmd)
+
+            class _Proc:
+                returncode = 1
+                stdout = ""
+            return _Proc()
+        o.subprocess.run = failing
+        o.list_available_models()
+        self.assertNotIn("--standalone", self.calls[0])
+        self.assertNotIn("--standalone", self.calls[1])
+        self.assertIn("--standalone", self.calls[-1])
+
+    def test_a_cold_failure_falls_back_to_the_last_good_list_from_disk(self):
+        good = o.list_available_models()
+        self.assertTrue(o._models_file().is_file())
+        o._MODELS_CACHE = None          # a new session
+
+        def failing(cmd, **kwargs):
+            class _Proc:
+                returncode = 1
+                stdout = ""
+            return _Proc()
+        o.subprocess.run = failing
+        self.assertEqual(o.list_available_models(), good)
+        self.assertIsNone(o._MODELS_CACHE,
+                          "a stale list must not stop the next call asking the engine")
+
+    def test_no_engine_and_nothing_saved_is_just_empty(self):
+        o.engine_path = lambda: None
+        self.assertEqual(o.list_available_models(), [])
 
 
 class TokenMeterTests(unittest.TestCase):
@@ -886,3 +945,55 @@ class FollowUpRequests(unittest.TestCase):
         self.assertIn("--agent", captured["cmd"])
         self.assertNotIn("--session", captured["cmd"])
         self.assertIn("m1", captured["cmd"])
+
+
+class RunDirectoryEnvironment(unittest.TestCase):
+    """The engine must be told where to run through $PWD as well as cwd.
+
+    opencode 2.x takes its project directory from $PWD, not from the process's
+    real working directory, so a PRISM launched from anywhere else (a desktop
+    launcher, another folder) made it look for the agents in the wrong place:
+    'Agent not found: "pr-reviewer"'.
+    """
+
+    def test_pwd_is_set_to_the_run_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old = os.environ.get("PWD")
+            os.environ["PWD"] = "/somewhere/else"
+            try:
+                env = o._env_for_cwd(tmp)
+            finally:
+                if old is None:
+                    os.environ.pop("PWD", None)
+                else:
+                    os.environ["PWD"] = old
+            self.assertEqual(env["PWD"], str(Path(tmp).resolve()))
+
+    def test_environment_is_otherwise_untouched_and_not_mutated(self):
+        env = o._env_for_cwd(tempfile.gettempdir())
+        self.assertEqual({k: v for k, v in env.items() if k != "PWD"},
+                         {k: v for k, v in os.environ.items() if k != "PWD"})
+
+    @unittest.skipUnless(o.engine_path(), "needs the review engine installed")
+    def test_the_real_engine_finds_the_agent_from_another_directory(self):
+        with tempfile.TemporaryDirectory() as proj, \
+                tempfile.TemporaryDirectory() as elsewhere:
+            o.ensure_bundled_agents(proj, emit=lambda *a, **k: None)
+            old_cwd, old_pwd = os.getcwd(), os.environ.get("PWD")
+            os.chdir(elsewhere)
+            os.environ["PWD"] = elsewhere
+            try:
+                out = []
+                _rc, _text, _sid = o._run_stream(
+                    [o.engine_path(), "run", "--agent", o.AGENT_REVIEWER, "--auto",
+                     "Reply with just the word ready."],
+                    cwd=proj, emit=lambda m, *a, **k: out.append(m), timeout=60)
+            finally:
+                os.chdir(old_cwd)
+                if old_pwd is None:
+                    os.environ.pop("PWD", None)
+                else:
+                    os.environ["PWD"] = old_pwd
+            # Only the agent lookup is under test; whether the model answers
+            # in time is the provider's business, so the exit code is not.
+            self.assertNotIn("Agent not found", "\n".join(out))
