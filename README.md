@@ -256,8 +256,9 @@ Screens behind one header (badge, live job tally with a desktop/CLI split on hov
 - **Jobs** — one row per job: status, target, verdict, impact, Stop, dismiss.
 - **New job** — Project card plus a two-column row pairing Repository mapping
   with Model & behavior (the model card spans the row for single-repo
-  projects), then `Start Prisming`.
-- **Job detail** — a one-line target header with `Stop`, a progress bar, a
+  projects), then `Start Prisming` (or `Ctrl+Enter`, once every mandatory
+  field is filled in).
+- **Job detail** — a one-line target header with `+ New job` and `Stop`, a progress bar, a
   compact Verdict + Impact row, the conditional reviewer-question panel, and
   the conversation console with an inline Clear.
 - **Help** — the user manual, rendered from `docs/MANUAL.md` into the app's own

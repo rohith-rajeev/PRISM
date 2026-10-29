@@ -666,7 +666,47 @@ _MODELS_CACHE = None
 _MODELS_CACHE_GUARD = threading.Lock()
 
 
-def list_available_models(timeout=60, force=False):
+def _models_file():
+    """Where the last good model list is kept between sessions."""
+    return config.CONFIG_DIR / "models.json"
+
+
+def _read_saved_models():
+    try:
+        data = json.loads(_models_file().read_text(encoding="utf-8"))
+        models = [m for m in data.get("models", []) if isinstance(m, str) and "/" in m]
+        return sorted(set(models))
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _save_models(models):
+    try:
+        f = _models_file()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps({"models": models}), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass            # a cache that can't be written is just a cache that's cold
+
+
+def _ask_engine_for_models(cmd, timeout):
+    """One attempt at `opencode models`: the sorted ids, or [] on any failure."""
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=timeout)
+    except Exception:  # noqa: BLE001
+        return []
+    if proc.returncode != 0:
+        return []
+    models = []
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if line and "/" in line and not line.startswith(("#", "-", " ")):
+            models.append(line.split()[0])
+    return sorted(set(models))
+
+
+def list_available_models(timeout=60, force=False, attempts=3, retry_delay=2.0):
     """Return `provider/model` ids from `opencode models` (empty list on failure).
 
     Cached for the life of the process after the first successful call:
@@ -675,6 +715,13 @@ def list_available_models(timeout=60, force=False):
     between one job and the next in the same session — there is no reason
     to pay that cost more than once. Pass force=True (the picker's refresh
     button) to bypass the cache and ask again.
+
+    The engine's background service answers this from a cold start with
+    "plugins did not finish activating" now and then (it syncs provider model
+    lists over the network first), so one failure proves little: the call is
+    retried, the last attempt against a private `--standalone` server that
+    does not share that startup, and if everything fails the last good list
+    from an earlier session is used rather than an empty picker.
     """
     global _MODELS_CACHE
     if not force:
@@ -683,26 +730,25 @@ def list_available_models(timeout=60, force=False):
                 return _MODELS_CACHE
     exe = engine_path()
     if exe is None:
-        return _MODELS_CACHE or []
-    try:
-        proc = subprocess.run([exe, "models"], capture_output=True,
-                              text=True, encoding="utf-8", errors="replace",
-                              timeout=timeout)
-        if proc.returncode != 0:
-            return _MODELS_CACHE or []
-        models = []
-        for line in (proc.stdout or "").splitlines():
-            line = line.strip()
-            if line and "/" in line and not line.startswith(("#", "-", " ")):
-                models.append(line.split()[0])
-        result = sorted(set(models))
-    except Exception:  # noqa: BLE001
-        return _MODELS_CACHE or []
+        return _MODELS_CACHE or _read_saved_models()
+    result = []
+    for attempt in range(max(1, attempts)):
+        if attempt:
+            time.sleep(retry_delay * attempt)
+        cmd = [exe, "models"]
+        if attempt == attempts - 1 and attempts > 1:
+            cmd.append("--standalone")      # engines without the flag just fail it
+        result = _ask_engine_for_models(cmd, timeout)
+        if result:
+            break
     if result:
         # Never let a transient empty result blank an already-good cache.
         with _MODELS_CACHE_GUARD:
             _MODELS_CACHE = result
-    return result or (_MODELS_CACHE or [])
+        _save_models(result)
+        return result
+    # Deliberately not cached in memory: the next ask should try the engine again.
+    return _MODELS_CACHE or _read_saved_models()
 
 
 def detect_local_repos(project_dir):
@@ -835,6 +881,20 @@ def _human_span(seconds):
     return f"{round(seconds / 60)} minutes" if seconds >= 120 else f"{seconds} seconds"
 
 
+def _env_for_cwd(cwd):
+    """The environment for a child that must run in `cwd`.
+
+    `Popen(cwd=...)` moves the process but leaves the inherited $PWD pointing
+    at wherever PRISM itself was launched from. opencode 2.x takes its project
+    directory from $PWD, so without this it looked for the agents (and ran the
+    review) in the wrong folder — "Agent not found". Older engines ignore PWD.
+    """
+    env = dict(os.environ)
+    if cwd:
+        env["PWD"] = str(Path(cwd).expanduser().resolve())
+    return env
+
+
 def _run_stream(cmd, cwd, emit, timeout=None, control=None, json_mode=False,
                 idle_timeout=None):
     """Run cmd, streaming output to emit.
@@ -853,8 +913,9 @@ def _run_stream(cmd, cwd, emit, timeout=None, control=None, json_mode=False,
         control.check()
     emit(f"$ {_display_cmd(cmd)}")
     proc = subprocess.Popen(
-        cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, encoding="utf-8", errors="replace", bufsize=1,
+        cmd, cwd=cwd, env=_env_for_cwd(cwd), stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
+        bufsize=1,
     )
     if control is not None:
         control.attach(proc)
@@ -1901,6 +1962,22 @@ def run_opencode_review(pr_id, repo_name, local_repo, project_dir,
     rc, out, session_id = _run_stream_resilient(cmd, cwd=project_dir, emit=emit,
                                                 control=control, json_mode=json_mode,
                                                 meter=meter)
+    if rc != 0 and "Agent not found" in out:
+        # The engine could not resolve the reviewer from the run directory
+        # (agent files not yet visible, or a stale engine cache). Re-install
+        # and try once more before giving up, with a pointed error.
+        emit(f"⚠ Engine could not find the '{agent}' agent in {project_dir} — "
+             f"reinstalling it and retrying once.")
+        ensure_bundled_agents(project_dir, emit=emit)
+        time.sleep(2)
+        rc, out, session_id = _run_stream_resilient(cmd, cwd=project_dir, emit=emit,
+                                                    control=control, json_mode=json_mode,
+                                                    meter=meter)
+        if rc != 0 and "Agent not found" in out:
+            raise RuntimeError(
+                f"The engine cannot find the '{agent}' agent in {project_dir}/"
+                f".opencode/agents. Check that folder is writable and that "
+                f"`opencode debug agents` run there lists it.")
     if CUT_SHORT_MARKER in out:
         if _has_verdict(out):
             # It had already delivered its verdict when it was stopped (typically

@@ -4,6 +4,23 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v4.5
+
+- **Start a new job from any job's page.** Every job's detail view now has a
+  `+ New job` button, so you no longer have to go back to the list first. The
+  form opens with that job's settings (usually only the PR id changes), and
+  Cancel takes you back to the job you were on.
+- **Ctrl+Enter starts the review.** Once the PR id, working folder, region and
+  repository are filled in, press Ctrl+Enter instead of clicking
+  `Start Prisming`. It does nothing while anything required is still missing.
+- **Fixed: the model list could stay empty forever.** The engine sometimes
+  can't answer for a few seconds after it starts, and PRISM gave up on the
+  first failure, leaving "could not list models" and an endless "Loading
+  models…". It now retries, remembers the last good list, keeps re-asking in
+  the background, and says what it's doing.
+- **Fixed: reviews failing with `Agent not found: "pr-reviewer"`** when PRISM
+  was started from a different folder than the project, on opencode 2.x.
+
 ## v4.4
 
 - Stability fixes

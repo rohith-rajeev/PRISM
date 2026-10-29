@@ -1300,6 +1300,12 @@ class Picker(tk.Frame):
             self._value = ""
         self._refresh_field()
 
+    def set_empty_hint(self, text):
+        """What the popup says while there is nothing to list."""
+        self._empty_hint = text
+        if self._popup is not None:
+            self._schedule_render()
+
     def set_custom(self, value):
         """Set a value that isn't in the list (e.g. a browsed folder path)."""
         self._value = value or ""
@@ -2017,6 +2023,9 @@ class App(tk.Tk):
         self.codegen = None             # codegen bridge; only exists while enabled
         self._codegen_events = collections.deque(maxlen=20)
         self.selected_job_id = None
+        self._new_return = None      # job page "+ New job" was opened from
+        self._models_retries = 0     # automatic re-asks for an empty model list
+        self._models_retry_job = None
         self.last_spec = None        # seeds the next new-job form
         self.rows = {}               # job id -> JobRow
         self.cli_rows = {}           # CLI job id -> CliJobRow
@@ -2476,7 +2485,14 @@ class App(tk.Tk):
                                      style="primary", height=38, radius=10,
                                      font=(_FAMILY, _pt(11), "bold"))
         self.run_btn.pack(side="left", fill="x", expand=True)
-        RoundedButton(arow, text="Cancel", command=self.show_jobs, style="outline",
+        Tooltip(self.run_btn, lambda: "Ctrl+Enter")
+        # bind_all so it works wherever the cursor is on this screen; the text
+        # box needs its own binding, which also stops it inserting a newline.
+        self.bind_all("<Control-Return>", self._start_hotkey)
+        self.bind_all("<Control-KP_Enter>", self._start_hotkey)
+        self.instr_text.bind("<Control-Return>", self._start_hotkey)
+        self.instr_text.bind("<Control-KP_Enter>", self._start_hotkey)
+        RoundedButton(arow, text="Cancel", command=self._cancel_new, style="outline",
                       height=38, radius=10, font=FONT_B,
                       width=120).pack(side="left", padx=(8, 0))
 
@@ -2495,6 +2511,12 @@ class App(tk.Tk):
                                       font=FONT_S)
         self.stop_btn.pack(side="right")
         self.stop_btn.set_enabled(False)
+        # Starting another job should not mean backing out to the list first.
+        self.new_job_btn = RoundedButton(ti, text="+  New job",
+                                         command=self._new_from_detail,
+                                         style="outline", height=30, width=110,
+                                         font=FONT_S)
+        self.new_job_btn.pack(side="right", padx=(0, 8))
         # ---- progress: below the action, because it reports on it ----
         self.seg = ProgressBar(root)
         self.seg.pack(fill="x", pady=(2, 4))
@@ -2649,7 +2671,7 @@ class App(tk.Tk):
         self.log.see("end")
 
     # ----- models -----
-    def _load_models_async(self, force=False):
+    def _load_models_async(self, force=False, _auto=False):
         """Feed the picker from the engine's model list without freezing the UI.
 
         The worker thread never touches Tk (not thread-safe) — it posts the
@@ -2660,6 +2682,12 @@ class App(tk.Tk):
         refresh button (↻) forces a fresh ask.
         """
         self.model_count.config(text="loading…")
+        self.model_picker.set_empty_hint("Loading models…")
+        if self._models_retry_job is not None:
+            self.after_cancel(self._models_retry_job)
+            self._models_retry_job = None
+        if force and not _auto:
+            self._models_retries = 0        # the user asked: start counting afresh
         def work():
             models = list_available_models(force=force)
             # App-level message, not a job's: the drain unpacks three
@@ -2667,12 +2695,31 @@ class App(tk.Tk):
             self.log_q.put((None, "models", models))
         threading.Thread(target=work, daemon=True).start()
 
+    # The engine sometimes cannot answer for a few seconds after it starts, so
+    # an empty answer is retried on its own before the user is asked to.
+    _MODELS_RETRY_EVERY = 8000      # ms
+    _MODELS_MAX_RETRIES = 5
+
     def _apply_models(self, models):
         self.model_picker.set_models(models)
         n_prov = len({m.partition("/")[0] for m in models}) if models else 0
-        self.model_count.config(
-            text=f"{len(models)} models · {n_prov} providers"
-            if models else "could not list models")
+        if models:
+            self._models_retries = 0
+            self.model_count.config(text=f"{len(models)} models · {n_prov} providers")
+            self.model_picker.set_empty_hint("Loading models…")
+            return
+        if self._models_retries < self._MODELS_MAX_RETRIES:
+            self._models_retries += 1
+            self.model_count.config(text="could not list models — retrying…")
+            self.model_picker.set_empty_hint("Couldn't list models yet — retrying…")
+            self._models_retry_job = self.after(
+                self._MODELS_RETRY_EVERY,
+                lambda: self._load_models_async(force=True, _auto=True))
+        else:
+            self.model_count.config(text="could not list models")
+            self.model_picker.set_empty_hint(
+                "Couldn't list models. Press ↻ to try again, or leave the "
+                "default model selected.")
 
     # ----- repos: scan root, single mode or BE/FE mapping -----
     def _browse(self):
@@ -2974,6 +3021,7 @@ class App(tk.Tk):
         # over a screen that no longer exists.
         self._close_pickers()
         self.selected_job_id = None
+        self._new_return = None
         self._show_screen(self.jobs_screen)
         self._refresh_jobs_list()
         self._refresh_pill()
@@ -2981,14 +3029,29 @@ class App(tk.Tk):
     def show_cli(self):
         self._close_pickers()
         self.selected_job_id = None
+        self._new_return = None
         self._show_screen(self.cli_screen)
         self._poll_cli(force=True)
         self._refresh_pill()
 
-    def show_new(self):
-        if self.last_spec is not None:
-            self._populate_form(self.last_spec)
+    def show_new(self, spec=None):
+        spec = spec or self.last_spec
+        if spec is not None:
+            self._populate_form(spec)
         self._show_screen(self.new_screen)
+
+    def _new_from_detail(self):
+        """New job from a job's own page: seeded from that job, and Cancel
+        brings the user back to it rather than to the list."""
+        job = self.manager.jobs.get(self.selected_job_id)
+        self._new_return = job.id if job is not None else None
+        self.show_new(job.spec if job is not None else None)
+
+    def _cancel_new(self):
+        back, self._new_return = self._new_return, None
+        if back is not None and back in self.manager.jobs:
+            return self.show_detail(back)
+        self.show_jobs()
 
     def show_detail(self, job_id):
         job = self.manager.jobs.get(job_id)
@@ -2996,6 +3059,7 @@ class App(tk.Tk):
             return self.show_jobs()
         self._close_pickers()
         self.selected_job_id = job_id
+        self._new_return = None
         self._show_screen(self.detail_screen)
         self._render_job(job)
         self._refresh_pill()
@@ -3231,36 +3295,49 @@ class App(tk.Tk):
         self._poll_cli(force=True)
 
     # ---------------- creating a job ----------------
-    def _build_spec(self):
-        """Validate the form and snapshot it, or return None after warning."""
+    def _form_problem(self):
+        """What is still wrong with the new-job form, or None when it is ready.
+
+        Returns (title, message). One check behind both the Start button, which
+        shows the message, and the Ctrl+Enter shortcut, which must stay quiet
+        and simply not start anything while a mandatory field is missing.
+        """
         pr = _entry_value(self.pr_entry).strip()
         proj = self.proj_var.get().strip()
         if not pr.isdigit():
-            show_warning(self, "PR id", "Enter a numeric CodeCommit PR id.")
-            return None
+            return "PR id", "Enter a numeric CodeCommit PR id."
         if not Path(proj).is_dir():
-            show_warning(self, "Project folder", "Pick a valid root folder first.")
-            return None
+            return "Project folder", "Pick a valid root folder first."
+        if not self.region_var.get().strip():
+            return "Region", "Enter the AWS region."
         if self.mode == "multi":
             mapping = self._mapping()
             target = self.target_var.get() or "BE"
             picked = mapping.get(target)
             if not picked:
-                show_warning(
-                    self, "Mapping",
-                    f"Select the {'Backend' if target == 'BE' else 'Frontend'} clone "
-                    f"in Repository mapping first.")
-                return None
+                return ("Mapping",
+                        f"Select the {'Backend' if target == 'BE' else 'Frontend'} clone "
+                        f"in Repository mapping first.")
             other = mapping.get("FE" if target == "BE" else "BE")
             if other and other[1] == picked[1]:
-                show_warning(self, "Mapping", "Backend and Frontend point to the same clone.")
-                return None
+                return "Mapping", "Backend and Frontend point to the same clone."
+        elif not self.repo_var.get().strip():
+            return "Repository", "Enter the CodeCommit repository name."
+        return None
+
+    def _build_spec(self):
+        """Validate the form and snapshot it, or return None after warning."""
+        problem = self._form_problem()
+        if problem is not None:
+            show_warning(self, *problem)
+            return None
+        pr = _entry_value(self.pr_entry).strip()
+        proj = self.proj_var.get().strip()
+        if self.mode == "multi":
+            picked = self._mapping()[self.target_var.get() or "BE"]
             repo, local_repo = Path(picked[1]).name, picked[1]
         else:
             repo = self.repo_var.get().strip()
-            if not repo:
-                show_warning(self, "Repository", "Enter the CodeCommit repository name.")
-                return None
             local_repo = self.single_path
         return J.JobSpec(
             project_dir=proj, repo_name=repo, pr_id=pr, local_repo=local_repo,
@@ -3302,6 +3379,21 @@ class App(tk.Tk):
             self.repo_var.set(spec.repo_name)
         self.pr_entry.delete(0, "end")
         _restore_placeholder(self.pr_entry)
+
+    def _start_hotkey(self, _event=None):
+        """Ctrl+Enter: start prisming, but only from a complete new-job form.
+
+        Silent when anything mandatory is missing (a beep, no dialog) and when
+        a dialog is open or another screen is showing, so a stray keypress can
+        never start — or warn about — a job nobody is looking at the form for.
+        """
+        if self.screen is not self.new_screen or self.grab_current() is not None:
+            return None
+        if self._form_problem() is not None:
+            self.bell()
+            return "break"
+        self._start()
+        return "break"
 
     def _start(self):
         spec = self._build_spec()
