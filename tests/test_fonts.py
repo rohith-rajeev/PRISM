@@ -35,7 +35,7 @@ class FontResolution(unittest.TestCase):
     def test_every_platform_branch_returns_a_real_family(self):
         for platform, expected in (("darwin", "SF Pro Text"),
                                    ("win32", "Segoe UI"),
-                                   ("linux", "Inter")):
+                                   ("linux", "Ubuntu")):
             sys.platform = platform
             got = self.ui_family()
             self.assertEqual(got, expected, f"{platform} guessed {got!r}")

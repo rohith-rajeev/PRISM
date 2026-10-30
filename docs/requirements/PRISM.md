@@ -154,7 +154,7 @@ cleared from a **Clear** control in its own header, which is labelled
 **CONVERSATION**.
 
 The transcript is colour-coded by origin, not by keyword: the reviewer's own
-prose is shown in the accent blue, the tools it runs (`› shell: git diff …`)
+prose is shown in the accent blue, the tools it runs (`⚙ bash: git diff …`)
 in grey, and only PRISM's own lines are classified — and then only on explicit
 markers (`⛔`, `ERROR:`, `Traceback`). Matching bare words like "error" or
 "fail" painted ordinary commentary such as "its error handling" in alarming

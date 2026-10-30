@@ -78,7 +78,7 @@ Only the stages this job could actually reach are shown — a job with
 The **CONVERSATION** panel shows what the reviewer is doing:
 
 - **Blue text** — the reviewer thinking out loud.
-- **Grey `›` lines** — commands it is running (reading files, `git diff`, AWS calls).
+- **Grey `⚙` lines** — commands it is running (reading files, `git diff`, AWS calls).
 - **Plain text** — PRISM's own progress messages.
 - **Red** — an actual error.
 

@@ -876,9 +876,7 @@ def _event_tool(evt):
     if len(detail) > 160:
         detail = detail[:157] + "…"
     status = state.get("status")
-    # Plain punctuation, not "⚙"/"✗": those two are missing from common
-    # monospace fonts and showed up as empty boxes in the log.
-    mark = "×" if status == "error" else "›"
+    mark = "✗" if status == "error" else "⚙"
     return f"{mark} {name}" + (f": {detail}" if detail else "")
 
 
