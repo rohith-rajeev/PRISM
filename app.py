@@ -11,6 +11,7 @@ Run:  python3 app.py   (or ./run.sh, or the packaged desktop build)
 import collections
 import json
 import math
+import os
 import queue
 import re
 import socket
@@ -4065,7 +4066,34 @@ def _run_as_command():
                                   or sys.argv[1] in ("-h", "--help", "--version"))
 
 
+def _attach_console():
+    """Give a command run from a terminal somewhere to print, on Windows.
+
+    The packaged Windows build is a windowed program (no console flashing up
+    for the desktop app), so a terminal does not hand it its stdout: `prism
+    run 214` would print nothing, and with no stdout at all `print` can raise.
+    Attach to the console of the terminal that started it, and failing that
+    make the streams harmless. Elsewhere this is a no-op.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        if ctypes.windll.kernel32.AttachConsole(-1):        # ATTACH_PARENT_PROCESS
+            sys.stdout = open("CONOUT$", "w", encoding="utf-8", errors="replace",
+                              buffering=1)
+            sys.stderr = open("CONOUT$", "w", encoding="utf-8", errors="replace",
+                              buffering=1)
+            sys.stdin = open("CONIN$", "r", encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        pass
+    for name in ("stdout", "stderr"):
+        if getattr(sys, name, None) is None:
+            setattr(sys, name, open(os.devnull, "w"))
+
+
 if __name__ == "__main__":
     if _run_as_command():
+        _attach_console()
         sys.exit(PC.main(["version"] if sys.argv[1] == "--version" else sys.argv[1:]))
     App().mainloop()

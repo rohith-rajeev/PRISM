@@ -99,9 +99,108 @@ default; turn it on in **Help → Code-generation integration**. The review itse
 ordinary pipeline with every gate intact, local to this machine (loopback +
 token). See [`docs/CODEGEN_INTEGRATION.md`](docs/CODEGEN_INTEGRATION.md).
 
+## Install
+
+You don't need a source checkout, Python or a build step. Pick your OS, paste
+one command, and you get both the desktop app and the `prism` command.
+
+| OS | Run this |
+|---|---|
+| **Linux** (x86_64) | `curl -fsSL https://raw.githubusercontent.com/rohith-rajeev/PRISM/main/install.sh \| sh` |
+| **macOS** (Apple silicon) | `curl -fsSL https://raw.githubusercontent.com/rohith-rajeev/PRISM/main/install.sh \| sh` |
+| **Windows** (PowerShell) | `irm https://raw.githubusercontent.com/rohith-rajeev/PRISM/main/install.ps1 \| iex` |
+
+The installer downloads the latest release, checks it against the published
+`SHA256SUMS` (and installs nothing if it doesn't match), and puts everything
+under your home directory — **no admin rights or `sudo`**:
+
+| | Linux | macOS | Windows |
+|---|---|---|---|
+| App | `~/.local/opt/prism/PRISM` | `~/Applications/PRISM.app` | `%LOCALAPPDATA%\PRISM\app\PRISM.exe` |
+| `prism` command | `~/.local/bin/prism` | `~/.local/bin/prism` | `%LOCALAPPDATA%\PRISM\bin\prism.cmd` |
+| Launcher | applications menu entry | Spotlight / Launchpad | Start menu shortcut |
+
+If it says `~/.local/bin` is not on your PATH, run the one line it prints, then
+open a new terminal. On Windows the `prism` command works in *new* terminal
+windows.
+
+### What PRISM needs on your machine
+
+PRISM drives other tools; the installer checks for them and tells you which are
+missing. It cannot install them for you:
+
+1. **`git`** — <https://git-scm.com/downloads>
+2. **AWS CLI**, configured with credentials that can read and merge CodeCommit
+   pull requests — <https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html>,
+   then `aws configure`. The region PRISM pre-fills comes from this.
+3. **`opencode`**, the reviewer engine — <https://opencode.ai>. Run `opencode`
+   once and connect a model provider, so the reviewer has a model to use.
+
+### Check it works
+
+```bash
+prism version               # prints "PRISM 4.x"
+cd ~/work/my-service        # a clone of your CodeCommit repository
+prism run 214 --dry-run     # review PR 214 without writing or merging anything
+```
+
+For the desktop app, open **PRISM** from your applications menu / Start menu.
+
+### Update and uninstall
+
+- **Update:** `Help → Check for updates` in the app, or `prism update`. Or just
+  run the installer again — it replaces the old copy.
+- **A specific release:** Linux/macOS `… | sh -s -- --version v4.5`;
+  Windows `$env:PRISM_VERSION = "v4.5"` before the command.
+- **Uninstall:** Linux/macOS `… | sh -s -- --uninstall`; Windows
+  `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/rohith-rajeev/PRISM/main/install.ps1))) -Uninstall`.
+  Your settings in `~/.prism` are kept; delete that folder to remove them too.
+
+### Installing by hand (no script)
+
+Download the file for your OS from the
+[latest release](https://github.com/rohith-rajeev/PRISM/releases/latest).
+
+- **Linux** — `PRISM-linux-x86_64.tar.gz` holds three files: `PRISM`,
+  `PRISM.desktop` and `PRISM.png`. The archive does **not** keep the executable
+  bit, which is why running the extracted file fails (`Permission denied`, or
+  the CLI "doing nothing"). Fix that, then put it on your PATH:
+  ```bash
+  mkdir -p ~/.local/opt/prism ~/.local/bin
+  tar -xzf PRISM-linux-x86_64.tar.gz -C ~/.local/opt/prism
+  chmod +x ~/.local/opt/prism/PRISM
+  ln -sf ~/.local/opt/prism/PRISM ~/.local/bin/prism
+  prism version
+  ```
+  The `.desktop` file is only for the applications menu: copy it to
+  `~/.local/share/applications/` and set its `Exec=` and `Icon=` lines to the
+  full paths of `PRISM` and `PRISM.png`.
+- **macOS** — unzip `PRISM-macos-arm64.zip` (use `ditto -x -k PRISM-macos-arm64.zip .`
+  — plain `unzip` can break the app bundle), move `PRISM.app` to `~/Applications`,
+  and run `xattr -dr com.apple.quarantine ~/Applications/PRISM.app` once: the
+  app is not signed with an Apple developer certificate, so Gatekeeper
+  otherwise refuses to open a browser-downloaded copy. For the command:
+  `ln -sf ~/Applications/PRISM.app/Contents/MacOS/PRISM ~/.local/bin/prism`.
+- **Windows** — unzip `PRISM-windows-x86_64.zip` and put `PRISM.exe` somewhere
+  permanent; double-click it for the app. Windows SmartScreen may warn about an
+  unrecognised publisher the first time (*More info → Run anyway*). To use it
+  as a command, add its folder to your PATH.
+
+### If something doesn't work
+
+| Symptom | Cause and fix |
+|---|---|
+| `Permission denied` / nothing happens running `./PRISM` (Linux) | The executable bit is missing: `chmod +x PRISM`. The installer does this for you. |
+| `prism: command not found` | `~/.local/bin` isn't on your PATH (Linux/macOS), or the terminal predates the install (Windows). Add it / open a new terminal. |
+| macOS: *"PRISM can't be opened because Apple cannot check it"* | `xattr -dr com.apple.quarantine ~/Applications/PRISM.app`, then open it again. |
+| Windows: `prism run …` prints nothing | Use the installed `prism` command (it waits for the review to finish), not a double-clicked `PRISM.exe`. |
+| *"Review engine is not installed or not on PATH"* | Install `opencode` (above). PRISM also looks in `~/.opencode/bin` and `~/.local/bin`. |
+| The model dropdown is empty | `opencode` isn't installed or has no provider connected; run `opencode` once. See [Model selection](#model-selection). |
+| Anything with AWS (`Unable to locate credentials`, access denied) | `aws configure`, and check the same credentials work with `aws codecommit list-repositories`. |
+
 ## Run
 
-From a source checkout (no install step — stdlib only):
+From a source checkout, for development (no install step — stdlib only; end users want [Install](#install) above):
 
 ```bash
 cd PRISM
@@ -126,6 +225,9 @@ display — for ssh sessions and scripts. Needs Python 3.8+, the AWS CLI and the
 reviewer engine; Tkinter is not required.
 
 ### Install
+
+If you installed PRISM with the [installer](#install) you already have the
+`prism` command (and the man page); skip this. From a source checkout instead:
 
 ```bash
 ln -s "$PWD/prism" ~/.local/bin/prism     # from a source checkout; or just ./prism

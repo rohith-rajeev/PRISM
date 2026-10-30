@@ -1,5 +1,7 @@
 # Desktop builds
 
+End users: install a release with the one-line installer in the [main README](../README.md#install) — this page is for building one yourself.
+
 Packages PRISM into a standalone executable so it can be launched without a
 Python checkout. The app itself stays stdlib-only — [PyInstaller](https://pyinstaller.org)
 is a **build-time** dependency, never a runtime one.

@@ -269,6 +269,9 @@ jobs:
           mkdir -p release
           cp artifacts/PRISM-macos-arm64/PRISM-macos-arm64.zip release/
           (cd artifacts/PRISM-windows-x86_64 && zip -q -r ../../release/PRISM-windows-x86_64.zip PRISM.exe)
+          # upload-artifact drops file modes, so without this the extracted
+          # PRISM is not executable and a plain `tar xzf` leaves nothing runnable.
+          chmod 755 artifacts/PRISM-linux-x86_64/PRISM
           tar -czf release/PRISM-linux-x86_64.tar.gz \
               -C artifacts/PRISM-linux-x86_64 PRISM PRISM.desktop PRISM.png
           # Checksums the updater verifies the download against before it
