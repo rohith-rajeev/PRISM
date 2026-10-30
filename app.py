@@ -60,17 +60,22 @@ def load_manual():
             "Read it online at the project's repository.\n")
 
 # ---------- palette (dark only) ----------
+# Apple's dark system: a true-black base, grouped cards one step up
+# (#1c1c1e), fields another (#2c2c2e). Depth comes from those background
+# steps, not from outlines or shadows. Blue is the single tint and marks
+# what is interactive; green/orange/red are reserved for state.
 PAL = {
-    "page": "#1B1D22", "card": "#23262C", "border": "#373B43",
-    "text": "#F0F1F3", "muted": "#9BA0A8",
-    "field": "#1C1F24", "accent": "#5B9CFF",
-    "accent_tint": "#1E3A5F", "accent_text": "#7FB0FF",
-    "run_bg": "#F4F4F5", "run_fg": "#141414",
-    "disabled_bg": "#3A3D44", "disabled_fg": "#9BA0A8",
-    "log_bg": "#0F1214", "log_fg": "#C7D0D9", "log_ph": "#6E8B74",
-    "good": "#34C98E", "warn": "#E5A13D", "bad": "#E5606E",
-    "good_bg": "#123B2F", "bad_bg": "#3B1218",
-    "badge_bg": "#1E3A5F", "badge_fg": "#7FB0FF",
+    "page": "#000000", "card": "#1C1C1E", "border": "#38383A",
+    "text": "#F5F5F7", "muted": "#98989F",
+    "field": "#2C2C2E", "accent": "#0A84FF",
+    "accent_tint": "#0B2A4A", "accent_text": "#64B0FF",
+    "run_bg": "#0A84FF", "run_fg": "#FFFFFF",
+    "disabled_bg": "#2C2C2E", "disabled_fg": "#636366",
+    "fill2": "#2C2C2E", "fill3": "#3A3A3C",
+    "log_bg": "#000000", "log_fg": "#D1D1D6", "log_ph": "#6E8B74",
+    "good": "#30D158", "warn": "#FF9F0A", "bad": "#FF453A",
+    "good_bg": "#0E2F1A", "bad_bg": "#3A1412",
+    "badge_bg": "#0A84FF", "badge_fg": "#FFFFFF",
 }
 
 
@@ -104,11 +109,11 @@ def _ui_family(available=None):
     Tk actually reports once a root exists.
     """
     if sys.platform == "darwin":
-        prefer = ("SF Pro Text", ".AppleSystemUIFont", "Helvetica Neue", "Lucida Grande")
+        prefer = ("SF Pro Text", ".AppleSystemUIFont", "Inter", "Helvetica Neue", "Lucida Grande")
     elif sys.platform == "win32":
         prefer = ("Segoe UI", "Tahoma", "Arial")
     else:
-        prefer = ("Ubuntu", "Cantarell", "DejaVu Sans", "Liberation Sans", "Arial")
+        prefer = ("Inter", "SF Pro Text", "Cantarell", "Ubuntu", "DejaVu Sans", "Liberation Sans", "Arial")
     if available:
         for name in prefer:
             if name in available:
@@ -122,7 +127,9 @@ FONT = (_FAMILY, _pt(10))
 FONT_B = (_FAMILY, _pt(10), "bold")
 FONT_S = (_FAMILY, _pt(9))
 FONT_XS = (_FAMILY, _pt(8))
-TITLE_F = (_FAMILY, _pt(16), "bold")
+TITLE_F = (_FAMILY, _pt(17), "bold")
+LARGE_F = (_FAMILY, _pt(22), "bold")
+HEAD_F = (_FAMILY, _pt(12), "bold")
 
 
 def _resolve_fonts():
@@ -131,7 +138,7 @@ def _resolve_fonts():
     Called once, from App.__init__. Falls back to whatever Tk uses for its own
     default widgets, which is always correct for the platform.
     """
-    global _FAMILY, FONT, FONT_B, FONT_S, FONT_XS, TITLE_F
+    global _FAMILY, FONT, FONT_B, FONT_S, FONT_XS, TITLE_F, LARGE_F, HEAD_F
     try:
         available = set(tkfont.families())
     except Exception:  # noqa: BLE001
@@ -147,7 +154,9 @@ def _resolve_fonts():
     FONT_B = (family, _pt(10), "bold")
     FONT_S = (family, _pt(9))
     FONT_XS = (family, _pt(8))
-    TITLE_F = (family, _pt(16), "bold")
+    TITLE_F = (family, _pt(17), "bold")
+    LARGE_F = (family, _pt(22), "bold")
+    HEAD_F = (family, _pt(12), "bold")
 
 STAGE_DEFS = [
     (STAGE_REVIEW, "Review"),
@@ -214,6 +223,14 @@ def _rr(canvas, x1, y1, x2, y2, r, fill, outline, tags="rr", width=1):
         width=width if outline else 1, joinstyle="round", tags=tags)
 
 
+def _shade(colour, factor):
+    """`colour` (#rrggbb) with each channel scaled by `factor` — the pressed
+    and hover states dim a fill instead of swapping it for another colour."""
+    c = colour.lstrip("#")
+    r, g, b = (int(c[i:i + 2], 16) for i in (0, 2, 4))
+    return "#%02X%02X%02X" % tuple(max(0, min(255, int(v * factor))) for v in (r, g, b))
+
+
 def _spinner(canvas, cx, cy, r, frame, colour):
     """Draw one frame of a rotating arc.
 
@@ -233,7 +250,7 @@ class RoundedCard(tk.Frame):
     """Card with rounded fill + outline. Set stretch=True when the inner
     content must expand to fill leftover space (log console)."""
 
-    def __init__(self, parent, radius=10, fill_key="card", outline_key="border",
+    def __init__(self, parent, radius=14, fill_key="card", outline_key="border",
                  stretch=False, **kw):
         super().__init__(parent, bg=PAL["page"], **kw)
         self._r = radius
@@ -306,15 +323,18 @@ class RoundedCard(tk.Frame):
         h = self.canvas.winfo_height()
         if w <= 4 or h <= 4:
             return
-        _rr(self.canvas, 1, 1, w - 1, h - 1, self._r,
-            PAL[self._fill_key], PAL[self._outline_key])
+        # Depth is the background step, so the default hairline is dropped;
+        # a card only keeps an outline when it asks for a coloured one
+        # (the reviewer-question panel's accent edge).
+        outline = None if self._outline_key == "border" else PAL[self._outline_key]
+        _rr(self.canvas, 1, 1, w - 1, h - 1, self._r, PAL[self._fill_key], outline)
 
 
 class RoundedButton(tk.Canvas):
     """Rounded clickable button. Styles: primary | outline | ghost | field."""
 
     def __init__(self, parent, text="", command=None, style="outline", height=36,
-                 radius=10, font=None, anchor="center", width=160):
+                 radius=None, font=None, anchor="center", width=160):
         super().__init__(parent, height=height, width=width,
                          highlightthickness=0, bd=0)
         self._text = text
@@ -324,12 +344,16 @@ class RoundedButton(tk.Canvas):
         self._font = font or FONT_B
         self._anchor = anchor
         self._hover = False
+        self._pressed = False
         self._enabled = True
         self._selected = False
         self._fontobj = None
         self.bind("<Configure>", lambda _e: self._draw())
         self.bind("<Enter>", lambda _e: (setattr(self, "_hover", True), self._draw()))
-        self.bind("<Leave>", lambda _e: (setattr(self, "_hover", False), self._draw()))
+        self.bind("<Leave>", lambda _e: (setattr(self, "_hover", False),
+                                         setattr(self, "_pressed", False), self._draw()))
+        self.bind("<ButtonPress-1>", lambda _e: (setattr(self, "_pressed", True), self._draw()))
+        self.bind("<ButtonRelease-1>", lambda _e: (setattr(self, "_pressed", False), self._draw()))
         self.bind("<Button-1>", self._click)
 
     def set_text(self, text):
@@ -387,24 +411,29 @@ class RoundedButton(tk.Canvas):
             self._command()
 
     def _colors(self):
+        """(fill, outline, label). Apple's button roles: a tint-filled
+        prominent style for the one main action, gray-fill for secondary
+        actions, and plain tint text for quiet ones. Pressed dims the fill."""
         s = self._style
         if not self._enabled:
             return PAL["disabled_bg"], "", PAL["disabled_fg"]
         if self._selected:
-            return PAL["accent"], PAL["accent"], "white"
+            return (_shade(PAL["accent"], 0.82) if self._pressed else PAL["accent"]), "", "white"
         if s == "primary":
             fill = PAL["run_bg"]
-            if self._hover:
-                fill = PAL["accent"] if PAL["run_bg"].lower().startswith("#f") else "#2E2E2E"
+            if self._pressed:
+                fill = _shade(fill, 0.78)
+            elif self._hover:
+                fill = _shade(fill, 0.9)
             return fill, "", PAL["run_fg"]
         if s == "ghost":
-            return PAL["card"], "", (PAL["accent"] if self._hover else PAL["muted"])
+            fill = PAL["fill3"] if self._pressed else (PAL["fill2"] if self._hover else PAL["card"])
+            return fill, "", (PAL["accent_text"] if self._hover else PAL["muted"])
         if s == "field":
-            return PAL["field"], PAL["border"], PAL["text"]
-        # outline
-        if self._hover:
-            return PAL["accent_tint"], PAL["accent"], PAL["text"]
-        return PAL["card"], PAL["border"], PAL["text"]
+            return PAL["field"], "", PAL["text"]
+        # outline: the gray-fill secondary style
+        fill = PAL["fill3"] if self._pressed else (PAL["fill3"] if self._hover else PAL["fill2"])
+        return fill, "", PAL["text"]
 
     def _draw(self):
         self.delete("all")
@@ -415,7 +444,10 @@ class RoundedButton(tk.Canvas):
         fill, outline, fg = self._colors()
         page = self.master.cget("bg")
         self.config(bg=page)
-        _rr(self, 1, 1, w - 1, h - 1, min(self._radius, h // 2 - 1), fill, outline or None)
+        # Capsule for standalone buttons; fields keep a rounded rectangle.
+        radius = self._radius if self._radius is not None else (
+            10 if self._style == "field" else h // 2)
+        _rr(self, 1, 1, w - 1, h - 1, min(radius, h // 2 - 1), fill, outline or None)
         left_pad = 14
         x = left_pad if self._anchor == "w" else w // 2
         # Available text width differs by alignment: left-aligned text starts
@@ -524,8 +556,8 @@ class ProgressBar(tk.Canvas):
             elif state == "skipped":
                 dot, fg, font = PAL["border"], PAL["muted"], FONT_XS
             else:
-                dot, fg, font = PAL["border"], PAL["muted"], FONT_XS
-            self.create_oval(mx - 3, (y0 + y1) / 2 - 3, mx + 3, (y0 + y1) / 2 + 3,
+                dot, fg, font = PAL["disabled_fg"], PAL["muted"], FONT_XS
+            self.create_oval(mx - 4, (y0 + y1) / 2 - 4, mx + 4, (y0 + y1) / 2 + 4,
                              fill=dot, outline=PAL["page"], width=2)
             mark = {"done": "✓ ", "error": "✕ ", "skipped": "– "}.get(state, "")
             caption = self.notes.get(sid) or label
@@ -577,7 +609,7 @@ class StatusPill(tk.Canvas):
         w = self.winfo_width() or self._MIN_WIDTH
         h = self.winfo_height() or 28
         self.config(bg=PAL["page"])
-        _rr(self, 1, 1, w - 1, h - 1, (h - 2) // 2, PAL["card"], PAL["border"])
+        _rr(self, 1, 1, w - 1, h - 1, (h - 2) // 2, PAL["card"], None)
         if getattr(self, "_spin", False):
             _spinner(self, 18, h / 2, 5, getattr(self, "_frame", 0), self._color)
         else:
@@ -638,10 +670,13 @@ class CheckRow(tk.Frame):
             fill = PAL["accent"] if on else PAL["card"]
             outline = PAL["accent"] if on else PAL["muted"]
             self.label.config(fg=PAL["muted"] if self._muted else PAL["text"])
-        _rr(self.box, 2, 2, 18, 18, 5, fill, outline)
+        _rr(self.box, 2, 2, 18, 18, 6, fill, outline)
         if on:
-            self.box.create_text(10, 10, text="✓", fill="white" if self._enabled
-                                 else PAL["disabled_fg"], font=(_FAMILY, _pt(9), "bold"))
+            # A drawn tick: the "✓" glyph is missing from some Linux fonts
+            # and rendered as a box.
+            self.box.create_line(6, 10.5, 9, 13.5, 14.5, 6.5, fill="white" if self._enabled
+                                 else PAL["disabled_fg"], width=2, capstyle="round",
+                                 joinstyle="round")
 
 
 class AgentPanel(RoundedCard):
@@ -1007,13 +1042,13 @@ class JobRow(RoundedCard):
         self.tokens_lbl.grid(row=0, column=4, rowspan=2, sticky="w", padx=(0, 8))
 
         # One button slot, two meanings: "Stop" while the job is active,
-        # "↻ Retry" once it's finished — set per-refresh() below rather than
+        # "Retry" once it's finished — set per-refresh() below rather than
         # adding a second button that would crowd an already-compact row.
         self.stop_btn = RoundedButton(inner, text="Stop", style="outline",
                                       height=26, width=76, font=FONT_XS,
                                       command=lambda: self._on_stop(job.id))
         self.stop_btn.grid(row=0, column=5, rowspan=2, padx=(0, 6))
-        self.del_btn = RoundedButton(inner, text="✕", style="ghost", height=26,
+        self.del_btn = RoundedButton(inner, text="×", style="ghost", height=26,
                                      width=30, font=FONT_XS,
                                      command=lambda: on_remove(job.id))
         self.del_btn.grid(row=0, column=6, rowspan=2)
@@ -1074,7 +1109,7 @@ class JobRow(RoundedCard):
         total = (job.tokens or {}).get("total")
         self.tokens_lbl.config(text=f"⛃ {_format_tokens(total)}" if total else "")
         if job.is_terminal:
-            self.stop_btn.set_text("↻ Retry")
+            self.stop_btn.set_text("Retry")
             self.stop_btn.set_command(lambda: self._on_retry(job.id))
             self.stop_btn.set_enabled(True)
         else:
@@ -1169,7 +1204,7 @@ class CliJobRow(RoundedCard):
         self.action_btn = RoundedButton(inner, text="Stop", style="outline", height=26,
                                         width=76, font=FONT_XS, command=lambda: None)
         self.action_btn.grid(row=0, column=3, rowspan=2, padx=(0, 6))
-        self.del_btn = RoundedButton(inner, text="✕", style="ghost", height=26, width=30,
+        self.del_btn = RoundedButton(inner, text="×", style="ghost", height=26, width=30,
                                      font=FONT_XS, command=self._remove)
         self.del_btn.grid(row=0, column=4, rowspan=2)
         self._spin = False
@@ -1238,7 +1273,7 @@ class CliJobRow(RoundedCard):
             self.action_btn.set_command(lambda: self._cb_stop(self._id()))
             self.action_btn.set_enabled(status in (J.RUNNING, J.NEEDS_INPUT) and not starting)
         else:
-            self.action_btn.set_text("↻ Retry")
+            self.action_btn.set_text("Retry")
             self.action_btn.set_command(lambda: self._cb_retry(self._id()))
             self.action_btn.set_enabled(True)
         self.del_btn.set_enabled(not active)
@@ -1337,7 +1372,7 @@ class Picker(tk.Frame):
         head.pack(fill="x")
         tk.Label(head, text=f"  {self._title}", font=(_FAMILY, _pt(8), "bold"),
                  bg=PAL["border"], fg=PAL["muted"]).pack(side="left", pady=4)
-        tk.Button(head, text="✕", command=self.close, bg=PAL["border"], fg=PAL["muted"],
+        tk.Button(head, text="×", command=self.close, bg=PAL["border"], fg=PAL["muted"],
                   activebackground=PAL["bad"], activeforeground="white", relief="flat",
                   font=FONT_S, cursor="hand2").pack(side="right", padx=2)
 
@@ -2065,12 +2100,12 @@ class App(tk.Tk):
                      font=_mono() if mono else (font or FONT),
                      bg=PAL["field"], fg=PAL["text"], insertbackground=PAL["text"],
                      relief="flat", highlightthickness=1,
-                     highlightbackground=PAL["border"], highlightcolor=PAL["accent"])
+                     highlightbackground=PAL["field"], highlightcolor=PAL["accent"])
         if width:
             e.config(width=width)
         e._roles = {"bg": "field", "fg": "text",  # noqa: SLF001
                     "insertbackground": "text",
-                    "highlightbackground": "border", "highlightcolor": "accent"}
+                    "highlightbackground": "field", "highlightcolor": "accent"}
         return e
 
     # ----- layout -----
@@ -2094,14 +2129,14 @@ class App(tk.Tk):
         self.pill = StatusPill(h)
         self.pill.pack(side="right")
         self.pill.set("Idle", "muted")
-        self.help_btn = RoundedButton(h, text="?  Help", style="outline", height=30,
+        self.help_btn = RoundedButton(h, text="Help", style="outline", height=30,
                                       width=92, font=FONT_S, command=self.show_help)
         self.help_btn.pack(side="right", padx=(0, 10))
         self.cli_btn = RoundedButton(h, text="CLI jobs", style="outline", height=30,
                                      width=110, font=FONT_S, command=self.show_cli)
         self.cli_btn.pack(side="right", padx=(0, 10))
         Tooltip(self.pill, self._tally_tooltip)
-        self.back_btn = RoundedButton(h, text="←  Jobs", style="outline", height=30,
+        self.back_btn = RoundedButton(h, text="Jobs", style="outline", height=30,
                                       width=100, font=FONT_S, command=self.show_jobs)
         # packed/unpacked by the router
 
@@ -2142,9 +2177,9 @@ class App(tk.Tk):
     def _build_jobs_screen(self, parent):
         head = tk.Frame(parent, bg=PAL["page"])
         head.pack(fill="x", pady=(0, 8))
-        tk.Label(head, text="JOBS", font=FONT_XS, bg=PAL["page"],
-                 fg=PAL["muted"]).pack(side="left")
-        RoundedButton(head, text="+  New job", command=self.show_new,
+        tk.Label(head, text="Jobs", font=LARGE_F, bg=PAL["page"],
+                 fg=PAL["text"]).pack(side="left")
+        RoundedButton(head, text="New job", command=self.show_new,
                       style="primary", height=32, width=130,
                       font=FONT_B).pack(side="right")
         self.jobs_list = ScrollFrame(parent)
@@ -2165,8 +2200,8 @@ class App(tk.Tk):
     def _build_cli_screen(self, parent):
         head = tk.Frame(parent, bg=PAL["page"])
         head.pack(fill="x", pady=(0, 8))
-        tk.Label(head, text="CLI JOBS", font=FONT_XS, bg=PAL["page"],
-                 fg=PAL["muted"]).pack(side="left")
+        tk.Label(head, text="CLI jobs", font=LARGE_F, bg=PAL["page"],
+                 fg=PAL["text"]).pack(side="left")
         self.cli_list = ScrollFrame(parent)
         self.cli_list.pack(fill="both", expand=True)
         self.cli_hdr_running = tk.Label(self.cli_list.inner, text="", font=FONT_XS,
@@ -2184,8 +2219,8 @@ class App(tk.Tk):
     def _build_help_screen(self, parent):
         head = tk.Frame(parent, bg=PAL["page"])
         head.pack(fill="x", pady=(0, 8))
-        tk.Label(head, text="HELP", font=FONT_XS, bg=PAL["page"],
-                 fg=PAL["muted"]).pack(side="left")
+        tk.Label(head, text="Help", font=LARGE_F, bg=PAL["page"],
+                 fg=PAL["text"]).pack(side="left")
         self.update_btn = RoundedButton(head, text="Check for updates",
                                         command=self._check_updates,
                                         style="outline", height=32, width=170,
@@ -2200,7 +2235,7 @@ class App(tk.Tk):
         notif.pack(fill="x", pady=(0, 6))
         ni = notif.inner
         ni.config(padx=12, pady=8)
-        self._lab(ni, "Google Chat notifications", font=FONT_B, fg="text").pack(anchor="w")
+        self._lab(ni, "Google Chat notifications", font=HEAD_F, fg="text").pack(anchor="w")
         self._lab(ni, "Posts a brief verdict / impact / merged card to this "
                       "webhook when a job finishes. Leave empty to turn it "
                       "off — nothing else changes.").pack(anchor="w", pady=(0, 6))
@@ -2222,7 +2257,7 @@ class App(tk.Tk):
         codegen.pack(fill="x", pady=(0, 6))
         ii = codegen.inner
         ii.config(padx=12, pady=8)
-        self._lab(ii, "Code-generation integration", font=FONT_B, fg="text").pack(anchor="w")
+        self._lab(ii, "Code-generation integration", font=HEAD_F, fg="text").pack(anchor="w")
         self._lab(ii, "Let a code-generation tool hand PRISM the pull requests it opens, and get the "
                       "verdict back. Local to this machine; off by default.").pack(
                           anchor="w", pady=(0, 6))
@@ -2365,7 +2400,7 @@ class App(tk.Tk):
         pc.pack(fill="x", pady=(0, 6))
         pi = pc.inner
         pi.config(padx=12, pady=5)
-        self._lab(pi, "Project", font=FONT_B, fg="text").pack(anchor="w", pady=(0, 2))
+        self._lab(pi, "Project", font=HEAD_F, fg="text").pack(anchor="w", pady=(0, 2))
         self._lab(pi, "Working folder").pack(anchor="w", pady=(0, 4))
         frow = tk.Frame(pi, bg=PAL["card"])
         frow.pack(fill="x", pady=(0, 6))
@@ -2416,7 +2451,7 @@ class App(tk.Tk):
         self.map_card = RoundedCard(self.midrow)
         mapi = self.map_card.inner
         mapi.config(padx=12, pady=6)
-        self._lab(mapi, "Repository mapping", font=FONT_B, fg="text").pack(anchor="w")
+        self._lab(mapi, "Repository mapping", font=HEAD_F, fg="text").pack(anchor="w")
         self._lab(mapi, "Which clone is backend / frontend.").pack(anchor="w", pady=(0, 6))
 
         def _clone_row(label, title, empty_label, pady):
@@ -2441,7 +2476,7 @@ class App(tk.Tk):
         mi.config(padx=12, pady=6)
         mhead = tk.Frame(mi, bg=PAL["card"])
         mhead.pack(fill="x")
-        self._lab(mhead, "Model and behavior", font=FONT_B, fg="text").pack(side="left")
+        self._lab(mhead, "Model and behavior", font=HEAD_F, fg="text").pack(side="left")
         self.model_refresh = RoundedButton(mhead, text="↻",
                                            command=lambda: self._load_models_async(force=True),
                                            style="ghost", height=22, radius=11,
@@ -2471,7 +2506,7 @@ class App(tk.Tk):
         self.instr_text = tk.Text(mi, height=3, font=FONT_S, bg=PAL["field"],
                                   fg=PAL["text"], insertbackground=PAL["text"],
                                   relief="flat", wrap="word", highlightthickness=1,
-                                  highlightbackground=PAL["border"],
+                                  highlightbackground=PAL["field"],
                                   highlightcolor=PAL["accent"])
         self.instr_text.pack(fill="x")
         self._lab(mi, "e.g. \"focus on the auth changes\" or \"skip the generated files\"",
@@ -2482,8 +2517,8 @@ class App(tk.Tk):
 
         arow = tk.Frame(root, bg=PAL["page"])
         arow.pack(fill="x", pady=(2, 0))
-        self.run_btn = RoundedButton(arow, text="▶  Start Prisming", command=self._start,
-                                     style="primary", height=38, radius=10,
+        self.run_btn = RoundedButton(arow, text="Start Prisming", command=self._start,
+                                     style="primary", height=44, radius=12,
                                      font=(_FAMILY, _pt(11), "bold"))
         self.run_btn.pack(side="left", fill="x", expand=True)
         Tooltip(self.run_btn, lambda: "Ctrl+Enter")
@@ -2507,13 +2542,13 @@ class App(tk.Tk):
         self.detail_title = tk.Label(ti, text="", font=FONT_B, bg=PAL["card"],
                                      fg=PAL["text"], anchor="w")
         self.detail_title.pack(side="left")
-        self.stop_btn = RoundedButton(ti, text="■  Stop", command=self._stop,
+        self.stop_btn = RoundedButton(ti, text="Stop", command=self._stop,
                                       style="outline", height=30, width=110,
                                       font=FONT_S)
         self.stop_btn.pack(side="right")
         self.stop_btn.set_enabled(False)
         # Starting another job should not mean backing out to the list first.
-        self.new_job_btn = RoundedButton(ti, text="+  New job",
+        self.new_job_btn = RoundedButton(ti, text="New job",
                                          command=self._new_from_detail,
                                          style="outline", height=30, width=110,
                                          font=FONT_S)
@@ -2653,7 +2688,9 @@ class App(tk.Tk):
         c.delete("all")
         c.config(bg=PAL["page"])
         _rr(c, 2, 2, 30, 30, 8, PAL["badge_bg"], None)
-        c.create_text(16, 16, text="◇", fill=PAL["badge_fg"], font=(_FAMILY, _pt(13), "bold"))
+        c.create_polygon(16, 7, 24, 16, 16, 25, 8, 16, outline=PAL["badge_fg"],
+                         fill="", width=2, joinstyle="round")
+        c.create_line(8, 16, 24, 16, fill=PAL["badge_fg"], width=1)
 
     # ----- log -----
     def _show_placeholder(self):
@@ -2799,7 +2836,7 @@ class App(tk.Tk):
             self.single_path = None
             self._place_midrow()
             self._rebuild_target_row()
-            self._set_hint("Select your project folder to begin — "
+            self._set_hint("Select your project folder to begin. "
                            "PRISM scans it for git clones.", "muted")
             return
         base = Path(raw)
@@ -3502,13 +3539,13 @@ class App(tk.Tk):
         self._paint_verdict()
         self._paint_impact(job.impact)
         self._paint_tokens(job.tokens)
-        self.run_btn.set_text("▶  Start Prisming")
+        self.run_btn.set_text("Start Prisming")
         if job.is_terminal:
-            self.stop_btn.set_text("↻  Retry")
+            self.stop_btn.set_text("Retry")
             self.stop_btn.set_command(self._retry_current_job)
             self.stop_btn.set_enabled(True)
         else:
-            self.stop_btn.set_text("■  Stop")
+            self.stop_btn.set_text("Stop")
             self.stop_btn.set_command(self._stop)
             self.stop_btn.set_enabled(job.is_active)
         self._render_log(job)

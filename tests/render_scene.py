@@ -88,7 +88,7 @@ def main(out_dir):
 
     detail = list(manager.jobs.values())[0]
     detail.append_log("▸ Target: CodeCommit repo 'example-service-be'  |  PR #12948")
-    detail.append_log("⚙ bash: git diff --stat origin/main...origin/feature", "tool")
+    detail.append_log("› bash: git diff --stat origin/main...origin/feature", "tool")
     detail.append_log("The diff touches shared auth middleware.", "agent")
     detail.stages = {A.STAGE_REVIEW: "done", A.STAGE_DESCRIBE: "active"}
     root.show_detail(detail.id)
