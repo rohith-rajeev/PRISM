@@ -5,7 +5,7 @@ merge reaches main, so a build can never claim a version nobody tagged.
 """
 import re
 
-__version__ = "5.0"
+__version__ = "4.5"
 
 # The public home of the project. Releases are published here, and the updater
 # reads them from the unauthenticated API - nothing here is private.

@@ -4,20 +4,11 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
-## v5.0
+## v4.6
 
-- **A new look.** PRISM's interface has been redesigned from the ground up in
-  the style of Apple's dark mode: a true-black canvas, softly raised cards with
-  no heavy outlines, rounded capsule buttons that dim when pressed, and a
-  single blue accent reserved for the things you can act on. `Start Prisming`
-  is now the one prominent button on the form; everything else is quiet.
-  Screens have clear large titles, fields are calmer, and checkboxes use a
-  drawn tick that looks the same on every system.
 - **Fixed: the live conversation showed `shell: shell`** instead of what the
   reviewer was doing. opencode 2.x labels its commands with just the tool name;
-  PRISM now shows the actual command, for example `shell: git diff --stat`. Tool
-  lines also start with a plain `›` so they no longer appear as empty boxes in
-  some fonts.
+  PRISM now shows the actual command, for example `shell: git diff --stat`.
 
 ## v4.5
 

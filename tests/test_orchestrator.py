@@ -64,18 +64,18 @@ class EventShape(unittest.TestCase):
 
     def test_tool_events_become_one_readable_line(self):
         ev = json.loads(tool_event("s", "bash", "git diff --stat"))
-        self.assertEqual(o._event_tool(ev), "› bash: git diff --stat")
+        self.assertEqual(o._event_tool(ev), "⚙ bash: git diff --stat")
 
     def test_failed_tool_is_marked(self):
         ev = json.loads(tool_event("s", "bash", "git push", status="error"))
-        self.assertTrue(o._event_tool(ev).startswith("× bash"))
+        self.assertTrue(o._event_tool(ev).startswith("✗ bash"))
 
     def test_tool_detail_falls_back_to_input_and_is_bounded(self):
         ev = json.loads(jline(type="tool_use", part={
             "type": "tool", "tool": "read",
             "state": {"status": "completed", "input": {"filePath": "x" * 400}}}))
         line = o._event_tool(ev)
-        self.assertTrue(line.startswith("› read: "))
+        self.assertTrue(line.startswith("⚙ read: "))
         self.assertLessEqual(len(line), 180, "a huge argument must not flood the log")
 
     def test_title_that_only_repeats_the_tool_name_is_ignored(self):
@@ -84,7 +84,7 @@ class EventShape(unittest.TestCase):
             "type": "tool", "tool": "shell",
             "state": {"status": "completed", "title": "shell",
                       "input": {"command": "git diff --stat"}}}))
-        self.assertEqual(o._event_tool(ev), "› shell: git diff --stat")
+        self.assertEqual(o._event_tool(ev), "⚙ shell: git diff --stat")
 
     def test_non_tool_events_are_not_tools(self):
         self.assertIsNone(o._event_tool(json.loads(text_event("s", "hi"))))
@@ -131,7 +131,7 @@ class StreamDecoding(unittest.TestCase):
         payload = (tool_event(sid, "bash", "git diff --stat") + "\n"
                    + text_event(sid, "Two commits, 7 files.") + "\n")
         _rc, _text, _sid, emitted = self._run(payload)
-        self.assertIn(("› bash: git diff --stat", "tool"), emitted)
+        self.assertIn(("⚙ bash: git diff --stat", "tool"), emitted)
         self.assertIn(("Two commits, 7 files.", "agent"), emitted)
 
     def test_tool_lines_stay_out_of_the_parsed_report(self):
