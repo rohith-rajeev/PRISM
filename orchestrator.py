@@ -861,18 +861,24 @@ def _event_tool(evt):
     name = part.get("tool") or "tool"
     state = part.get("state") or {}
     detail = state.get("title")
-    if not detail:
+    # opencode 2.x sets the title to the bare tool name ("shell"), which says
+    # nothing; treat that as no title and describe the call from its input.
+    if not detail or str(detail).strip().lower() == str(name).strip().lower():
         args = state.get("input")
         if isinstance(args, dict):
             detail = (args.get("command") or args.get("filePath")
-                      or args.get("path") or args.get("pattern") or "")
+                      or args.get("file_path") or args.get("path")
+                      or args.get("pattern") or args.get("query")
+                      or args.get("url") or args.get("description") or "")
         else:
             detail = ""
     detail = " ".join(str(detail).split())
     if len(detail) > 160:
         detail = detail[:157] + "…"
     status = state.get("status")
-    mark = "✗" if status == "error" else "⚙"
+    # Plain punctuation, not "⚙"/"✗": those two are missing from common
+    # monospace fonts and showed up as empty boxes in the log.
+    mark = "×" if status == "error" else "›"
     return f"{mark} {name}" + (f": {detail}" if detail else "")
 
 
