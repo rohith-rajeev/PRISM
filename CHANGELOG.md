@@ -4,6 +4,19 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v4.7
+
+- **Fixed: `prism run --detach` failed with "Bundled agents missing".** The
+  background worker was started from the packaged binary but shared the
+  starter's temporary unpack folder, which was deleted the moment the starter
+  returned. The worker now unpacks its own copy.
+- **Better behaviour on older opencode versions.** PRISM again passes the
+  project folder to engines that support it (`--dir`, as it did before v4.4)
+  and no longer lets the engine inherit PRISM's own input stream, which could
+  leave a run silent until it timed out. Newer opencode 2.x is unaffected. The
+  log now also states which opencode version a run used, which makes a stalled
+  run on someone else's machine diagnosable.
+
 ## v4.6
 
 - **Fixed: the live conversation showed `shell: shell`** instead of what the
