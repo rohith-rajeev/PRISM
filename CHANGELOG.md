@@ -4,6 +4,14 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v4.8
+
+- **Open a command-line job to see its conversation.** On the **CLI jobs**
+  screen, click any job to see everything the reviewer is doing, live while it
+  runs and in full once it has finished, together with its status, stage and
+  verdict, and Stop or Retry from the same page. This is the same transcript
+  `prism logs -f` prints; the list used to show only status.
+
 ## v4.7
 
 - **Fixed: `prism run --detach` failed with "Bundled agents missing".** The

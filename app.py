@@ -1142,11 +1142,11 @@ class Tooltip:
 class CliJobRow(RoundedCard):
     """One command-line job: status, target, stage or result, Stop / Retry.
 
-    Deliberately shallow. The list says what is running and lets the person
-    stop or retry it; the transcript is read where the job runs (`prism logs`).
+    Click a row to open the job's live conversation (the same transcript
+    `prism logs` prints); Stop / Retry work from the row or from that page.
     """
 
-    def __init__(self, parent, on_stop, on_retry, on_remove):
+    def __init__(self, parent, on_stop, on_retry, on_remove, on_open=None):
         super().__init__(parent)
         self.record = {}
         self._cb_stop, self._cb_retry, self._cb_remove = on_stop, on_retry, on_remove
@@ -1174,6 +1174,11 @@ class CliJobRow(RoundedCard):
         self.del_btn.grid(row=0, column=4, rowspan=2)
         self._spin = False
         self._dot_colour = "muted"
+        if on_open is not None:
+            for w in (inner, self.title, self.sub, self.verdict, self.dot):
+                w.bind("<Button-1>", lambda _e: on_open(self._id()))
+            for w in (self.title, self.sub, self.verdict):
+                w.config(cursor="hand2")
 
     def _id(self):
         return self.record.get("id")
@@ -2030,6 +2035,10 @@ class App(tk.Tk):
         self.last_spec = None        # seeds the next new-job form
         self.rows = {}               # job id -> JobRow
         self.cli_rows = {}           # CLI job id -> CliJobRow
+        self.cli_detail_id = None    # CLI job whose conversation is on screen
+        self._cli_log_pos = 0        # bytes of that job's log already shown
+        self._cli_log_tail = ""      # an unfinished last line, held for the next read
+        self._cli_log_at = 0.0
         self.cli_records = []        # latest read of the CLI job registry
         self.cli_pending = {}        # CLI job id -> when a retry was launched
         self._cli_poll_at = 0.0
@@ -2124,8 +2133,10 @@ class App(tk.Tk):
         self.detail_screen = tk.Frame(self.container, bg=PAL["page"])
         self.help_screen = tk.Frame(self.container, bg=PAL["page"])
         self.cli_screen = tk.Frame(self.container, bg=PAL["page"])
+        self.cli_detail_screen = tk.Frame(self.container, bg=PAL["page"])
 
         self._build_jobs_screen(self.jobs_screen)
+        self._build_cli_detail_screen(self.cli_detail_screen)
         self._build_cli_screen(self.cli_screen)
         self._build_new_screen(self.new_screen)
         self._build_detail_screen(self.detail_screen)
@@ -2160,6 +2171,171 @@ class App(tk.Tk):
             text="No jobs yet.\n\nStart one with “New job” — each pull request "
                  "runs as its own job,\nand several can run at the same time.",
             font=FONT_S, bg=PAL["page"], fg=PAL["muted"], justify="center")
+
+    # ---------------- screen 6: one command-line job, live ----------------
+    def _build_cli_detail_screen(self, parent):
+        card = RoundedCard(parent)
+        card.pack(fill="x", pady=(0, 8))
+        ci = card.inner
+        ci.config(padx=12, pady=8)
+        ci.columnconfigure(0, weight=1)
+        self.cli_d_title = tk.Label(ci, text="", font=FONT_B, bg=PAL["card"],
+                                    fg=PAL["text"], anchor="w")
+        self.cli_d_title.grid(row=0, column=0, sticky="w")
+        self.cli_d_sub = tk.Label(ci, text="", font=FONT_XS, bg=PAL["card"],
+                                  fg=PAL["muted"], anchor="w")
+        self.cli_d_sub.grid(row=1, column=0, sticky="w")
+        self.cli_d_verdict = tk.Label(ci, text="", font=FONT_S, bg=PAL["card"],
+                                      fg=PAL["muted"], anchor="e")
+        self.cli_d_verdict.grid(row=0, column=1, rowspan=2, sticky="e", padx=(10, 10))
+        self.cli_d_btn = RoundedButton(ci, text="Stop", style="outline", height=30,
+                                       width=96, font=FONT_B, command=lambda: None)
+        self.cli_d_btn.grid(row=0, column=2, rowspan=2)
+
+        head = tk.Frame(parent, bg=PAL["page"])
+        head.pack(fill="x")
+        tk.Label(head, text="CONVERSATION", font=FONT_XS, bg=PAL["page"],
+                 fg=PAL["muted"]).pack(side="left", padx=(4, 0))
+        tk.Label(head, text="Started from the command line - updates live",
+                 font=FONT_XS, bg=PAL["page"], fg=PAL["muted"]).pack(side="right")
+        body = tk.Frame(parent, bg=PAL["log_bg"])
+        body.pack(fill="both", expand=True, pady=(4, 0))
+        self.cli_log = tk.Text(body, height=4, font=_mono(), bg=PAL["log_bg"],
+                               fg=PAL["log_fg"], relief="flat", wrap="word",
+                               highlightthickness=0, borderwidth=0, state="disabled")
+        scroll = ThinScrollbar(body, command=self.cli_log.yview, bg_key="log_bg")
+        self.cli_log.configure(yscrollcommand=scroll.set)
+        self.cli_log.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y", padx=(4, 0))
+        self.cli_log.tag_config("tool", foreground=PAL["muted"])
+        self.cli_log.tag_config("step", foreground=PAL["accent_text"])
+        self.cli_log.tag_config("ok", foreground=PAL["good"])
+        self.cli_log.tag_config("warn", foreground=PAL["warn"])
+        self.cli_log.tag_config("err", foreground=PAL["bad"])
+
+    def show_cli_detail(self, job_id):
+        record = next((r for r in self.cli_records if r.get("id") == job_id), None) \
+            or CJ.load(job_id)
+        if record is None:
+            return self.show_cli()
+        self._close_pickers()
+        self.selected_job_id = None
+        self._new_return = None
+        self._show_screen(self.cli_detail_screen)
+        self.cli_detail_id = job_id
+        self._cli_log_pos, self._cli_log_tail = 0, ""
+        self.cli_log.config(state="normal")
+        self.cli_log.delete("1.0", "end")
+        self.cli_log.config(state="disabled")
+        self._render_cli_detail_header()
+        self._poll_cli_log(force=True)
+        self._refresh_pill()
+
+    def _render_cli_detail_header(self):
+        job_id = self.cli_detail_id
+        record = next((r for r in self.cli_records if r.get("id") == job_id), None)
+        if record is None:
+            record = CJ.load(job_id)
+        if record is None:                      # removed from another window
+            return self.show_cli()
+        status = CJ.status_of(record)
+        active = status in J.ACTIVE_STATES
+        word = {J.NEEDS_INPUT: "Needs input", J.RUNNING: "Running…",
+                J.STOPPING: "Stopping…", J.STOPPED: "Stopped", J.ERROR: "Error",
+                J.DONE: "Finished", CJ.INTERRUPTED: "Interrupted"}.get(status, status)
+        if status == J.DONE and record.get("merged") is True:
+            word = "Merged ✓"
+        bits = [word]
+        if active and record.get("stage"):
+            bits.append(record["stage"])
+        if record.get("started"):
+            bits.append(_since(time.time() - record["started"]))
+        bits.append(f"job {job_id}")
+        spec = record.get("spec") or {}
+        bits += [record.get("branches") or "", spec.get("region") or ""]
+        self.cli_d_title.config(text=CJ.label(record))
+        self.cli_d_sub.config(text="  ·  ".join(b for b in bits if b))
+        if record.get("verdict") and not active:
+            key = _verdict_key_of(record["verdict"])
+            self.cli_d_verdict.config(text=record["verdict"][:40],
+                                      fg=PAL[_verdict_colour(key)])
+        elif status == J.ERROR and record.get("error"):
+            self.cli_d_verdict.config(text=record["error"].splitlines()[0][:60],
+                                      fg=PAL["bad"])
+        else:
+            self.cli_d_verdict.config(text="", fg=PAL["muted"])
+        if active:
+            self.cli_d_btn.set_text("Stop")
+            self.cli_d_btn.set_command(lambda: self._stop_cli_job(job_id))
+            self.cli_d_btn.set_enabled(status in (J.RUNNING, J.NEEDS_INPUT))
+        else:
+            self.cli_d_btn.set_text("↻ Retry")
+            self.cli_d_btn.set_command(lambda: self._retry_cli_from_detail(job_id))
+            self.cli_d_btn.set_enabled(True)
+
+    def _retry_cli_from_detail(self, job_id):
+        self._retry_cli_job(job_id)
+        self.show_cli()         # the new run appears in the list once it registers
+
+    @staticmethod
+    def _cli_line_tag(line):
+        if line.startswith(("═══", "▸ PRISM job")):
+            return "step"
+        if line.startswith(("$ ", "⚙", "▸", "›")):
+            return "tool"
+        return _classify(line)
+
+    def _poll_cli_log(self, force=False):
+        """Append whatever the job has written since the last read.
+
+        The job runs in another process and writes its transcript to a file,
+        so tailing that file is the live view. Only new bytes are read; an
+        unfinished last line is held back until its newline arrives.
+        """
+        job_id = self.cli_detail_id
+        if job_id is None:
+            return
+        now = time.monotonic()
+        if not force and now - self._cli_log_at < 0.7:
+            return
+        self._cli_log_at = now
+        path = CJ.log_path(job_id)
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return
+        if size < self._cli_log_pos:            # the log was replaced (a retry)
+            self._cli_log_pos, self._cli_log_tail = 0, ""
+            self.cli_log.config(state="normal")
+            self.cli_log.delete("1.0", "end")
+            self.cli_log.config(state="disabled")
+        if size == self._cli_log_pos:
+            return
+        skipped = False
+        start = self._cli_log_pos
+        if size - start > 400_000:              # a huge backlog: show the end of it
+            start, skipped = size - 400_000, True
+        try:
+            with open(path, "rb") as f:
+                f.seek(start)
+                data = f.read(size - start)
+        except OSError:
+            return
+        self._cli_log_pos = size
+        text = self._cli_log_tail + data.decode("utf-8", errors="replace")
+        lines = text.split("\n")
+        self._cli_log_tail = lines.pop()        # "" when the chunk ended on a newline
+        if skipped and lines:
+            lines = ["… earlier output omitted …"] + lines[1:]
+        if not lines:
+            return
+        at_end = self.cli_log.yview()[1] >= 0.98
+        self.cli_log.config(state="normal")
+        for line in lines:
+            self.cli_log.insert("end", line + "\n", self._cli_line_tag(line) or "")
+        self.cli_log.config(state="disabled")
+        if at_end:
+            self.cli_log.see("end")
 
     # ---------------- screen 5: jobs started from the command line ----------------
     def _build_cli_screen(self, parent):
@@ -2963,12 +3139,14 @@ class App(tk.Tk):
     # ---------------- navigation ----------------
     def _show_screen(self, screen):
         for s in (self.jobs_screen, self.new_screen, self.detail_screen,
-                  self.help_screen, self.cli_screen):
+                  self.help_screen, self.cli_screen, self.cli_detail_screen):
             if s is not screen and s.winfo_manager():
                 s.pack_forget()
         if not screen.winfo_manager():
             screen.pack(fill="both", expand=True)
         self.screen = screen
+        if screen is not self.cli_detail_screen:
+            self.cli_detail_id = None
         if screen is self.jobs_screen:
             if self.back_btn.winfo_manager():
                 self.back_btn.pack_forget()
@@ -3211,6 +3389,8 @@ class App(tk.Tk):
         if changed or self.screen is self.cli_screen:
             if self.screen is self.cli_screen:
                 self._refresh_cli_list()
+        if self.screen is self.cli_detail_screen:
+            self._render_cli_detail_header()
 
     def _refresh_cli_list(self):
         inner = self.cli_list.inner
@@ -3226,7 +3406,8 @@ class App(tk.Tk):
             if row is None:
                 row = CliJobRow(inner, on_stop=self._stop_cli_job,
                                 on_retry=self._retry_cli_job,
-                                on_remove=self._remove_cli_job)
+                                on_remove=self._remove_cli_job,
+                                on_open=self.show_cli_detail)
                 self.cli_rows[job_id] = row
                 created = True
             starting = job_id in self.cli_pending
@@ -3623,6 +3804,7 @@ class App(tk.Tk):
             self._drain_once()
             self._drain_codegen()
             self._poll_cli()
+            self._poll_cli_log()
             self._tick_animation()
         finally:
             # Always reschedule: one bad line must not kill the pump and leave

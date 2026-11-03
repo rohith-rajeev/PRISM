@@ -333,9 +333,10 @@ its question box. A detached job has nobody to ask, so it takes the cautious
 answer: it does not resolve a conflict and does not confirm a high-impact merge.
 
 **In the desktop app.** The **CLI jobs** button in the header opens a list of
-jobs started from the command line, with **Stop** and **↻ Retry**. The list
-is for control — read a job's output with `prism logs`. The status pill counts
-desktop and CLI jobs together; hover over it to see the split.
+jobs started from the command line, with **Stop** and **↻ Retry**. Click a job
+to open its page: the full conversation, updating live while it runs (the same
+text `prism logs -f` prints), with the verdict once it finishes. The status
+pill counts desktop and CLI jobs together; hover over it to see the split.
 
 ---
 
