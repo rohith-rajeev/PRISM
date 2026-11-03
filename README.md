@@ -354,7 +354,8 @@ the header tally can count both kinds. Nothing is written to your repositories.
 Screens behind one header (badge, live job tally with a desktop/CLI split on hover, CLI jobs, Help, back to the list):
 
 - **CLI jobs** — jobs started with `prism` (here or over ssh): status, stage, result,
-  Stop and Retry. Output is read with `prism logs`.
+  Stop and Retry. Click a job to read its live conversation in the app (or use
+  `prism logs -f` in a terminal).
 - **Jobs** — one row per job: status, target, verdict, impact, Stop, dismiss.
 - **New job** — Project card plus a two-column row pairing Repository mapping
   with Model & behavior (the model card spans the row for single-repo
