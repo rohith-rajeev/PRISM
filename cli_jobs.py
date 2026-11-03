@@ -285,6 +285,25 @@ def cli_command():
     return [sys.executable, str(Path(__file__).with_name("prism_cli.py"))]
 
 
+def child_env():
+    """The environment for a child that must outlive this process.
+
+    A PyInstaller one-file build unpacks itself into /tmp/_MEIxxxx and deletes
+    that folder when it exits. A child started with the inherited environment
+    is told to reuse the parent's folder, so once the parent returned (every
+    `prism run --detach`) the worker found its bundled agents gone:
+    "Bundled agents missing: /tmp/_MEI…". Asking the bootloader to start from
+    a clean slate makes the child unpack its own copy. Older bootloaders
+    ignore the reset flag and key off these variables instead, so they go too.
+    """
+    env = dict(os.environ)
+    if getattr(sys, "frozen", False):
+        env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+        for key in [k for k in env if k == "_MEIPASS2" or k.startswith("_PYI_")]:
+            del env[key]
+    return env
+
+
 def spawn_detached(args):
     """Start `prism <args>` in its own session, so it outlives whoever started it.
 
@@ -292,7 +311,7 @@ def spawn_detached(args):
     retry a CLI job without owning its process.
     """
     kwargs = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                  stderr=subprocess.DEVNULL, close_fds=True)
+                  stderr=subprocess.DEVNULL, close_fds=True, env=child_env())
     if os.name == "nt":
         kwargs["creationflags"] = 0x00000008 | 0x00000200   # DETACHED | NEW_GROUP
     else:

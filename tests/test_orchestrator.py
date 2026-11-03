@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -1005,3 +1006,70 @@ class RunDirectoryEnvironment(unittest.TestCase):
             # Only the agent lookup is under test; whether the model answers
             # in time is the provider's business, so the exit code is not.
             self.assertNotIn("Agent not found", "\n".join(out))
+
+
+class EngineCompatibility(unittest.TestCase):
+    """Older engines keep the command line they always ran; 2.x gets none of
+    the flags it dropped."""
+
+    def setUp(self):
+        o._RUN_HELP.clear()
+
+    def tearDown(self):
+        o._RUN_HELP.clear()
+
+    def _help(self, text):
+        o._RUN_HELP["engine"] = text
+
+    def test_dir_flag_passed_only_when_the_engine_has_it(self):
+        self._help("Options:\n  --dir  directory to run in\n  --format  output")
+        self.assertEqual(o._dir_args("engine", "/work/proj"), ["--dir", "/work/proj"])
+        self._help("Options:\n  --format  output")
+        self.assertEqual(o._dir_args("engine", "/work/proj"), [])
+
+    def test_json_probe_shares_the_cached_help(self):
+        self._help("--format json")
+        self.assertTrue(o.engine_supports_json("engine"))
+        self._help("--auto")
+        self.assertFalse(o.engine_supports_json("engine"))
+
+    def test_engine_never_inherits_stdin(self):
+        seen = {}
+
+        class FakeProc:
+            stdout = iter(())
+            def attach(self, *_a): pass
+            def wait(self, *_a, **_k): return 0
+            def poll(self): return 0
+            def kill(self): pass
+
+        def fake_popen(cmd, **kw):
+            seen.update(kw)
+            return FakeProc()
+
+        with mock.patch.object(o.subprocess, "Popen", fake_popen), \
+                mock.patch.object(o, "_announce_engine"):
+            try:
+                o._run_stream(["engine", "run"], cwd=None, emit=lambda *_a: None)
+            except Exception:  # noqa: BLE001 - the fake is only enough to capture kwargs
+                pass
+        self.assertEqual(seen.get("stdin"), o.subprocess.DEVNULL)
+
+
+class DetachedChildEnvironment(unittest.TestCase):
+    def test_frozen_child_gets_a_clean_pyinstaller_environment(self):
+        import cli_jobs as CJ
+        env = {"_MEIPASS2": "/tmp/_MEI123", "_PYI_APPLICATION_HOME_DIR": "/tmp/_MEI123",
+               "PATH": "/usr/bin"}
+        with mock.patch.dict(CJ.os.environ, env, clear=True), \
+                mock.patch.object(CJ.sys, "frozen", True, create=True):
+            out = CJ.child_env()
+        self.assertEqual(out.get("PYINSTALLER_RESET_ENVIRONMENT"), "1")
+        self.assertNotIn("_MEIPASS2", out)
+        self.assertFalse(any(k.startswith("_PYI_") for k in out))
+        self.assertEqual(out["PATH"], "/usr/bin")
+
+    def test_source_checkout_environment_is_left_alone(self):
+        import cli_jobs as CJ
+        with mock.patch.dict(CJ.os.environ, {"PATH": "/usr/bin"}, clear=True):
+            self.assertEqual(CJ.child_env(), {"PATH": "/usr/bin"})

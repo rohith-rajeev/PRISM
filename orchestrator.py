@@ -202,28 +202,46 @@ def _lock_for(path):
         return _PATH_LOCKS.setdefault(key, threading.Lock())
 
 
-_JSON_SUPPORT = None
-_JSON_SUPPORT_GUARD = threading.Lock()
+_RUN_HELP = {}
+_RUN_HELP_GUARD = threading.Lock()
+
+
+def _engine_run_help(exe):
+    """`<engine> run --help`, probed once per binary and cached."""
+    with _RUN_HELP_GUARD:
+        if exe not in _RUN_HELP:
+            try:
+                proc = subprocess.run([exe, "run", "--help"], capture_output=True,
+                                      text=True, encoding="utf-8",
+                                      errors="replace", timeout=20,
+                                      stdin=subprocess.DEVNULL)
+                _RUN_HELP[exe] = (proc.stdout or "") + (proc.stderr or "")
+            except Exception:  # noqa: BLE001
+                _RUN_HELP[exe] = ""
+        return _RUN_HELP[exe]
 
 
 def engine_supports_json(exe):
     """Does this engine build understand `run --format json`?
 
-    Probed once and cached. An engine too old to know the flag fails the run
-    outright with no usable output, which is worse than the session race the
-    flag exists to fix — so when it is absent we simply never ask for it.
+    An engine too old to know the flag fails the run outright with no usable
+    output, which is worse than the session race the flag exists to fix — so
+    when it is absent we simply never ask for it.
     """
-    global _JSON_SUPPORT
-    with _JSON_SUPPORT_GUARD:
-        if _JSON_SUPPORT is None:
-            try:
-                proc = subprocess.run([exe, "run", "--help"], capture_output=True,
-                                      text=True, encoding="utf-8",
-                                      errors="replace", timeout=20)
-                _JSON_SUPPORT = "--format" in ((proc.stdout or "") + (proc.stderr or ""))
-            except Exception:  # noqa: BLE001
-                _JSON_SUPPORT = False
-        return _JSON_SUPPORT
+    return "--format" in _engine_run_help(exe)
+
+
+def _dir_args(exe, project_dir):
+    """`--dir <project>` for engines that have the flag, else nothing.
+
+    opencode 1.x takes the run directory from `--dir`; 2.x removed the flag
+    and reads the directory from the process instead (see _env_for_cwd).
+    Passing it wherever it exists keeps the older engines on exactly the
+    command line they always ran, rather than trusting the working directory.
+    """
+    if "--dir" in _engine_run_help(exe):
+        return ["--dir", str(project_dir)]
+    return []
 
 
 class Cancelled(RuntimeError):
@@ -899,6 +917,35 @@ def _env_for_cwd(cwd):
     return env
 
 
+_ANNOUNCED = set()
+
+
+def _announce_engine(exe, emit):
+    """Say which engine version is running, once per process, so a log from
+    someone else's machine says what it was run against.
+
+    Done on a side thread with a short timeout: it is only information, and an
+    engine that is slow or stuck must not hold up the run it describes.
+    """
+    if exe in _ANNOUNCED:
+        return
+    _ANNOUNCED.add(exe)
+
+    def _ask():
+        try:
+            proc = subprocess.run([exe, "--version"], capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace", timeout=5,
+                                  stdin=subprocess.DEVNULL)
+            ver = (proc.stdout or proc.stderr or "").strip().splitlines()
+            if ver:
+                # The UI never shows the engine's own name (see _display_cmd).
+                emit(f"▸ Review engine version: {ver[0].split()[-1]}")
+        except Exception:  # noqa: BLE001 - purely informational
+            pass
+
+    threading.Thread(target=_ask, daemon=True).start()
+
+
 def _run_stream(cmd, cwd, emit, timeout=None, control=None, json_mode=False,
                 idle_timeout=None):
     """Run cmd, streaming output to emit.
@@ -916,8 +963,13 @@ def _run_stream(cmd, cwd, emit, timeout=None, control=None, json_mode=False,
     if control is not None:
         control.check()
     emit(f"$ {_display_cmd(cmd)}")
+    _announce_engine(cmd[0], emit)
+    # stdin is closed, not inherited: `run` reads piped stdin as part of the
+    # prompt and waits for it to end, which on a launcher- or ssh-started
+    # PRISM never happens and looks exactly like a silent stall.
     proc = subprocess.Popen(
-        cmd, cwd=cwd, env=_env_for_cwd(cwd), stdout=subprocess.PIPE,
+        cmd, cwd=cwd, env=_env_for_cwd(cwd), stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
         bufsize=1,
     )
@@ -1129,7 +1181,7 @@ def run_agent(agent, prompt, project_dir, emit=_emit_plain, model=None,
     ensure_bundled_agents(project_dir, emit=emit)
     json_mode = engine_supports_json(exe)
     emit(f"\n▸ {label or agent} …")
-    cmd = [exe, "run", "--agent", agent, "--auto"]
+    cmd = [exe, "run", "--agent", agent, *_dir_args(exe, project_dir), "--auto"]
     if json_mode:
         cmd += ["--format", "json"]
     if model:
@@ -1957,7 +2009,7 @@ def run_opencode_review(pr_id, repo_name, local_repo, project_dir,
     # No --session/--continue: a plain run always creates a fresh session, and
     # --format json is what lets us capture its id for the follow-up turns.
     json_mode = engine_supports_json(exe)
-    cmd = [exe, "run", "--agent", agent, "--auto"]
+    cmd = [exe, "run", "--agent", agent, *_dir_args(exe, project_dir), "--auto"]
     if json_mode:
         cmd += ["--format", "json"]
     if model:
@@ -2059,7 +2111,7 @@ def run_followup(request, project_dir, repo_name, pr_id, local_repo=None,
         return text, (sid or session_id)
     exe = require_engine()
     json_mode = engine_supports_json(exe)
-    cmd = [exe, "run", "--agent", AGENT_NAME, "--auto"]
+    cmd = [exe, "run", "--agent", AGENT_NAME, *_dir_args(exe, project_dir), "--auto"]
     if json_mode:
         cmd += ["--format", "json"]
     if model:
@@ -2092,7 +2144,7 @@ def _continue_turn(prompt, project_dir, session_id, emit, model, control, what,
     """
     exe = require_engine()
     json_mode = engine_supports_json(exe)
-    cmd = [exe, "run", "--agent", agent or AGENT_NAME, "--auto"]
+    cmd = [exe, "run", "--agent", agent or AGENT_NAME, *_dir_args(exe, project_dir), "--auto"]
     if json_mode:
         cmd += ["--format", "json"]
     if model:
