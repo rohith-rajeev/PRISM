@@ -4,6 +4,13 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v4.9
+
+- **Fixed: PRISM would not start on Ubuntu 22.04 (including WSL) after
+  updating to v4.8.** The Linux build now targets glibc 2.35, so
+  it runs on Ubuntu 22.04 and every newer release instead of only the newest.
+  No workaround or system upgrade is needed.
+
 ## v4.8
 
 - **Open a command-line job to see its conversation.** On the **CLI jobs**
