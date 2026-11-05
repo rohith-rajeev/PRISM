@@ -100,7 +100,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # Pinned, not ubuntu-latest: PyInstaller bundles the build host's
+          # glibc-linked libraries (libtcl, libtk, ...), and a binary only runs
+          # on systems whose glibc is at least as new as the host's. 22.04
+          # (glibc 2.35) is the oldest runner, so the build runs on 22.04 and
+          # anything newer. Do not "upgrade" this to a newer image.
+          - os: ubuntu-22.04
             label: Linux
             artifact: PRISM-linux-x86_64
           - os: macos-latest
