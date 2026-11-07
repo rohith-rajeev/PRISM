@@ -479,6 +479,27 @@ def cleanup_previous(root=None):
     return False
 
 
+def relaunch_env():
+    """The environment for the copy started after an update.
+
+    A PyInstaller one-file build unpacks itself into /tmp/_MEIxxxx and deletes that
+    folder when it exits. A child that inherits this process's environment is told
+    to reuse the folder, and the restart is exactly that: this process exits right
+    after starting it, so the new copy found its bundled agents gone ("Bundled
+    agents missing"). Asking the bootloader to start from a clean slate makes the
+    new copy unpack its own. Older bootloaders ignore the reset flag and key off
+    these variables instead, so they are removed too. Only a packaged build has any
+    of this to undo; anything else inherits the environment unchanged.
+    (Same reasoning as cli_jobs.child_env, which fixed `prism run --detach`.)
+    """
+    env = dict(os.environ)
+    if getattr(sys, "frozen", False):
+        env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+        for key in [k for k in env if k == "_MEIPASS2" or k.startswith("_PYI_")]:
+            del env[key]
+    return env
+
+
 def relaunch(root=None):
     """Start the freshly installed copy and leave it running."""
     root = root or install_root()
@@ -486,7 +507,7 @@ def relaunch(root=None):
         cmd = ["/usr/bin/open", "-n", str(root)]
     else:
         cmd = [str(root)]
-    kwargs = {}
+    kwargs = {"env": relaunch_env()}
     if os.name == "nt":
         # Detached, so the new window does not die with this one.
         kwargs["creationflags"] = 0x00000008 | 0x00000200
