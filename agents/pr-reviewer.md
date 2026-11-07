@@ -17,6 +17,11 @@ permission:
     "git push*": deny
     "git commit*": deny
     "git merge*": deny
+    # ...but not `git merge-base`: it only reads, and it is how a review works out what
+    # a pull request changed. "git merge*" matches it, so without this line the reviewer
+    # was refused the one command it needs to check an empty-looking diff. (The last
+    # matching rule wins, so this has to come after the deny above.)
+    "git merge-base*": allow
     "git rebase*": deny
     "git checkout*": deny
     "aws codecommit merge*": deny

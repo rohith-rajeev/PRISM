@@ -39,9 +39,113 @@ STAGE_DOC_WRITE = "doc_write"
 STAGE_DOC_COMMIT = "doc_commit"
 STAGE_DOC_PUSH = "doc_push"
 
-# Where a feature's requirement documents usually live, relative to a repo.
-# Always user-configurable per job.
+# Where a feature's requirement documents often live, relative to a repo. Only a
+# suggestion shown to people: requirements are optional, and nothing is assumed.
 DEFAULT_REQUIREMENTS_DIR = "docs/requirements"
+
+# The lens a document is reviewed through. One agent plays all three: PRISM puts the
+# chosen persona's lens (and whether requirements were provided) into the brief, so
+# each is defined here once, in one tested place, rather than in three agent files.
+DEFAULT_PERSONA = "ba"
+PERSONAS = {
+    "ba": {
+        "label": "Business Analyst",
+        "aliases": ("ba", "business-analyst", "business analyst", "analyst", "functional"),
+        "lens": (
+            "You review as a BUSINESS ANALYST, from the functional side.\n"
+            "- Do the functional requirements stated in the document align with the "
+            "requirements (when they were provided)? Is every requirement covered, none "
+            "contradicted or dropped, nothing added that no requirement asks for?\n"
+            "- Is the document consistent within itself: business rules, flows, roles and "
+            "permissions, field and validation rules, states and transitions, numbers, terms "
+            "and acceptance criteria that agree with one another?\n"
+            "- Is it consistent with what the codebase actually does today, functionally: the "
+            "existing behaviour, rules and data the document relies on or would change?\n"
+            "- What would two people implement differently? Which edge cases, error and empty "
+            "states, and business rules are missing?\n"
+            "Technical design is the Architect's lens: raise it only where it changes "
+            "functional behaviour."),
+    },
+    "architect": {
+        "label": "Architect",
+        "aliases": ("architect", "arch", "architecture", "technical", "tech"),
+        "lens": (
+            "You review as an ARCHITECT, from the technical side.\n"
+            "- Study the codebase's existing technical patterns first (layering and module "
+            "boundaries, data access and transactions, API and error conventions, "
+            "authentication and authorization, configuration, async work and queues, "
+            "logging), then compare what the document proposes with them. Flag a proposal "
+            "that diverges without a reason or is inconsistent with them.\n"
+            "- Is the proposal valid and implementable as written: do the components, APIs, "
+            "data models and integrations it relies on exist and behave as assumed; is the "
+            "sequencing workable; are the data-model, migration and API-contract changes "
+            "sound and backward compatible?\n"
+            "- Does it lead to security loopholes (authn/authz gaps, injection, data "
+            "exposure, unsafe defaults), bugs (races, partial failure, missing idempotency or "
+            "transactions) or inconsistencies with the existing patterns? Flag each one.\n"
+            "Functional wording is the Business Analyst's lens: raise it only where it makes "
+            "the design wrong."),
+    },
+    "qa": {
+        "label": "QA",
+        "aliases": ("qa", "quality", "quality-assurance", "tester", "qe"),
+        "lens": (
+            "You review as QA, from the quality side.\n"
+            "- Will implementing this break anything? Find what depends on the code the "
+            "document changes (callers, consumers, reports, jobs, integrations, data) and "
+            "where regressions are likely.\n"
+            "- How does it affect the quality of the product: behaviour that silently changes, "
+            "data migration and rollback risk, error handling and observability, performance "
+            "and reliability under load.\n"
+            "- Is it testable: acceptance criteria that can be verified, edge and negative "
+            "cases, test data and environments, the automated and manual tests it will need "
+            "and the existing tests it affects.\n"
+            "- Release risk: feature flags, rollout and rollback, configuration that differs "
+            "per environment.\n"
+            "Functional intent is the Business Analyst's lens and technical design the "
+            "Architect's: raise them only where they threaten quality."),
+    },
+}
+
+# Never skipped, whatever the persona and whether or not requirements were provided.
+ALWAYS_CHECKED = ("security", "stability", "scalab")      # "scalab" covers scalability / scalable
+ALWAYS_NAMES = {"security": "security", "stability": "stability", "scalab": "scalability"}
+ALWAYS_TEXT = (
+    "ALWAYS CHECKED, whatever your persona: security (access control, data exposure, input "
+    "validation, secrets), stability (failure modes, partial failure, retries and "
+    "idempotency, backward compatibility, resource leaks) and scalability (growth in data, "
+    "users and load; unbounded queries, loops and payloads; hot paths and contention). "
+    "Check each through your persona's lens and state your conclusion on all three in "
+    "Coverage, even when it is 'nothing found' and what you looked at.")
+
+
+def normalise_persona(text):
+    """The persona key for what a person typed ("BA", "business analyst", "Architect"...).
+
+    ValueError, naming the choices, for anything else. Empty means the default.
+    """
+    raw = " ".join(str(text or "").strip().lower().replace("_", "-").split())
+    if not raw:
+        return DEFAULT_PERSONA
+    for key, info in PERSONAS.items():
+        if raw == key or raw in info["aliases"]:
+            return key
+    raise ValueError(f"Unknown reviewer persona {text!r}. Choose one of: "
+                     + ", ".join(f"{k} ({v['label']})" for k, v in PERSONAS.items()))
+
+
+def persona_label(key):
+    return PERSONAS.get(key, PERSONAS[DEFAULT_PERSONA])["label"]
+
+
+def missing_always_checks(body):
+    """Which of security / stability / scalability the review never mentions.
+
+    A check on what the reviewer *said*, not on what it did: enough to notice a review
+    that skipped one of the three it is always meant to state a conclusion on.
+    """
+    low = (body or "").lower()
+    return [w for w in ALWAYS_CHECKED if w not in low]
 
 REMOTE = "origin"
 
@@ -115,7 +219,8 @@ class DocJobSpec:
 
     project_dir: str
     targets: tuple                                  # of DocTarget
-    requirements_path: str = DEFAULT_REQUIREMENTS_DIR
+    requirements_path: str = ""                     # optional: "" reviews without requirements
+    persona: str = DEFAULT_PERSONA                  # a key of PERSONAS
     model: str = None
     do_commit: bool = True
     do_push: bool = True
@@ -133,7 +238,8 @@ class DocJobSpec:
     def label(self):
         names = " + ".join(t.label for t in self.targets)
         count = sum(len(t.files) for t in self.targets)
-        return f"Docs · {names} · {count} file{'' if count == 1 else 's'}"
+        return (f"Docs · {persona_label(self.persona)} · {names} · "
+                f"{count} file{'' if count == 1 else 's'}")
 
     @property
     def dup_key(self):
@@ -153,18 +259,21 @@ class DocJobSpec:
         return "  ".join(f"{t.label}: {t.branch}" for t in self.targets)
 
     def summary_bits(self):
-        bits = []
+        bits = [f"{persona_label(self.persona)} review"]
+        if not self.requirements_path.strip():
+            bits.append("no requirements")
         if not self.do_commit:
             bits.append("no commit")
         elif not self.do_push:
             bits.append("no push")
         if self.dry_run:
             bits.append("dry run")
-        return " · ".join(bits) or "document review"
+        return " · ".join(bits)
 
     def pipeline_kwargs(self):
         return dict(project_dir=self.project_dir, targets=self.targets,
-                    requirements_path=self.requirements_path, model=self.model,
+                    requirements_path=self.requirements_path, persona=self.persona,
+                    model=self.model,
                     do_commit=self.do_commit, do_push=self.do_push,
                     dry_run=self.dry_run, custom_instructions=self.custom_instructions)
 
@@ -243,7 +352,8 @@ def _wrapped(body):
 def _render_run(run, newest):
     m = run.meta
     verdict = m.get("verdict") or "no verdict"
-    title = (f"Review v{m.get('v', '?')} · run `{m.get('id', '?')}` · {m.get('date', '')}"
+    who = f" · {m['persona_label']}" if m.get("persona_label") else ""
+    title = (f"Review v{m.get('v', '?')}{who} · run `{m.get('id', '?')}` · {m.get('date', '')}"
              + (f" · commit `{m['commit'][:8]}`" if m.get("commit") else ""))
     head = f"{_RUN_OPEN}{_meta_json(m)} -->"
     if newest:
@@ -344,9 +454,24 @@ def counts_text(counts):
     return ", ".join(bits) or "no comments"
 
 
-def open_findings(runs):
-    """The comments the newest review left open - what the next one must check."""
-    return findings(runs[0].body) if runs else []
+def latest_run(runs, persona=None):
+    """The newest earlier review by this persona (newest-first `runs`).
+
+    An Architect's re-review follows up the Architect's comments, not the Business
+    Analyst's. A review written before personas existed has no persona and counts as
+    a match for any: it was the one generic review of that document.
+    """
+    for run in runs:
+        who = run.meta.get("persona")
+        if persona is None or not who or who == persona:
+            return run
+    return None
+
+
+def open_findings(runs, persona=None):
+    """The comments the newest (matching) review left open - what the next must check."""
+    run = latest_run(runs, persona)
+    return findings(run.body) if run else []
 
 
 def parse_agent_report(text):
@@ -511,7 +636,9 @@ def find_requirements(requirements_path, roots):
     worktree root in turn (the requirements may live in only one of the repos),
     then returned as the first that exists. None when nothing matches.
     """
-    raw = (requirements_path or DEFAULT_REQUIREMENTS_DIR).strip()
+    raw = (requirements_path or "").strip()
+    if not raw:
+        return None
     p = Path(raw).expanduser()
     if p.is_absolute():
         return p if p.is_dir() else None
@@ -629,10 +756,32 @@ def _instructions_block(custom):
             f"or the honesty of your verdict.\n<<<\n{custom}\n>>>\n\n")
 
 
+REQUIREMENTS_GIVEN = (
+    "REQUIREMENTS PROVIDED. Your first question is whether the decomposition satisfies the "
+    "ENTIRE requirement set: every requirement covered by the document, none contradicted or "
+    "dropped, and nothing added that no requirement asks for. Then check it is consistent "
+    "with the codebase's existing patterns.")
+REQUIREMENTS_ABSENT = (
+    "NO REQUIREMENTS WERE PROVIDED. Do not look for requirement documents and do not report "
+    "missing requirements or traceability gaps. Review the document on its own: is it "
+    "consistent with the codebase and its existing patterns, is it consistent with itself, "
+    "and is the design good to implement without breaking anything?")
+
+
 def build_prompt(target, doc_rel, doc_path, req_folder, req_files, req_truncated,
-                 other_docs, worktree, other_worktrees, custom, previous, first_id):
-    """The agent's brief for one document. Pure text, so it can be tested."""
+                 other_docs, worktree, other_worktrees, custom, previous, first_id,
+                 persona=DEFAULT_PERSONA):
+    """The agent's brief for one document. Pure text, so it can be tested.
+
+    `req_folder` None means no requirements were provided: the review is of the
+    document against the codebase alone.
+    """
+    info = PERSONAS[persona]
     lines = [
+        f"PERSONA: {info['label']}.",
+        info["lens"],
+        REQUIREMENTS_GIVEN if req_folder else REQUIREMENTS_ABSENT,
+        ALWAYS_TEXT,
         f"Review the document `{doc_rel}` in the {target.label} repository "
         f"'{target.repo_name}', branch '{target.branch}'.",
         f"Read it from: {doc_path}",
@@ -641,14 +790,15 @@ def build_prompt(target, doc_rel, doc_path, req_folder, req_files, req_truncated
     if other_worktrees:
         lines.append("Other repositories in this project, for cross-checking (read only): "
                      + "; ".join(f"{label}: {path}" for label, path in other_worktrees))
-    lines.append(f"Requirement documents (the source this document was decomposed from) "
-                 f"are in: {req_folder}")
-    shown = [str(p) for p in req_files]
-    lines.append("Requirement files:\n" + "\n".join(f"  - {p}" for p in shown)
-                 if shown else "That folder holds no readable files.")
-    if req_truncated:
-        lines.append(f"(Only the first {MAX_REQ_FILES} files are listed; look in the folder "
-                     f"for the rest.)")
+    if req_folder:
+        lines.append(f"Requirement documents (the source this document was decomposed from) "
+                     f"are in: {req_folder}")
+        shown = [str(p) for p in req_files]
+        lines.append("Requirement files:\n" + "\n".join(f"  - {p}" for p in shown)
+                     if shown else "That folder holds no readable files.")
+        if req_truncated:
+            lines.append(f"(Only the first {MAX_REQ_FILES} files are listed; look in the "
+                         f"folder for the rest.)")
     if other_docs:
         lines.append("Other documents under review in this same run (check this one against "
                      "them for contradictions): " + "; ".join(other_docs))
@@ -665,11 +815,12 @@ def build_prompt(target, doc_rel, doc_path, req_folder, req_files, req_truncated
     return _instructions_block(custom) + prompt
 
 
-def build_previous_block(runs, delta, open_list):
+def build_previous_block(runs, delta, open_list, persona=None):
     """The incremental-review brief: what was open, and what the author changed."""
-    if not runs:
+    prior = latest_run(runs, persona)
+    if prior is None:
         return ""
-    last = runs[0].meta
+    last = prior.meta
     listed = "\n".join(f"  {line}" for _sev, _id, line in open_list) or "  (none were open)"
     delta_text = delta.strip() if delta and delta.strip() else \
         "(no change to the document itself since that review)"
@@ -819,11 +970,13 @@ def check_spec(spec):
     return None
 
 
-def _pipeline(project_dir, targets, requirements_path=DEFAULT_REQUIREMENTS_DIR, model=None,
+def _pipeline(project_dir, targets, requirements_path="", model=None,
               do_commit=True, do_push=True, dry_run=False, custom_instructions="",
-              progress=None, emit=_emit_plain, control=None, ask=None, get_note=None):
+              progress=None, emit=_emit_plain, control=None, ask=None, get_note=None,
+              persona=DEFAULT_PERSONA):
     """Review -> write -> commit -> push, for every document of every target."""
     targets = tuple(targets)
+    persona = normalise_persona(persona)
     spec = DocJobSpec(project_dir=project_dir, targets=targets)
 
     def pg(stage, state):
@@ -845,7 +998,7 @@ def _pipeline(project_dir, targets, requirements_path=DEFAULT_REQUIREMENTS_DIR, 
     do_push = do_push and do_commit
 
     run_id = new_run_id()
-    emit(f"▸ Documentation review  |  run {run_id}  |  "
+    emit(f"▸ Documentation review  |  run {run_id}  |  {persona_label(persona)}  |  "
          + "  |  ".join(f"{t.label} {t.branch}: {', '.join(t.files)}" for t in targets)
          + (f"  |  model {model}" if model else "  |  model (default)"))
     if dry_run:
@@ -867,19 +1020,24 @@ def _pipeline(project_dir, targets, requirements_path=DEFAULT_REQUIREMENTS_DIR, 
             wt = _Worktree(t, run_id, emit)
             stack.append(wt)         # registered first so a half-made one is cleaned up
             trees.append(wt.__enter__())
-        req_folder = find_requirements(requirements_path,
-                                       [wt.path for wt in trees] + [Path(project_dir)])
-        if req_folder is None:
-            raise RuntimeError(
-                f"Requirement folder '{requirements_path}' was not found in the reviewed "
-                f"branch(es) or the project folder. A document cannot be validated against "
-                f"nothing - set the requirements path to the folder that holds this "
-                f"feature's requirements.")
-        req_files, req_trunc = list_requirement_files(req_folder)
-        emit(f"▸ Requirements: {req_folder} ({len(req_files)} file"
-             f"{'' if len(req_files) == 1 else 's'})")
-        if not req_files:
-            emit("⚠ The requirement folder holds no readable files; the review will say so.")
+        # Requirements are optional. Given, the review is centred on whether the
+        # decomposition satisfies all of them; absent, on the document against the codebase.
+        req_folder, req_files, req_trunc = None, [], False
+        if (requirements_path or "").strip():
+            req_folder = find_requirements(requirements_path,
+                                           [wt.path for wt in trees] + [Path(project_dir)])
+            if req_folder is None:
+                raise RuntimeError(
+                    f"Requirement folder '{requirements_path}' was not found in the reviewed "
+                    f"branch(es) or the project folder. Fix the path, or leave the "
+                    f"requirements empty to review the documents against the codebase alone.")
+            req_files, req_trunc = list_requirement_files(req_folder)
+            emit(f"▸ Requirements: {req_folder} ({len(req_files)} file"
+                 f"{'' if len(req_files) == 1 else 's'})")
+            if not req_files:
+                emit("⚠ The requirement folder holds no readable files; the review will say so.")
+        else:
+            emit("▸ No requirements given: reviewing the document against the codebase alone.")
 
         # Check every document up front, so a typo in the last file name does not
         # cost a model run on the first.
@@ -910,23 +1068,24 @@ def _pipeline(project_dir, targets, requirements_path=DEFAULT_REQUIREMENTS_DIR, 
             others = [(o.target.label, str(o.path)) for o in trees if o is not wt]
             _b, runs, _a = split_document(old_text)
             previous = ""
-            if runs:
-                last = runs[0].meta
+            prior = latest_run(runs, persona)
+            if prior is not None:
+                last = prior.meta
                 delta = ""
                 if last.get("commit"):
                     shown = _git(wt.path, "show", f"{last['commit']}:{rel}", check=False)
                     if shown.returncode == 0:
                         delta = doc_delta(shown.stdout, old_text)
-                open_list = open_findings(runs)
-                previous = build_previous_block(runs, delta, open_list)
-                emit(f"\n▸ {rel}: incremental review - v{last.get('v', '?')} left "
-                     f"{len(open_list)} comment(s) open.")
+                open_list = open_findings(runs, persona)
+                previous = build_previous_block(runs, delta, open_list, persona)
+                emit(f"\n▸ {rel}: incremental {persona_label(persona)} review - "
+                     f"v{last.get('v', '?')} left {len(open_list)} comment(s) open.")
             else:
-                emit(f"\n▸ {rel}: first review of this document.")
+                emit(f"\n▸ {rel}: first {persona_label(persona)} review of this document.")
             prompt = build_prompt(
                 t, rel, path, req_folder, req_files, req_trunc,
                 [d for d in all_docs if d != f"{t.label}: {rel}"], wt.path, others,
-                custom_instructions, previous, next_finding_number(runs))
+                custom_instructions, previous, next_finding_number(runs), persona=persona)
             emit(f"═══ {t.label} · {rel} ═══")
             res, body, sid, partial = review_document(
                 prompt, project_dir, emit, model, control, meter, ask=ask, get_note=get_note)
@@ -946,6 +1105,12 @@ def _pipeline(project_dir, targets, requirements_path=DEFAULT_REQUIREMENTS_DIR, 
                 emit(f"⚠ The reviewer did not deliver a review for {rel}; nothing is written "
                      f"for it. Retry the job to review it again.")
                 continue
+            skipped = missing_always_checks(body)
+            if skipped:
+                emit(f"⚠ The reviewer did not state a conclusion on "
+                     f"{', '.join(ALWAYS_NAMES[w] for w in skipped)}"
+                     f" - it is meant to for every review. Check that area yourself, or run "
+                     f"the review again.")
             counts = severity_counts(body)
             key, raised = reconcile_verdict(res.verdict_key, counts)
             if raised:
@@ -957,6 +1122,7 @@ def _pipeline(project_dir, targets, requirements_path=DEFAULT_REQUIREMENTS_DIR, 
                          "of the document were not examined (see Coverage).")
             version = (max(_version_of(r) for r in runs) + 1) if runs else 1
             meta = {"id": run_id, "v": version, "date": time.strftime("%Y-%m-%d %H:%M"),
+                    "persona": persona, "persona_label": persona_label(persona),
                     "commit": wt.base_commit,
                     "verdict": verdict_label(key) + (" (partial)" if partial else ""),
                     "impact": f"{res.impact_score}/10" if res.impact_score else "",
@@ -1001,9 +1167,10 @@ def _pipeline(project_dir, targets, requirements_path=DEFAULT_REQUIREMENTS_DIR, 
                     continue
                 mine = [r for r in results if r["role"] == wt.target.label]
                 total = {s: sum(r["counts"][s] for r in mine) for s in SEVERITIES}
-                brief = (f"review comments v{mine[0]['version']} on {wt.changed[0]}"
+                who = persona_label(persona)
+                brief = (f"{who} review comments v{mine[0]['version']} on {wt.changed[0]}"
                          if len(wt.changed) == 1
-                         else f"review comments on {len(wt.changed)} documents")
+                         else f"{who} review comments on {len(wt.changed)} documents")
                 msg = commit_message(run_id, f"{brief} ({counts_text(total)})")
                 _git(wt.path, "add", "--", *wt.changed)
                 _git(wt.path, "commit", "-m", msg)

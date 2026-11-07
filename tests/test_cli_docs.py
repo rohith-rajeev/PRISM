@@ -38,6 +38,7 @@ def args(**kw):
     """The Namespace `prism docs` would parse, with every option unset."""
     base = dict(files=[], path=None, clone=None, branch=None, be=None, be_clone=None,
                 be_branch=None, fe=None, fe_clone=None, fe_branch=None, requirements=None,
+                persona=None,
                 model=None, commit=None, push=None, dry_run=None, instructions=None,
                 instructions_file=None, detach=False, quiet=False, job_id=None, spec_json=None)
     base.update(kw)
@@ -65,7 +66,8 @@ class Resolution(Isolated):
         (t,) = spec.targets
         self.assertEqual((t.role, t.branch, t.files), ("repo", "feat/x", ("docs/spec.md",)))
         self.assertEqual(Path(t.local_repo).resolve(), self.clone.resolve())
-        self.assertEqual(spec.requirements_path, "docs/requirements")
+        self.assertEqual(spec.requirements_path, "")        # requirements are optional: none assumed
+        self.assertEqual(spec.persona, "ba")
         self.assertTrue(spec.do_commit and spec.do_push and not spec.dry_run)
         self.assertEqual(spec.origin, "cli")
         self.assertEqual(spec.kind, "docs")
@@ -270,7 +272,7 @@ class Records(Isolated):
     def test_label_and_branches(self):
         CJ.create(self.spec(), "d0c001")
         rec = CJ.load("d0c001")
-        self.assertEqual(CJ.label(rec), "Docs · Backend · 2 files")
+        self.assertEqual(CJ.label(rec), "Docs · Business Analyst · Backend · 2 files")
         self.assertEqual(rec["branches"], "Backend: feat/x")
 
     def test_duplicates_are_per_kind_and_per_documents(self):
@@ -377,7 +379,7 @@ class Running(Isolated):
         code, out, _e = self.run_cmd("jobs", "--all")
         self.assertEqual(code, 0)
         self.assertIn("TARGET", out)
-        self.assertIn("Docs · clone · 1 file", out)         # the clone's folder name, one document
+        self.assertIn("Docs · Business Analyst · clone · 1 file", out)   # clone folder name, 1 doc
         self.assertIn("pushed", out)
 
     def test_pull_request_listing_is_unchanged(self):
@@ -440,7 +442,7 @@ class Running(Isolated):
             origin = sh(clone, "remote", "get-url", "origin").strip()
             self.assertTrue(sh(origin, "log", "-1", "--format=%s", "feat/x").startswith("PRISM-"))
         (rec,) = CJ.list_jobs()
-        self.assertEqual(CJ.label(rec), "Docs · Backend + Frontend · 2 files")
+        self.assertEqual(CJ.label(rec), "Docs · Business Analyst · Backend + Frontend · 2 files")
 
     def test_config_keys_for_documents(self):
         for key, value in (("requirements", "reqs"), ("commit", "no"), ("push", "no")):

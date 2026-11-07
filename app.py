@@ -8,6 +8,13 @@ Project-agnostic: works with any repository + local clone.
 
 Run:  python3 app.py   (or ./run.sh, or the packaged desktop build)
 """
+# First, before Tk or anything else reads from the packaged build's unpack folder: a
+# build whose files are already gone (started by a process that has since exited,
+# e.g. the restart after an update by an older version) restarts itself once, clean.
+# A no-op everywhere but a packaged build in that state. See bundle.py.
+import bundle
+bundle.restart_if_bundle_gone()
+
 import collections
 import json
 import math
@@ -2121,18 +2128,19 @@ class DocReviewForm(tk.Frame):
         rc.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
         ri = rc.inner
         ri.config(padx=12, pady=6)
-        lab(ri, "Requirements", font=FONT_B, fg="text").pack(anchor="w")
-        self._hint_label(ri, "Folder holding the requirements this document was "
+        lab(ri, "Requirements (optional)", font=FONT_B, fg="text").pack(anchor="w")
+        self._hint_label(ri, "The folder holding the requirements the documents were "
                              "decomposed from.", font=FONT_S, pady=(0, 4))
-        self.req_var = tk.StringVar(value=DR.DEFAULT_REQUIREMENTS_DIR)
+        self.req_var = tk.StringVar(value="")
         rrow = tk.Frame(ri, bg=PAL["card"])
         rrow.pack(fill="x")
         entry(rrow, self.req_var, mono=True).pack(side="left", fill="x", expand=True,
                                                   ipady=3, padx=(0, 8))
         RoundedButton(rrow, text="Browse", command=self._browse_requirements,
                       style="outline", height=30, width=90, font=FONT_S).pack(side="left")
-        self._hint_label(ri, "Inside a repository it is kept relative to it; otherwise "
-                             "the full path is used.", pady=(2, 0))
+        self._hint_label(ri, "With requirements, the review checks the decomposition "
+                             "satisfies all of them. Without, it checks the documents "
+                             "against the codebase alone.", pady=(2, 0))
         lab(ri, "Custom instructions (optional)").pack(anchor="w", pady=(8, 2))
         self.instr_text = self._text_box(ri, 3)
         self._hint_label(ri, "e.g. \"pay extra attention to the payment retries\" or "
@@ -2144,10 +2152,21 @@ class DocReviewForm(tk.Frame):
         mi.config(padx=12, pady=6)
         mhead = tk.Frame(mi, bg=PAL["card"])
         mhead.pack(fill="x")
-        lab(mhead, "Model and behavior", font=FONT_B, fg="text").pack(side="left")
+        lab(mhead, "Reviewer", font=FONT_B, fg="text").pack(side="left")
+        self.persona_var = tk.StringVar(value=DR.DEFAULT_PERSONA)
+        prow = tk.Frame(mi, bg=PAL["card"])
+        prow.pack(fill="x", pady=(4, 0))
+        self.persona_btns = {}
+        for key, width in (("ba", 132), ("architect", 100), ("qa", 60)):
+            btn = RoundedButton(prow, text=DR.PERSONAS[key]["label"], height=28, width=width,
+                                font=FONT_S, command=lambda k=key: self._set_persona(k))
+            btn.pack(side="left", padx=(0, 6))
+            self.persona_btns[key] = btn
+        self.persona_hint = self._hint_label(mi, "", pady=(4, 6))
+        self._set_persona(DR.DEFAULT_PERSONA)
         self.model_picker = Picker(mi, title="SELECT MODEL", empty_label="Default model",
                                    group_key=None, empty_hint="Loading models…")
-        self.model_picker.pack(fill="x", pady=(6, 4))
+        self.model_picker.pack(fill="x", pady=(0, 4))
         self.model_picker.set_custom(DEFAULT_MODEL)
         self.commit_var = tk.BooleanVar(value=True)
         self.push_var = tk.BooleanVar(value=True)
@@ -2237,6 +2256,21 @@ class DocReviewForm(tk.Frame):
                                "(one per line or comma separated).", inline=True)
         return {"card": card, "title": title, "sub": sub, "picker": picker,
                 "branch": branch_var, "files": files, "browse": browse, "col": col}
+
+    PERSONA_HINTS = {
+        "ba": "Functional: do the requirements and the document align, with each other and "
+              "with what the code does?",
+        "architect": "Technical: is the proposal valid and consistent with the codebase's "
+                     "patterns, without security holes or bugs?",
+        "qa": "Quality: what could this break, and can it be tested?",
+    }
+
+    def _set_persona(self, key):
+        self.persona_var.set(key)
+        for k, btn in self.persona_btns.items():
+            btn.set_selected(k == key)
+        self.persona_hint.config(text=self.PERSONA_HINTS[key] + "  Security, stability and "
+                                 "scalability are always checked.")
 
     def _sync_stages(self):
         """Push needs a commit, and neither means anything in a dry run."""
@@ -2454,8 +2488,6 @@ class DocReviewForm(tk.Frame):
             if by_name[name] in seen:
                 return "Mapping", "Backend and Frontend point to the same clone."
             seen[by_name[name]] = role
-        if not self.req_var.get().strip():
-            return "Requirements", "Enter the folder that holds the requirements."
         return None
 
     def build_spec(self):
@@ -2472,7 +2504,7 @@ class DocReviewForm(tk.Frame):
                 files=DR.parse_files(c["files"].get("1.0", "end"))))
         return DR.DocJobSpec(
             project_dir=self.proj_var.get().strip(), targets=tuple(targets),
-            requirements_path=self.req_var.get().strip() or DR.DEFAULT_REQUIREMENTS_DIR,
+            requirements_path=self.req_var.get().strip(), persona=self.persona_var.get(),
             model=self.model_picker.get() or None,
             do_commit=self.commit_var.get(), do_push=self.push_var.get(),
             dry_run=self.dry_var.get(),
@@ -2483,6 +2515,7 @@ class DocReviewForm(tk.Frame):
         self.proj_var.set(spec.project_dir)
         self.refresh_detection()
         self.req_var.set(spec.requirements_path)
+        self._set_persona(spec.persona if spec.persona in DR.PERSONAS else DR.DEFAULT_PERSONA)
         self.commit_var.set(spec.do_commit)
         self.push_var.set(spec.do_push)
         self.dry_var.set(spec.dry_run)

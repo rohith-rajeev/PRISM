@@ -604,7 +604,8 @@ class Scheduler(unittest.TestCase):
         self.assertEqual(s.kind, "docs")
         self.assertEqual(J.JobSpec("/p", "r", "1").kind, "pr")
         self.assertIn("1 file", s.label)
-        self.assertEqual(s.summary_bits(), "document review")
+        self.assertIn("Business Analyst", s.label)
+        self.assertEqual(s.summary_bits(), "Business Analyst review · no requirements")
         self.assertEqual(s.pipeline_kwargs()["targets"], s.targets)
 
     def test_duplicate_detection_is_per_kind_and_per_document(self):

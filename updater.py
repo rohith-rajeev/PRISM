@@ -27,6 +27,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
+import bundle
 from version import REPO, RELEASES_URL, __version__
 
 API_LATEST = f"https://api.github.com/repos/{REPO}/releases/latest"
@@ -492,12 +493,7 @@ def relaunch_env():
     of this to undo; anything else inherits the environment unchanged.
     (Same reasoning as cli_jobs.child_env, which fixed `prism run --detach`.)
     """
-    env = dict(os.environ)
-    if getattr(sys, "frozen", False):
-        env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
-        for key in [k for k in env if k == "_MEIPASS2" or k.startswith("_PYI_")]:
-            del env[key]
-    return env
+    return bundle.clean_env()
 
 
 def relaunch(root=None):

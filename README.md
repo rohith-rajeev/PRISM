@@ -87,14 +87,33 @@ document for a person to read, challenge and decide on.
 
 You give it the same working folder and clone selectors as a PR review, but
 instead of a PR id: the **branch** and the **document file name(s)** for the
-backend, the frontend, or both (either is optional), plus the **requirements
-folder** (default `docs/requirements`; **Browse** to choose it, kept relative to
-the repository when it is inside one), the model and optional custom
-instructions. Document file names can be typed as paths from the repository root,
-or picked with **Browse…**, which lets you select several files at once.
+backend, the frontend, or both (either is optional), the **reviewer persona**, an
+optional **requirements folder** (**Browse** to choose it, kept relative to the
+repository when it is inside one), the model and optional custom instructions.
+Document file names can be typed as paths from the repository root, or picked with
+**Browse…**, which lets you select several files at once.
 
-For each document the `doc-reviewer` agent reads the requirements, the codebase
-and the document, then PRISM:
+**Who reviews.** Pick one persona; each reads the document through its own lens:
+
+| Persona | Lens |
+|---|---|
+| **Business Analyst** (`ba`, the default) | Functional: do the document's functional requirements align with the requirements and with themselves, and match what the codebase actually does? |
+| **Architect** (`architect`) | Technical: the codebase's existing patterns against what the document proposes. Is the proposal valid, and does it lead to security loopholes, bugs or inconsistencies with those patterns? |
+| **QA** (`qa`) | Quality: will implementing this break anything, how does it affect the quality of the product, and can it be tested? |
+
+**Security, stability and scalability are always checked**, whichever persona is
+chosen, and the review states its conclusion on each (PRISM warns if one is
+missing). Each persona's reviews are tracked separately in the document, so running
+the Architect again follows up the Architect's earlier comments.
+
+**Requirements are optional.** With them, the review centres on whether the
+decomposition satisfies the *entire* requirement and is consistent with the
+codebase's patterns. Without them, it centres on whether the document is consistent
+with the codebase's patterns and the design is good to implement without breaking
+anything.
+
+For each document the `doc-reviewer` agent reads the codebase, the document and
+(when given) the requirements, then PRISM:
 
 1. adds a **PRISM review comments** section at the end of the same document,
    grouped by severity (Blocker / Major / Minor / Suggestion), each comment
@@ -308,7 +327,8 @@ cd ~/work/my-service                       # a clone, on the branch the document
 prism docs docs/spec.md                    # review it; Ctrl-C stops it cleanly
 prism docs docs/spec.md docs/decomp.md --branch feat/specs
 prism docs --be docs/spec.md --fe docs/ui-spec.md      # backend and frontend, one run
-prism docs docs/spec.md --requirements docs/reqs --no-push
+prism docs docs/spec.md --persona architect          # as the Architect, no requirements
+prism docs docs/spec.md --persona qa --requirements docs/reqs --no-push
 prism docs docs/spec.md --dry-run -d       # review only, in the background
 prism retry 7f3a9c                         # review again after the author's edits
 prism ask 7f3a9c "why is DR-2 a blocker?"
@@ -323,7 +343,7 @@ are inside, the branch you have checked out, files typed the way a shell would
 `--be` / `--fe` it finds the two clones under the folder by name
 (`…-backend`, `…-frontend`) and asks for `--be-clone` / `--fe-clone` when the
 names do not say; it never guesses between clones. Precedence is flag → saved
-default → inferred from the clone → built-in (`docs/requirements`). The jobs show
+default → inferred from the clone → built-in (no requirements, persona `ba`). The jobs show
 up in `prism jobs`, `logs`, `stop`, `retry` and `ask` and on the app's CLI jobs
 screen. In a terminal a review can stop and ask you a question; a detached one
 carries on without an answer.
@@ -339,7 +359,8 @@ carries on without an answer.
 | `--be FILE …` / `--fe FILE …` | documents in the backend / frontend repository (not together with plain `FILE`s) |
 | `--be-clone DIR` / `--fe-clone DIR` | that repository's clone (default: found by folder name) |
 | `--be-branch NAME` / `--fe-branch NAME` | that repository's branch (default: the one checked out) |
-| `--requirements DIR` | folder holding the requirements (default `docs/requirements`) |
+| `--persona NAME` | who reviews: `ba` (Business Analyst, the default), `architect` or `qa` |
+| `--requirements DIR` | optional: the folder holding the requirements; without it the documents are reviewed against the codebase alone |
 | `--model NAME` | reviewer model |
 | `--commit` / `--no-commit` | commit the review comments to the branch, or keep nothing |
 | `--push` / `--no-push` | push the commit (needs a commit) |
@@ -403,6 +424,7 @@ under a `cli` key. Edit it by hand, or use `prism config`:
     "model": "anthropic/claude-sonnet-5-5",
     "instructions": "Flag missing tests",
     "requirements": "docs/requirements",
+    "persona": "architect",
     "review": true,
     "describe": true,
     "merge": false,
@@ -422,7 +444,8 @@ under a `cli` key. Edit it by hand, or use `prism config`:
 | `region` | text | AWS region |
 | `model` | text | reviewer model |
 | `instructions` | text | extra instructions added to every review (`run` and `docs`) |
-| `requirements` | text | requirements folder for `prism docs` |
+| `requirements` | text | requirements folder for `prism docs` (optional; empty means none) |
+| `persona` | text | reviewer for `prism docs`: `ba`, `architect` or `qa` |
 | `review`, `describe`, `merge`, `sync` | yes/no | defaults for the matching `prism run` flags |
 | `commit`, `push` | yes/no | defaults for the matching `prism docs` flags |
 | `dry_run` | yes/no | default for `--dry-run` on both commands |
@@ -598,6 +621,9 @@ disagrees with `version.py`.
 - No agent can merge, push or write. Agents decide; PRISM acts, behind gates in
   code that a prompt cannot reach. (The reviewer's deny rules are verified against
   the real engine in the test suite.)
+- An already-merged pull request is reviewed from the commits CodeCommit recorded
+  for it; if PRISM verifies there is genuinely nothing to review it says so and
+  stops, without spending a model run, merging or writing anything.
 - A review that did not actually read the changes **fails — it never merges**. If
   the fetch fails and the clone lacks the PR's latest commit, the review does not
   start; a report that says it read nothing ("could not read the diff", "no code

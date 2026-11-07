@@ -719,7 +719,13 @@ class NoAssumedBranchLayout(Isolated):
     particular set of branches (or an order between them) quietly teaches the
     reviewer, and the reader, that one layout is the norm."""
 
-    NAMES = __import__("re").compile(r"\b(develop|staging|qa)\b|lower\s+environment", __import__("re").I)
+    # `develop` and `staging` are flagged wherever they appear. `qa` is also a reviewer
+    # persona now ("QA", `--persona qa`), so it only counts when it is used as a branch or
+    # environment: "into qa", "the qa branch", "develop -> qa".
+    NAMES = __import__("re").compile(
+        r"\b(develop|staging)\b|lower\s+environment"
+        r"|\b(to|into|onto|from|branch(es)?|environment)\s+qa\b|\bqa\s+(branch|environment|env)\b"
+        r"|\bqa\s*(->|→|>)|(->|→|>)\s*qa\b", __import__("re").I)
     ROOT = Path(__file__).resolve().parent.parent
 
     def top_changelog_sections(self, n=2):

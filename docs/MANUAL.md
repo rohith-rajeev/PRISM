@@ -197,17 +197,37 @@ type paths from the repository root yourself, one per line or comma separated.
 Fill in either card or both; an empty card is skipped. (Select the clone first:
 picked files must lie inside it.)
 
-**4. Check the requirements folder.** It defaults to `docs/requirements`. Click
-`Browse` to pick the folder holding the requirements the document was
-decomposed from, as you did for the working folder. Inside a repository it is
-stored relative to it and read from the reviewed branch; elsewhere the full path
-is used. The path can still be typed.
+**4. Choose who reviews.** Under *Reviewer*, pick one of three, each reading the
+document through its own lens:
 
-**5. Choose the stages.** *Commit* and *Push* are on by default; *Push* needs
+- **Business Analyst** (the default) — the functional side: do the document's
+  requirements align with the requirements you gave (if any) and with
+  themselves, and match what the codebase actually does?
+- **Architect** — the technical side: the codebase's existing patterns against
+  what the document proposes. Is the proposal valid, and does it lead to security
+  loopholes, bugs or inconsistencies with those patterns?
+- **QA** — the quality side: will implementing this break anything, how does it
+  affect the quality of the product, and can it be tested?
+
+Whichever you pick, **security, stability and scalability are always checked**,
+and the review states a conclusion on each. Run the document again with another
+persona to see it from another side; each persona's reviews are kept apart, so
+an Architect re-review follows up the Architect's comments.
+
+**5. (Optional) Add the requirements.** Click `Browse` to pick the folder holding
+the requirements the document was decomposed from, as you did for the working
+folder. **With** requirements, the review centres on whether the decomposition
+satisfies all of them and is consistent with the codebase's patterns. **Without**
+them, it centres on whether the document is consistent with the codebase's patterns
+and the design is good to implement without breaking anything. Inside a repository
+the folder is stored relative to it and read from the reviewed branch; elsewhere the
+full path is used. A path you give that isn't found is an error, not ignored.
+
+**6. Choose the stages.** *Commit* and *Push* are on by default; *Push* needs
 *Commit*. *Dry run* reviews but writes, commits and pushes nothing — the
 comments are only in the conversation.
 
-**6. Click `▶ Start Prisming`** (or `Ctrl+Enter`). Custom instructions work as
+**7. Click `▶ Start Prisming`** (or `Ctrl+Enter`). Custom instructions work as
 they do for a PR.
 
 **What you get.** A **PRISM review comments** section is added at the end of each
@@ -383,7 +403,8 @@ are in, on the branch you have checked out.
     prism docs docs/spec.md                          one document, here
     prism docs docs/spec.md docs/decomp.md --branch feat/specs
     prism docs --be docs/spec.md --fe docs/ui.md     backend and frontend
-    prism docs docs/spec.md --requirements docs/reqs --no-push
+    prism docs docs/spec.md --persona architect      as the Architect (ba, architect, qa)
+    prism docs docs/spec.md --persona qa --requirements docs/reqs --no-push
     prism docs docs/spec.md --dry-run                review only, write nothing
     prism docs docs/spec.md -d                       in the background
 
@@ -392,7 +413,9 @@ from the repository root). With `--be` / `--fe`, PRISM finds the two clones unde
 the folder by their names (`…-backend`, `…-frontend`) and asks you to say which
 is which with `--be-clone` / `--fe-clone` when the names do not tell it — it
 never guesses. `--commit/--no-commit` and `--push/--no-push` are the stages;
-`--requirements DIR` points at the requirements folder. The review shows up as a
+`--persona` picks who reviews and `--requirements DIR` optionally points at the
+requirements folder (without it the documents are reviewed against the codebase
+alone). The review shows up as a
 job like any other: `prism jobs`, `prism logs <id> -f`, `prism stop <id>`, and
 `prism retry <id>` for an incremental re-review after the author's edits.
 `prism ask <id> "why is DR-2 a blocker?"` asks the reviewer about it. The full
@@ -479,6 +502,8 @@ PRISM is deliberately cautious:
 | `The review did not finish` | The model gave no usable answer even when asked to wrap up. Nothing was changed on the pull request. Retry — the model's provider may be slow right now |
 | `The review did not examine this pull request …` | The reviewer couldn't read the changes (usually a failed `git fetch`, expired credentials, or a blocked shell), so there is no verdict. Nothing was written or merged. Check `git fetch origin <branch>` works in the clone, then press **Retry** |
 | `PRISM could not fetch the pull request's branches … nothing to review` | The fetch failed and the clone doesn't have the PR's latest commit. The review never started. Fix the connection or credentials, then **Retry** |
+| `ℹ Nothing to review — this pull request is already merged …` | The PR's branch is already part of the destination, and CodeCommit's record no longer shows its changes, so PRISM stopped without spending a review. Nothing was written or merged. (If CodeCommit still records the PR's own commits, PRISM reviews those instead, and says so) |
+| `Bundled agents missing: /tmp/_MEI…` | PRISM's temporary unpacked files were removed while it was open. Quit PRISM and start it again. From v5.2 PRISM restarts itself cleanly in that situation and keeps a saved copy of its agents, so this should not recur |
 | `Could not parse a verdict` | The reviewer didn't produce a clear verdict. Check the conversation, try a different model, run it again |
 | `Backend and Frontend point to the same clone` | Pick two different clones in Repository mapping |
 | A conflict appears in the question panel | Choose `Keep current` or `Take incoming` for each one, or `Abort sync` to stop and leave your clone untouched |

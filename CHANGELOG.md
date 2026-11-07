@@ -4,6 +4,21 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v5.2
+
+- **Choose who reviews a document:** Business Analyst (functional), Architect
+  (technical) or QA (quality), each through its own lens. Security, stability and
+  scalability are always checked. `--persona` on the command line.
+- **Requirements are optional.** With them, the review checks the decomposition
+  satisfies all of them; without, it checks the documents against the codebase.
+- **Fixed: reviewing an already-merged pull request failed as "review
+  incomplete".** The reviewer was blocked from running `git merge-base`. PRISM now
+  finds a PR's changes itself, including for merged PRs, and says plainly when
+  there is nothing to review.
+- **Fixed: "Bundled agents missing" when starting a review**, after an update or
+  once `/tmp` was cleared. PRISM now restarts itself cleanly or uses a saved copy
+  of its agents.
+
 ## v5.1
 
 - **Document review.** A new tab, and `prism docs` on the command line, reviews

@@ -343,12 +343,19 @@ def build_docs_spec(args, cfg=None, cwd=None):
         raise UsageError("The backend and the frontend are the same clone. Pass "
                          "--be-clone and --fe-clone.")
 
-    requirements = (args.requirements or cfg.get("requirements") or "").strip() \
-        or DR.DEFAULT_REQUIREMENTS_DIR
-    typed = (cwd / Path(requirements).expanduser()) if not Path(requirements).expanduser() \
-        .is_absolute() else Path(requirements).expanduser()
-    if typed.is_dir():     # a folder you can see from here: keep it relative to its repository
-        requirements = DR.relativise_folder(typed, [t.local_repo for t in targets] + [str(base)])
+    # Optional: nothing is assumed. Given, the review centres on whether the decomposition
+    # satisfies the requirements; absent, on the documents against the codebase alone.
+    requirements = (args.requirements or cfg.get("requirements") or "").strip()
+    if requirements:
+        typed = (cwd / Path(requirements).expanduser()) if not Path(requirements).expanduser() \
+            .is_absolute() else Path(requirements).expanduser()
+        if typed.is_dir():     # a folder you can see from here: keep it relative to its repo
+            requirements = DR.relativise_folder(
+                typed, [t.local_repo for t in targets] + [str(base)])
+    try:
+        persona = DR.normalise_persona(args.persona or cfg.get("persona"))
+    except ValueError as e:
+        raise UsageError(str(e))
 
     def flag(cli_value, key):
         return cfg[key] if cli_value is None else cli_value
@@ -362,7 +369,7 @@ def build_docs_spec(args, cfg=None, cwd=None):
     do_commit = flag(args.commit, "commit")
     return DR.DocJobSpec(
         project_dir=str(base), targets=tuple(targets), requirements_path=requirements,
-        model=args.model or cfg["model"] or None, do_commit=do_commit,
+        persona=persona, model=args.model or cfg["model"] or None, do_commit=do_commit,
         do_push=flag(args.push, "push") and do_commit, dry_run=flag(args.dry_run, "dry_run"),
         custom_instructions=(instructions or "").strip(), origin="cli")
 
@@ -648,9 +655,14 @@ def _add_docs_options(p):
     p.add_argument("--fe-clone", metavar="DIR", help="the frontend clone (default: guessed from "
                                                       "the folder names)")
     p.add_argument("--fe-branch", metavar="NAME", help="frontend branch (default: checked out)")
+    p.add_argument("--persona", metavar="NAME",
+                   help="who reviews: ba (Business Analyst, functional; the default), "
+                        "architect (technical) or qa (quality)")
     p.add_argument("--requirements", metavar="DIR",
-                   help=f"folder holding the requirements the documents were decomposed from "
-                        f"(default: {DR.DEFAULT_REQUIREMENTS_DIR})")
+                   help="optional: the folder holding the requirements the documents were "
+                        "decomposed from. With it the review checks the decomposition "
+                        "satisfies all of them; without it, the documents against the "
+                        "codebase alone")
     p.add_argument("--model", help="reviewer model, e.g. anthropic/claude-sonnet-5-5")
     for flag, dest, what in (("commit", "commit", "commit the review comments to the branch"),
                              ("push", "push", "push the commit to the remote")):
@@ -684,7 +696,9 @@ def build_parser():
     d = sub.add_parser(
         "docs", help="review a spec or requirement document",
         description="Review requirement-decomposition documents or specs against the "
-                    "requirements they came from and the codebase. The review is written "
+                    "codebase and, if you give them, the requirements they came from, as a "
+                    "Business Analyst, Architect or QA (--persona), always checking security, "
+                    "stability and scalability. The review is written "
                     "into each document as a 'PRISM review comments' section, committed as "
                     "PRISM-<run id>: <message> and pushed - an aid to your own review, not a "
                     "replacement for it.")
@@ -1074,6 +1088,11 @@ def cmd_config(args):
         if not folder.is_dir():
             raise UsageError(f"{folder} is not a folder.")
         CFG.set_cli(project_dir=str(folder))
+    elif key == "persona":
+        try:
+            CFG.set_cli(persona=DR.normalise_persona(text))     # saved as the canonical key
+        except ValueError as e:
+            raise UsageError(str(e))
     else:
         CFG.set_cli(**{key: text})
     print(f"{key} saved to {CFG.CONFIG_PATH}")
