@@ -14,6 +14,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 from pathlib import Path
 
@@ -379,6 +380,56 @@ class NothingPublishedYet(unittest.TestCase):
             for line in src.splitlines():
                 if "raise " in line or "UpdateError(" in line or '"' in line:
                     self.assertNotIn("GitHub", line, f"in {fn.__name__}: {line.strip()}")
+
+
+class RelaunchAfterUpdate(unittest.TestCase):
+    """The restart must not inherit the old process's PyInstaller unpack folder.
+
+    That folder is deleted when the old process exits, which is immediately after it
+    starts the new copy - so a new copy told to reuse it failed with "Bundled agents
+    missing" (the same failure `prism run --detach` had before v4.7).
+    """
+
+    INHERITED = {"_MEIPASS2": "/tmp/_MEI123", "_PYI_APPLICATION_HOME_DIR": "/tmp/_MEI123",
+                 "_PYI_ARCHIVE_FILE": "/x", "HOME": "/home/me", "PATH": "/usr/bin"}
+
+    def env_for(self, frozen):
+        with mock.patch.dict(os.environ, self.INHERITED, clear=True), \
+                mock.patch.object(sys, "frozen", frozen, create=True):
+            return u.relaunch_env()
+
+    def test_a_packaged_build_starts_the_new_copy_from_a_clean_slate(self):
+        env = self.env_for(True)
+        self.assertEqual(env["PYINSTALLER_RESET_ENVIRONMENT"], "1")
+        self.assertNotIn("_MEIPASS2", env)
+        self.assertFalse([k for k in env if k.startswith("_PYI_")])
+        self.assertEqual((env["HOME"], env["PATH"]), ("/home/me", "/usr/bin"))   # nothing else lost
+
+    def test_anything_else_inherits_the_environment_unchanged(self):
+        env = self.env_for(False)
+        self.assertEqual(env, self.INHERITED)
+        self.assertNotIn("PYINSTALLER_RESET_ENVIRONMENT", env)
+
+    def test_it_does_not_modify_this_process_environment(self):
+        with mock.patch.dict(os.environ, self.INHERITED, clear=True), \
+                mock.patch.object(sys, "frozen", True, create=True):
+            u.relaunch_env()
+            self.assertEqual(os.environ.get("_MEIPASS2"), "/tmp/_MEI123")
+
+    def test_relaunch_hands_that_environment_to_the_new_process(self):
+        for platform_name, root in (("linux", "/opt/PRISM/PRISM"), ("windows", "C:/PRISM/PRISM.exe"),
+                                    ("macos", "/Applications/PRISM.app")):
+            with self.subTest(platform_name), \
+                    mock.patch.dict(os.environ, self.INHERITED, clear=True), \
+                    mock.patch.object(sys, "frozen", True, create=True), \
+                    mock.patch.object(u, "platform_key", return_value=platform_name), \
+                    mock.patch.object(u.subprocess, "Popen") as popen:
+                u.relaunch(Path(root))
+            _args, kwargs = popen.call_args
+            self.assertEqual(kwargs["env"]["PYINSTALLER_RESET_ENVIRONMENT"], "1")
+            self.assertNotIn("_MEIPASS2", kwargs["env"])
+            # still detached from this process, however each OS spells that
+            self.assertTrue(kwargs.get("start_new_session") or kwargs.get("creationflags"))
 
 
 class VersionSequence(unittest.TestCase):
