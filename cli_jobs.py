@@ -30,6 +30,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
+import bundle
 import config
 import docreview
 import jobs as J
@@ -85,7 +86,8 @@ def spec_to_dict(spec):
                 "targets": [{"role": t.role, "repo_name": t.repo_name,
                              "local_repo": t.local_repo, "branch": t.branch,
                              "files": list(t.files)} for t in spec.targets],
-                "requirements_path": spec.requirements_path, "model": spec.model,
+                "requirements_path": spec.requirements_path, "persona": spec.persona,
+                "model": spec.model,
                 "do_commit": spec.do_commit, "do_push": spec.do_push,
                 "dry_run": spec.dry_run, "custom_instructions": spec.custom_instructions}
     data = asdict(spec)
@@ -106,10 +108,13 @@ def _docs_spec_from_dict(data):
             local_repo=str(t["local_repo"]), branch=str(t["branch"]), files=files))
     if not targets or not str(data.get("project_dir") or "").strip():
         raise ValueError("saved document job has no targets")
+    try:
+        persona = docreview.normalise_persona(data.get("persona"))
+    except ValueError:
+        persona = docreview.DEFAULT_PERSONA        # a record from a newer or hand-edited build
     return docreview.DocJobSpec(
         project_dir=str(data["project_dir"]), targets=tuple(targets),
-        requirements_path=str(data.get("requirements_path") or
-                              docreview.DEFAULT_REQUIREMENTS_DIR),
+        requirements_path=str(data.get("requirements_path") or ""), persona=persona,
         model=data.get("model") or None,
         do_commit=data.get("do_commit") is not False,
         do_push=data.get("do_push") is not False,
@@ -277,7 +282,11 @@ def label(record):
                                                                     t.get("repo_name") or "?")
                            for t in targets) or "?"
         count = sum(len(t.get("files") or []) for t in targets)
-        return f"Docs · {names} · {count} file{'' if count == 1 else 's'}"
+        try:
+            who = docreview.persona_label(docreview.normalise_persona(spec.get("persona")))
+        except ValueError:
+            who = docreview.persona_label(docreview.DEFAULT_PERSONA)
+        return f"Docs · {who} · {names} · {count} file{'' if count == 1 else 's'}"
     return f"{spec.get('repo_name', '?')} #{spec.get('pr_id', '?')}"
 
 
@@ -365,12 +374,7 @@ def child_env():
     a clean slate makes the child unpack its own copy. Older bootloaders
     ignore the reset flag and key off these variables instead, so they go too.
     """
-    env = dict(os.environ)
-    if getattr(sys, "frozen", False):
-        env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
-        for key in [k for k in env if k == "_MEIPASS2" or k.startswith("_PYI_")]:
-            del env[key]
-    return env
+    return bundle.clean_env()
 
 
 def spawn_detached(args):

@@ -52,6 +52,7 @@ class DocFormLayout(unittest.TestCase):
         self.tk = tk.Tk()
         self.tk.geometry("1020x900")
         self.addCleanup(self.tk.destroy)
+        self.addCleanup(self._cancel_pending)      # runs first: no timer outlives the window
         tkroot = self.tk
 
         class Stub:
@@ -68,6 +69,14 @@ class DocFormLayout(unittest.TestCase):
         self.form = A.DocReviewForm(self.tk, Stub())
         self.form.pack(fill="both", expand=True)
         self.pump()
+
+    def _cancel_pending(self):
+        job = getattr(self.form, "_detect_job", None)
+        if job is not None:
+            try:
+                self.tk.after_cancel(job)
+            except Exception:  # noqa: BLE001
+                pass
 
     def pump(self, seconds=0.5):
         end = time.time() + seconds
@@ -208,6 +217,58 @@ class DocFormLayout(unittest.TestCase):
         self.form._browse_requirements()
         self.pump(0.6)
         self.assertEqual(self.form.req_var.get(), "specs-src")
+
+
+    def _ready_form(self):
+        self._repo_with_docs()
+        card = self.form.cards["BE"]
+        card["branch"].set("feat/x")
+        card["files"].insert("1.0", "docs/extra/one.md")
+        return card
+
+    def test_the_reviewer_persona_is_chosen_with_one_click_and_reaches_the_job(self):
+        self._ready_form()
+        self.assertEqual(self.form.build_spec().persona, "ba")             # the default
+        self.assertEqual(list(self.form.persona_btns), ["ba", "architect", "qa"])
+        for key, word in (("architect", "Technical"), ("qa", "Quality"), ("ba", "Functional")):
+            self.form.persona_btns[key]._click(None)
+            self.assertEqual(self.form.build_spec().persona, key)
+            self.assertIn(word, self.form.persona_hint.cget("text"))
+            self.assertIn("Security, stability and scalability are always checked",
+                          self.form.persona_hint.cget("text"))
+
+    def test_the_persona_buttons_fit_inside_their_card_even_in_a_narrow_window(self):
+        self.tk.geometry("900x700")
+        self.pump(0.6)
+        multi = self.root / "pair"
+        multi.mkdir()
+        _clone(multi / "x-backend")
+        _clone(multi / "x-frontend")
+        self.open_folder(multi)
+        self.tk.geometry("900x700")
+        self.pump(0.6)
+        right = self.form.persona_btns["qa"]
+        edge = right.winfo_rootx() + right.winfo_width()
+        card_edge = self.form.persona_hint.winfo_rootx() + self.form.persona_hint.winfo_width()
+        self.assertLessEqual(edge, card_edge + 12, "the QA button runs past its card")
+
+    def test_requirements_are_optional_for_the_form(self):
+        self._ready_form()
+        self.assertEqual(self.form.req_var.get(), "")                       # empty by default
+        self.assertIsNone(self.form.problem())                              # and that is fine
+        self.assertEqual(self.form.build_spec().requirements_path, "")
+        self.form.req_var.set("docs/requirements")
+        self.assertEqual(self.form.build_spec().requirements_path, "docs/requirements")
+
+    def test_a_previous_job_refills_the_persona_and_the_requirements(self):
+        self._ready_form()
+        self.form.persona_btns["qa"]._click(None)
+        self.form.req_var.set("docs/reqs")
+        spec = self.form.build_spec()
+        self.form.persona_btns["ba"]._click(None)
+        self.form.req_var.set("")
+        self.form.populate(spec)
+        self.assertEqual((self.form.persona_var.get(), self.form.req_var.get()), ("qa", "docs/reqs"))
 
 
 if __name__ == "__main__":

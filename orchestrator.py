@@ -26,6 +26,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+import bundle
 import config
 import notifier
 
@@ -46,6 +47,10 @@ FROZEN = getattr(sys, "frozen", False)
 TOOL_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).parent)).resolve()
 AGENTS_DIR = TOOL_DIR / "agents"
 BUNDLED_AGENT = AGENTS_DIR / "pr-reviewer.md"
+if FROZEN:
+    # The unpack folder can disappear while PRISM is open (see bundle.py); keep a
+    # durable copy of the agents so the next review does not depend on it.
+    bundle.preserve(TOOL_DIR)
 
 # Agents are reserved for genuinely specialized judgment — reading and
 # explaining code. Everything mechanical (resolving PR context, checking
@@ -428,6 +433,14 @@ def strip_ansi(text: str) -> str:
     return ANSI_RE.sub("", text or "")
 
 
+class NothingToReview(RuntimeError):
+    """PRISM verified, itself, that the pull request has no changes to review.
+
+    Not a failure of the review: an already-merged PR, or one whose branch has nothing
+    the destination lacks. The run stops cleanly, merging and writing nothing.
+    """
+
+
 class ReviewIncomplete(RuntimeError):
     """The reviewer did not (or could not) examine what it was asked to review.
 
@@ -552,12 +565,17 @@ def ensure_bundled_agents(project_dir: str, emit=_emit_plain) -> list:
     Files beginning with `_` are documentation for the agent authors, not
     agents, and are skipped.
     """
-    if not AGENTS_DIR.is_dir():
-        raise RuntimeError(f"Bundled agents missing: {AGENTS_DIR}")
+    agents_src = bundle.agents_dir(AGENTS_DIR) if FROZEN else (
+        AGENTS_DIR if AGENTS_DIR.is_dir() else None)
+    if agents_src is None:
+        raise RuntimeError(
+            f"Bundled agents missing: {AGENTS_DIR}. PRISM's unpacked files were removed "
+            f"while it was running (it was started by a process that has since exited, or "
+            f"the temp folder was cleared). Quit PRISM and start it again.")
     dest_dir = Path(project_dir).expanduser().resolve() / ".opencode" / "agents"
     dest_dir.mkdir(parents=True, exist_ok=True)
     installed, written = [], 0
-    for src in sorted(AGENTS_DIR.glob("*.md")):
+    for src in sorted(agents_src.glob("*.md")):
         if src.name.startswith("_"):
             continue
         dest = dest_dir / src.name
@@ -1868,6 +1886,64 @@ def _ensure_reviewable_refs(local_repo, pr_meta, source_ref, dest_ref, refs_read
         f"(`git fetch origin {source_ref}` in the clone) and retry the job.")
 
 
+def _pr_change_scope(local_repo, pr_meta, source_ref, dest_ref, refs_ready):
+    """Where this pull request's changes are, worked out by PRISM rather than left to
+    the reviewer.
+
+    Returns a dict with `diff_spec`, `log_spec`, `kind` and `label` for a range that
+    holds changes; `{"empty": True, ...}` when PRISM has checked every range it knows
+    and all are empty; None when it cannot tell (no usable refs, or git cannot answer),
+    in which case the old behaviour applies and the report itself is still checked.
+
+    Branch names come first (what CodeCommit shows for an open PR). They show nothing
+    once the PR has been merged, because the destination then already holds the source,
+    so the PR's own recorded commits are tried next: that is what keeps a merged PR
+    reviewable instead of looking like an empty one.
+    """
+    if not (refs_ready and local_repo and source_ref and dest_ref):
+        return None
+    meta = pr_meta if isinstance(pr_meta, dict) else {}
+    src = meta.get("sourceCommit") or ""
+    merged = bool(meta.get("isMerged")) or (meta.get("status") or "") not in ("", "OPEN")
+    ranges = [(f"origin/{dest_ref}...origin/{source_ref}",
+               f"origin/{dest_ref}..origin/{source_ref}", "branch")]
+    if src and meta.get("mergeBase"):
+        ranges.append((f"{meta['mergeBase']}..{src}", f"{meta['mergeBase']}..{src}", "recorded"))
+    if src and meta.get("destinationCommit"):
+        ranges.append((f"{meta['destinationCommit']}...{src}",
+                       f"{meta['destinationCommit']}..{src}", "recorded"))
+    answered = 0
+    for diff_spec, log_spec, kind in ranges:
+        stat, _ = _git_capped(local_repo, ["diff", "--stat=110", "--no-color", diff_spec], 4000)
+        if stat is None:
+            continue                       # git could not answer: a ref is not here
+        answered += 1
+        if stat.strip():
+            label = (f"the whole pull request (`{diff_spec}`)" if kind == "branch" else
+                     f"the changes CodeCommit recorded for this pull request (`{diff_spec}`)"
+                     + (f"; it is already merged, so comparing '{dest_ref}' with "
+                        f"'{source_ref}' shows nothing" if merged else ""))
+            return {"diff_spec": diff_spec, "log_spec": log_spec, "kind": kind,
+                    "label": label, "merged": merged}
+    return {"empty": True, "merged": merged} if answered else None
+
+
+def _nothing_to_review_message(pr_meta, source_ref, dest_ref):
+    meta = pr_meta if isinstance(pr_meta, dict) else {}
+    commit = (meta.get("sourceCommit") or "")[:8]
+    status = meta.get("status") or ""
+    if meta.get("isMerged") or status not in ("", "OPEN"):
+        state = "merged" if meta.get("isMerged") else status.lower()
+        return (f"this pull request is already {state}: '{dest_ref}' already contains "
+                f"'{source_ref}'" + (f" (at {commit})" if commit else "")
+                + ", and CodeCommit's record of it no longer shows its changes, so there is "
+                  "nothing left to review or merge. To audit what went in, review the "
+                  f"commits on '{dest_ref}'.")
+    return (f"'{source_ref}' has no commits that '{dest_ref}' lacks, so the pull request "
+            f"contains no changes. There is nothing to review or merge - close the pull "
+            f"request, or push the work to the branch.")
+
+
 def _git_capped(local_repo, args, cap):
     """Run a read-only git command; (text, truncated). text is None on failure.
 
@@ -1912,7 +1988,7 @@ def _one_line(text, limit=200):
 
 
 def _prepare_pr_block(local_repo, source_ref, dest_ref, pr_meta, incremental,
-                      refs_ready, emit=_emit_plain, budget=None):
+                      refs_ready, emit=_emit_plain, budget=None, scope=None):
     """The prompt block carrying the PR's facts and diff, or "" — never raises.
 
     `budget` is how many bytes the block may add to the prompt (see
@@ -1930,6 +2006,8 @@ def _prepare_pr_block(local_repo, source_ref, dest_ref, pr_meta, incremental,
             log_spec = diff_spec
             label = (f"the changes since PRISM's last review (commit {base[:8]} to "
                      f"{tip[:8]})")
+        elif scope and scope.get("diff_spec"):
+            diff_spec, log_spec, label = scope["diff_spec"], scope["log_spec"], scope["label"]
         else:
             diff_spec = f"origin/{dest_ref}...origin/{source_ref}"
             log_spec = f"origin/{dest_ref}..origin/{source_ref}"
@@ -2068,6 +2146,18 @@ def run_opencode_review(pr_id, repo_name, local_repo, project_dir,
     incremental = _incremental_context(pr_id, repo_name, local_repo, region=region,
                                        emit=emit, pr=pr_meta or None,
                                        refs_fetched=refs_ready)
+    # PRISM looks for the PR's changes itself, before any model run: an empty range is
+    # something it can verify (and say plainly), and a merged PR is found through its
+    # recorded commits. Skipped for an incremental review, which has its own range.
+    scope = None
+    if not incremental:
+        scope = _pr_change_scope(local_repo, pr_meta, source_ref, dest_ref, refs_ready)
+        if scope and scope.get("empty"):
+            raise NothingToReview(_nothing_to_review_message(pr_meta, source_ref, dest_ref))
+        if scope and scope["kind"] == "recorded":
+            emit(f"▸ '{dest_ref}' and '{source_ref}' show no difference"
+                 + (" (the pull request is already merged)" if scope["merged"] else "")
+                 + " - reviewing the changes CodeCommit recorded for it.")
     branch_line = (f"Source branch: {source_ref}. Destination branch: {dest_ref}. "
                    if source_ref and dest_ref else "")
     # A leading, delimited block — not a sentence tacked on after "report the
@@ -2127,7 +2217,7 @@ def run_opencode_review(pr_id, repo_name, local_repo, project_dir,
     # sized to whatever room the prompt has left under the OS's argument limit.
     prompt += _prepare_pr_block(
         local_repo, source_ref, dest_ref, pr_meta, incremental, refs_ready, emit=emit,
-        budget=PROMPT_BUDGET - len(prompt.encode("utf-8")))
+        budget=PROMPT_BUDGET - len(prompt.encode("utf-8")), scope=scope)
     # No --session/--continue: a plain run always creates a fresh session, and
     # --format json is what lets us capture its id for the follow-up turns.
     json_mode = engine_supports_json(exe)
@@ -2337,6 +2427,11 @@ def get_pr(pr_id, region=REGION_DEFAULT):
         "destinationReference": (t.get("destinationReference") or "").replace("refs/heads/", ""),
         "sourceCommit": t.get("sourceCommit", ""),
         "destinationCommit": t.get("destinationCommit", ""),
+        # What CodeCommit recorded about the PR's own commits. These still describe the
+        # PR's changes after it has been merged, when comparing the two branches no
+        # longer shows anything.
+        "mergeBase": t.get("mergeBase", ""),
+        "isMerged": bool((t.get("mergeMetadata") or {}).get("isMerged")),
         "title": pr.get("title", ""),
         "description": pr.get("description", "") or "",
         "status": pr.get("pullRequestStatus", ""),
@@ -2938,10 +3033,19 @@ def _run_pipeline(project_dir, repo_name, pr_id, local_repo=None,
     else:
         pg(STAGE_REVIEW, "active")
         emit("\n═══ STEP 1 — AI review ═══")
-        raw, session_id = run_opencode_review(pr_id, repo_name, local_clone, project_dir,
-                                              region=region, emit=emit, model=model,
-                                              control=control, meter=meter,
-                                              custom_instructions=custom_instructions)
+        try:
+            raw, session_id = run_opencode_review(pr_id, repo_name, local_clone, project_dir,
+                                                  region=region, emit=emit, model=model,
+                                                  control=control, meter=meter,
+                                                  custom_instructions=custom_instructions)
+        except NothingToReview as nothing:
+            # PRISM checked, itself, that there is nothing to review (typically a PR that
+            # is already merged). Not an error to retry: stop cleanly, touch nothing.
+            emit(f"\nℹ Nothing to review — {nothing}")
+            for stage in (STAGE_REVIEW, STAGE_DESCRIBE, STAGE_MERGE_CHECK, STAGE_MERGE):
+                pg(stage, "skipped")
+            return {"review": ReviewResult(verdict_key="", verdict_raw="No changes to review"),
+                    "merged": False, "stopped": "no-changes", "tokens": meter.total()}
         review = parse_review_output(raw)
         partial = CUT_SHORT_MARKER in (raw or "")
         if session_id:
@@ -3017,11 +3121,14 @@ def _run_pipeline(project_dir, repo_name, pr_id, local_repo=None,
             emit("  PRISM discards it: no verdict, no description update, no merge. "
                  "This is usually a network or access problem (a failed `git fetch`, a "
                  "blocked shell). Fix it and retry the job.")
+            said = " ".join((review.summary or "").split())[:500]
             raise ReviewIncomplete(
                 f"The review did not examine this pull request ({review.incomplete_reason}), "
                 f"so it produced no verdict. Nothing was written to the pull request and "
-                f"nothing was merged. Retry the job once the cause is fixed — usually the "
-                f"clone could not reach CodeCommit or the reviewer could not run git.")
+                f"nothing was merged."
+                + (f" The reviewer said: {said}" if said else "")
+                + " Retry the job once the cause is fixed (a failed fetch, a blocked "
+                  "command and an empty diff are the usual ones).")
         emit(f"\n◆ Verdict: {review.verdict_raw or review.verdict_key}   "
              f"Impact: {review.impact_score or '?'}/10 {review.impact_reason}")
         # carry_forward/restate may have replaced `review`; set the flag last.
@@ -3329,6 +3436,7 @@ _STOPPED_LABEL = {
     "high-impact-not-confirmed": "high-impact merge not confirmed",
     "unreviewed-not-confirmed": "merge without review not confirmed",
     "partial-review": "review cut short",
+    "no-changes": "nothing to review",
 }
 
 

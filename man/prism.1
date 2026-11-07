@@ -21,6 +21,8 @@ prism \- review and safely merge AWS CodeCommit pull requests, and review spec d
 \&...
 .RB [ \-\-branch
 .IR NAME ]
+.RB [ \-\-persona
+.IR NAME ]
 .RB [ \-\-requirements
 .IR DIR ]
 .RB [ \-\-no\-push ]
@@ -52,8 +54,11 @@ PRISM never guesses between them.
 .PP
 .B prism docs
 reviews requirement\-decomposition documents and specs, the same way the desktop
-application's Document review tab does. The reviewer reads the requirements the
-documents were decomposed from and the codebase, and PRISM adds its findings to
+application's Document review tab does. The reviewer reads the codebase and, when you
+give them, the requirements the documents were decomposed from, through the lens of a
+chosen persona (Business Analyst, Architect or QA; see
+.BR \-\-persona ),
+always checking security, stability and scalability. PRISM adds its findings to
 the end of each document as a \(lqPRISM review comments\(rq section, grouped by severity
 (Blocker, Major, Minor, Suggestion) with a category and a stable id such as
 .BR DR\-3 .
@@ -226,14 +231,43 @@ The frontend clone; found the same way as the backend one.
 .BI \-\-fe\-branch " NAME"
 Frontend branch. Default: the one checked out.
 .TP
-.BI \-\-requirements " DIR"
-Folder holding the requirements the documents were decomposed from. Default: saved
-.BR requirements ,
+.BI \-\-persona " NAME"
+Who reviews, each through its own lens. Default: saved
+.BR persona ,
 else
-.IR docs/requirements .
-A relative path is read from the reviewed branch of each repository (then from the
-project folder); a folder you can see from where you are is stored relative to the
-repository it lies in.
+.BR ba .
+.RS
+.TP
+.B ba
+Business Analyst, the functional side: do the document's functional requirements align
+with the requirements (when given) and with themselves, and match what the codebase
+actually does?
+.TP
+.B architect
+the technical side: the codebase's existing patterns against what the document
+proposes. Is the proposal valid, and does it lead to security loopholes, bugs or
+inconsistencies with those patterns?
+.TP
+.B qa
+the quality side: will implementing this break anything, how does it affect the quality
+of the product, and can it be tested?
+.RE
+.IP
+Security, stability and scalability are always checked, whichever persona is chosen,
+and the review states its conclusion on each. Each persona's reviews are tracked
+separately: running the Architect again follows up the Architect's earlier comments.
+.TP
+.BI \-\-requirements " DIR"
+Optional. The folder holding the requirements the documents were decomposed from.
+Default: saved
+.BR requirements ,
+else none. With it the review centres on whether the decomposition satisfies the entire
+requirement, and is consistent with the codebase's patterns. Without it, it centres on
+whether the documents are consistent with the codebase's patterns and the design is good
+to implement without breaking anything. A relative path is read from the reviewed branch
+of each repository (then from the project folder); a folder you can see from where you
+are is stored relative to the repository it lies in. A path that is given but not found
+is an error.
 .TP
 .BI \-\-model " NAME"
 Reviewer model; see
@@ -316,6 +350,7 @@ key:
     "model": "anthropic/claude\-sonnet\-5\-5",
     "instructions": "Flag missing tests",
     "requirements": "docs/requirements",
+    "persona": "architect",
     "review": true,
     "describe": true,
     "merge": false,
@@ -334,9 +369,10 @@ Text keys are
 .BR repo ,
 .BR region ,
 .BR model ,
-.B instructions
+.BR instructions ,
+.B requirements
 and
-.BR requirements ;
+.BR persona ;
 an empty value means "not set". Yes/no keys are
 .BR review ,
 .BR describe ,
@@ -358,8 +394,13 @@ reads.
 and
 .B dry_run
 apply to both commands, and
-.B requirements
-is only for documents.
+.BR requirements ,
+.B persona
+(\fBba\fR, \fBarchitect\fR or \fBqa\fR),
+.B commit
+and
+.B push
+are only for documents.
 Edit the file by hand or use:
 .PP
 .RS
@@ -412,6 +453,18 @@ Review two documents on a named branch, without pushing, then look at the result
 .PP
 .RS
 prism docs docs/spec.md docs/decomposition.md \-\-branch feat/specs \-\-no\-push
+.RE
+.PP
+Review a spec as the Architect, against the codebase alone (no requirements given):
+.PP
+.RS
+prism docs docs/spec.md \-\-persona architect
+.RE
+.PP
+Review it as QA against its requirements:
+.PP
+.RS
+prism docs docs/spec.md \-\-persona qa \-\-requirements docs/requirements
 .RE
 .PP
 Backend and frontend documents in one run, requirements kept elsewhere, in the

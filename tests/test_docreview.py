@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -222,7 +223,38 @@ class Inputs(unittest.TestCase):
         self.assertEqual(m, "PRISM-20261107-1432-ab12: review comments v1")
 
     def test_run_ids_are_unique(self):
-        self.assertEqual(len({D.new_run_id() for _ in range(50)}), 50)
+        # Many, and from many threads at once: no id is ever handed out twice.
+        import threading
+        seen, lock = [], threading.Lock()
+
+        def draw():
+            ids = [D.new_run_id() for _ in range(2000)]
+            with lock:
+                seen.extend(ids)
+        threads = [threading.Thread(target=draw) for _ in range(4)]
+        [t.start() for t in threads]
+        [t.join() for t in threads]
+        self.assertEqual(len(set(seen)), 8000)
+
+    def test_run_ids_keep_their_readable_shape(self):
+        import re
+        self.assertRegex(D.new_run_id(), r"^\d{8}-\d{4}-[0-9a-f]{6}$")
+
+    def test_a_clash_is_redrawn_not_returned(self):
+        """If the random part repeated within a minute, the id handed out would still differ."""
+        import uuid
+        real = uuid.uuid4
+        with mock.patch.object(D.time, "strftime", lambda fmt: "20261107-1432"):
+            first = D.new_run_id()
+            # The next draw reproduces first's random digits exactly (a true clash); the
+            # one after it is genuinely different.
+            clash = uuid.UUID(hex=first[-6:] + "0" * 26)
+            self.assertEqual(clash.hex[:6], first[-6:])
+            draws = iter([clash, real()])
+            with mock.patch.object(D.uuid, "uuid4", lambda: next(draws)):
+                second = D.new_run_id()
+        self.assertEqual(first[:14], second[:14])             # same minute ...
+        self.assertNotEqual(first, second)                     # ... still not the same id
 
 
 class Browsing(unittest.TestCase):
@@ -604,7 +636,8 @@ class Scheduler(unittest.TestCase):
         self.assertEqual(s.kind, "docs")
         self.assertEqual(J.JobSpec("/p", "r", "1").kind, "pr")
         self.assertIn("1 file", s.label)
-        self.assertEqual(s.summary_bits(), "document review")
+        self.assertIn("Business Analyst", s.label)
+        self.assertEqual(s.summary_bits(), "Business Analyst review · no requirements")
         self.assertEqual(s.pipeline_kwargs()["targets"], s.targets)
 
     def test_duplicate_detection_is_per_kind_and_per_document(self):
