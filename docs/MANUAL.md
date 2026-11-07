@@ -177,6 +177,61 @@ If this happens while you're looking at a different job, that job shows
 
 ---
 
+## Reviewing a document
+
+The new-job screen has two tabs: **PR review** (everything above) and
+**Document review**, for specs and requirement decomposition documents. The
+reviewer is an aid to your own review of the document, not a replacement for it.
+
+**1. Open the `Document review` tab** on `+ New job`.
+
+**2. Choose the working folder.** PRISM scans it for clones exactly as it does for
+a PR. One repository gives a single *Repository* card; several give a *Backend*
+and a *Frontend* card, pre-filled from the folder names.
+
+**3. For each repository you want reviewed, enter the branch and the document
+file name(s).** Click `Browse…` beside the file names to pick one or several
+documents at once in your desktop's file chooser — they are added as paths
+relative to the repository, next to anything you have already typed. You can also
+type paths from the repository root yourself, one per line or comma separated.
+Fill in either card or both; an empty card is skipped. (Select the clone first:
+picked files must lie inside it.)
+
+**4. Check the requirements folder.** It defaults to `docs/requirements`. Click
+`Browse` to pick the folder holding the requirements the document was
+decomposed from, as you did for the working folder. Inside a repository it is
+stored relative to it and read from the reviewed branch; elsewhere the full path
+is used. The path can still be typed.
+
+**5. Choose the stages.** *Commit* and *Push* are on by default; *Push* needs
+*Commit*. *Dry run* reviews but writes, commits and pushes nothing — the
+comments are only in the conversation.
+
+**6. Click `▶ Start Prisming`** (or `Ctrl+Enter`). Custom instructions work as
+they do for a PR.
+
+**What you get.** A **PRISM review comments** section is added at the end of each
+document: a summary, then comments grouped by severity (Blocker, Major, Minor,
+Suggestion), each with a category and an id like `DR-3`, and what the reviewer
+read and did not reach. It is committed as `PRISM-<run id>: …` and pushed to the
+branch. The verdict and impact in the job header cover all documents in the run
+(the worst verdict, the highest impact).
+
+**Reviewing again.** Run it again on the same documents after they change. Each
+run is a new numbered version in the section (older ones are folded away), and
+the reviewer first reports whether every earlier comment is resolved, partly
+resolved, still open or withdrawn. You can also ask the reviewer questions from
+the job page once it has finished.
+
+**Your work is safe.** PRISM works in a temporary copy of the branch. It never
+changes the branch checked out in your clone, your files or your uncommitted
+work. The one thing it leaves in the project folder is `.opencode/agents/` — the
+reviewer's own agent files, installed there for every review, pull request or
+document — which you may want in your `.gitignore`. If the push fails the commit
+is kept as `refs/prism/docs/<run id>-<role>` in your clone.
+
+---
+
 ## Running several PRs at once
 
 Create as many jobs as you like. **Two run at a time**; the rest wait their
@@ -313,6 +368,7 @@ another machine: ssh in and run `prism`.
     prism stop <id>            stop it              (--all stops every one)
     prism retry <id>           run it again with the same settings
     prism ask <id> "…"         ask the reviewer about a finished job
+    prism docs docs/spec.md    review a spec in the repository you are in
 
 PRISM reads the repository name and region from the clone's CodeCommit remote,
 so the folder you are in is usually all it needs. Options mirror the New job
@@ -320,10 +376,34 @@ screen: `--no-review`, `--no-describe`, `--no-merge`, `--no-sync`, `--dry-run`,
 `--model`, `--region`, `-i "extra instructions"`. If a folder holds several
 clones, say which with `--repo <name>`.
 
+**Reviewing documents from the command line.** `prism docs` is the Document
+review tab without the window. It works from where you are: the repository you
+are in, on the branch you have checked out.
+
+    prism docs docs/spec.md                          one document, here
+    prism docs docs/spec.md docs/decomp.md --branch feat/specs
+    prism docs --be docs/spec.md --fe docs/ui.md     backend and frontend
+    prism docs docs/spec.md --requirements docs/reqs --no-push
+    prism docs docs/spec.md --dry-run                review only, write nothing
+    prism docs docs/spec.md -d                       in the background
+
+Name documents as you would to a shell (relative to where you are, absolute, or
+from the repository root). With `--be` / `--fe`, PRISM finds the two clones under
+the folder by their names (`…-backend`, `…-frontend`) and asks you to say which
+is which with `--be-clone` / `--fe-clone` when the names do not tell it — it
+never guesses. `--commit/--no-commit` and `--push/--no-push` are the stages;
+`--requirements DIR` points at the requirements folder. The review shows up as a
+job like any other: `prism jobs`, `prism logs <id> -f`, `prism stop <id>`, and
+`prism retry <id>` for an incremental re-review after the author's edits.
+`prism ask <id> "why is DR-2 a blocker?"` asks the reviewer about it. The full
+list of flags is in `man prism`.
+
 **Saved defaults** live in `~/.prism/config.json`. Set them once:
 
     prism config set region eu-west-1
     prism config set merge no
+    prism config set requirements docs/requirements   (document reviews)
+    prism config set push no                          (commit, but do not push)
     prism config                show them
 
 A flag on the command always wins over a saved default.
@@ -331,6 +411,9 @@ A flag on the command always wins over a saved default.
 **Questions.** In a terminal, PRISM asks you where the desktop app would show
 its question box. A detached job has nobody to ask, so it takes the cautious
 answer: it does not resolve a conflict and does not confirm a high-impact merge.
+A document review can also stop to ask you which of two requirement folders is
+authoritative, say; in a terminal you answer there, and a detached run carries on
+without an answer.
 
 **In the desktop app.** The **CLI jobs** button in the header opens a list of
 jobs started from the command line, with **Stop** and **↻ Retry**. Click a job
@@ -358,6 +441,11 @@ prompt tells you exactly what would be lost, and defaults to staying open.
 PRISM is deliberately cautious:
 
 - It merges **only** on ✅ or ⚠️ verdicts, and only if the PR is still open.
+- **A review that didn't read your code never counts.** If PRISM can't get the
+  pull request's code (for instance the fetch from CodeCommit fails), or the
+  reviewer reports that it couldn't read the diff, the job fails with an error
+  instead of showing a verdict. Nothing is written to the pull request, nothing is
+  merged, and it is not recorded as reviewed. Fix the cause and press **Retry**.
 - It uses **fast-forward merges only** and never force-pushes.
 - If a sync hits conflicts, PRISM never picks a side for you. It backs the
   merge out, shows you each conflict, and asks which version to keep.
@@ -389,6 +477,8 @@ PRISM is deliberately cautious:
 | `⏳ Still working — 3m10s since the reviewer last reported` | Normal. Models sometimes pause for minutes between steps. PRISM keeps waiting and only stops a review that has been silent for 10 minutes or has run for 45 |
 | `(partial review)` next to a verdict | The review had to be stopped (the model stalled or ran out of time) and reported what it had covered. Its findings are written, but PRISM won't merge it automatically. Retry the job to finish it |
 | `The review did not finish` | The model gave no usable answer even when asked to wrap up. Nothing was changed on the pull request. Retry — the model's provider may be slow right now |
+| `The review did not examine this pull request …` | The reviewer couldn't read the changes (usually a failed `git fetch`, expired credentials, or a blocked shell), so there is no verdict. Nothing was written or merged. Check `git fetch origin <branch>` works in the clone, then press **Retry** |
+| `PRISM could not fetch the pull request's branches … nothing to review` | The fetch failed and the clone doesn't have the PR's latest commit. The review never started. Fix the connection or credentials, then **Retry** |
 | `Could not parse a verdict` | The reviewer didn't produce a clear verdict. Check the conversation, try a different model, run it again |
 | `Backend and Frontend point to the same clone` | Pick two different clones in Repository mapping |
 | A conflict appears in the question panel | Choose `Keep current` or `Take incoming` for each one, or `Abort sync` to stop and leave your clone untouched |

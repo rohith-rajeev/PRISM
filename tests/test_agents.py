@@ -84,6 +84,7 @@ class AgentBundle(unittest.TestCase):
             installed = {p.stem for p in Path(d, ".opencode", "agents").glob("*.md")}
             self.assertIn("pr-reviewer", installed)
             self.assertIn("conflict-analyst", installed)
+            self.assertIn("doc-reviewer", installed)
             self.assertNotIn("_shared-contract", installed,
                              "reference docs must not install as agents")
             self.assertEqual(set(names), installed)

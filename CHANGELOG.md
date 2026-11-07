@@ -4,6 +4,18 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v5.0
+
+- **Document review.** A new tab, and `prism docs` on the command line, reviews
+  specs and requirement documents against the requirements and the code. The
+  findings are written into the document as a *PRISM review comments* section,
+  committed and pushed. Running it again checks whether earlier comments were
+  resolved. It aids your review; it doesn't replace it.
+- **Fixed: a review that couldn't read the pull request could be approved and
+  merged.** It now fails instead, with nothing written or merged, and can be
+  retried.
+- The tagline under the PRISM name is gone.
+
 ## v4.9
 
 - **Fixed: PRISM would not start on Ubuntu 22.04 (including WSL) after

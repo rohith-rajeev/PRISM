@@ -1,4 +1,4 @@
-"""Choose a folder with the platform's own dialog.
+"""Choose a folder, or several files, with the platform's own dialog.
 
 Tk's built-in directory chooser is the old Motif-style one on Linux: a bare
 two-pane list with no places, no search and no typing of a path, which makes
@@ -8,7 +8,8 @@ there, and Tk's own dialog is the fallback when none is installed. macOS and
 Windows already get their native dialog from Tk and are left alone.
 
 Tk-free, so it is testable: `pick_folder` returns a path, "" for cancel, or None
-when no native chooser exists and the caller should use its own.
+when no native chooser exists and the caller should use its own. `pick_files` is
+the same for a multiple selection: a list, [] for cancel, None when unavailable.
 """
 import os
 import shutil
@@ -83,3 +84,50 @@ def pick_folder(title="Select a folder", initial=None, platform=sys.platform,
     if proc.returncode in (1, 252):   # the person pressed Cancel or closed it
         return ""
     return None                       # it failed to start (no display, bad GTK...)
+
+
+# Between file names in a multiple selection. Not "|" (zenity's default), which
+# a file name may contain; this control character cannot appear in one.
+FILE_SEP = "\x1f"
+_DOC_PATTERNS = "*.md *.markdown *.mdx *.txt *.rst *.adoc"
+
+
+def files_command(title, initial, which=shutil.which):
+    """(command line, separator) of the first native multi-file chooser, or None."""
+    start = _start_dir(initial)
+    if not start.endswith("/"):
+        start += "/"
+    if which("zenity"):
+        return (["zenity", "--file-selection", "--multiple", f"--separator={FILE_SEP}",
+                 "--title", title, "--filename", start,
+                 f"--file-filter=Documents | {_DOC_PATTERNS}", "--file-filter=All files | *"],
+                FILE_SEP)
+    if which("kdialog"):
+        return (["kdialog", "--title", title, "--getopenfilename", start, "--multiple",
+                 "--separate-output"], "\n")
+    if which("yad"):
+        return (["yad", "--file", "--multiple", f"--separator={FILE_SEP}", "--title", title,
+                 "--filename", start], FILE_SEP)
+    return None
+
+
+def pick_files(title="Select files", initial=None, platform=sys.platform,
+               which=shutil.which, run=subprocess.run):
+    """Ask for one or more files. A list on success, [] if cancelled, None if
+    no native chooser could be used. Blocks - call it from a worker thread."""
+    if not platform.startswith("linux"):
+        return None
+    found = files_command(title, initial, which)
+    if found is None:
+        return None
+    cmd, sep = found
+    try:
+        proc = run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                   universal_newlines=True, env=_clean_env())
+    except OSError:
+        return None
+    if proc.returncode == 0:
+        return [p for p in (proc.stdout or "").strip("\n").split(sep) if p.strip()]
+    if proc.returncode in (1, 252):
+        return []
+    return None

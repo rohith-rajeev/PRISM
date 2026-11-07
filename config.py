@@ -87,10 +87,13 @@ def set_codegen(**changes):
 # Stored under one "cli" key in this same file — the desktop app reads the file
 # too and ignores keys it does not use. Empty text means "not set": the CLI then
 # works it out from the current folder (see prism_cli.resolve_target).
-CLI_TEXT_KEYS = ("project_dir", "repo", "region", "model", "instructions")
-CLI_FLAG_KEYS = ("review", "describe", "merge", "sync", "dry_run")
+# `requirements`, `commit` and `push` are for `prism docs` (document review); the rest
+# are shared by both commands (`model`, `instructions`, `dry_run`) or for `prism run`.
+CLI_TEXT_KEYS = ("project_dir", "repo", "region", "model", "instructions", "requirements")
+CLI_FLAG_KEYS = ("review", "describe", "merge", "sync", "dry_run", "commit", "push")
 CLI_DEFAULTS = dict({k: "" for k in CLI_TEXT_KEYS},
-                    review=True, describe=True, merge=True, sync=True, dry_run=False)
+                    review=True, describe=True, merge=True, sync=True, dry_run=False,
+                    commit=True, push=True)
 
 
 def get_cli():
