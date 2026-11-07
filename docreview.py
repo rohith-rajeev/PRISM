@@ -21,6 +21,7 @@ it only borrows engine plumbing from orchestrator.py.
 import json
 import re
 import subprocess
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -288,9 +289,26 @@ def relevant_stages(spec):
     return stages
 
 
+_ISSUED_IDS = set()
+_ISSUED_LOCK = threading.Lock()
+
+
 def new_run_id():
-    """A readable, sortable, unique id for one run: 20261107-1432-a1b2."""
-    return f"{time.strftime('%Y%m%d-%H%M')}-{uuid.uuid4().hex[:4]}"
+    """A readable, sortable, unique id for one run: 20261107-1432-a1b2c3.
+
+    The id is how a run is found later (`git log --grep PRISM-<id>`) and it names the
+    run's temporary worktree, so two runs must never share one. Six random hex digits
+    make a clash between processes in the same minute about 1 in 16 million, and within
+    this process a clash is impossible: an id already handed out is never handed out
+    again.
+    """
+    stamp = time.strftime("%Y%m%d-%H%M")
+    with _ISSUED_LOCK:
+        while True:
+            run_id = f"{stamp}-{uuid.uuid4().hex[:6]}"
+            if run_id not in _ISSUED_IDS:
+                _ISSUED_IDS.add(run_id)
+                return run_id
 
 
 def commit_message(run_id, brief):
