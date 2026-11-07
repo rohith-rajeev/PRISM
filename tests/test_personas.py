@@ -168,6 +168,12 @@ class Pipeline(unittest.TestCase):
         return D._pipeline(project_dir=str(self.project), targets=[t],
                            emit=lambda m, *a, **k: self.log.append(m), **kw)
 
+    @staticmethod
+    def mentions(prompt, *parts):
+        """A path in the brief, spelt the way this platform spells it (docs\\requirements on
+        Windows, docs/requirements elsewhere)."""
+        return "\\".join(parts) in prompt or "/".join(parts) in prompt
+
     def remote(self):
         return sh(self.origin, "show", "feat/x:docs/spec.md")
 
@@ -180,14 +186,14 @@ class Pipeline(unittest.TestCase):
         self.assertTrue(res["pushed"])
         (prompt,) = self.prompts
         self.assertIn("NO REQUIREMENTS WERE PROVIDED", prompt)    # ... but was not asked for
-        self.assertNotIn("docs/requirements", prompt)
+        self.assertFalse(self.mentions(prompt, "docs", "requirements"))
         self.assertTrue(any("No requirements given" in m for m in self.log))
 
     def test_requirements_given_are_used(self):
         self.run_job(requirements_path="docs/requirements")
         (prompt,) = self.prompts
         self.assertIn("REQUIREMENTS PROVIDED.", prompt)
-        self.assertIn("docs/requirements", prompt)
+        self.assertTrue(self.mentions(prompt, "docs", "requirements"))
         self.assertIn("pay.md", prompt)
 
     def test_a_path_that_is_given_but_missing_is_an_error_not_silently_ignored(self):
