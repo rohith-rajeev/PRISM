@@ -83,8 +83,11 @@ class Resolution(Isolated):
         self.assertEqual(spec.targets[0].files, ("specs/not-here-yet.md",))
 
     def test_an_absolute_path_outside_the_clone_is_refused(self):
+        # A path that is absolute on every platform (not "/etc/hosts": no drive on Windows).
+        outside = self.home / "elsewhere.md"
+        outside.write_text("x", encoding="utf-8")
         with self.assertRaises(P.UsageError) as cm:
-            P.build_docs_spec(args(files=["/etc/hosts"]), cwd=self.clone)
+            P.build_docs_spec(args(files=[str(outside)]), cwd=self.clone)
         self.assertIn("not inside", str(cm.exception))
 
     def test_flags_beat_saved_defaults_which_beat_built_ins(self):
@@ -460,8 +463,10 @@ class Detached(Isolated):
         env = {"HOME": str(self.home), "USERPROFILE": str(self.home), "PATH": str(bin_dir),
                "SYSTEMROOT": os.environ.get("SYSTEMROOT", "")}
         run = subprocess.run(
+            # --branch given explicitly: the stripped-down PATH below is only reliable for
+            # git on POSIX, and this test is about the detached plumbing, not branch lookup.
             [sys.executable, str(ROOT / "prism_cli.py"), "docs", "docs/spec.md", "--path",
-             str(clone), "--detach", "--dry-run"],
+             str(clone), "--branch", "feat/x", "--detach", "--dry-run"],
             env=env, cwd=str(clone), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             universal_newlines=True, timeout=60)
         self.assertEqual(run.returncode, 0, run.stderr)
