@@ -567,6 +567,10 @@ class PromptWiring(Isolated):
 
     def prompt(self, history, incremental=None, instructions=""):
         captured = {}
+        # These tests are about the prompt, not about fetching: model a clone whose
+        # fetch worked (a failed fetch with the PR's commit missing now stops the
+        # review early - see tests/test_review_integrity.py).
+        o._fetch_pr_refs = lambda *a, **k: True
         o._incremental_context = lambda *a, **k: incremental
         o.ensure_bundled_agents = lambda *a, **k: None
         o.require_engine = lambda: "opencode"

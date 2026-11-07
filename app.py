@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""PRISM — Pull Request Inspection & Safety Manager.
+"""PRISM — desktop UI (stdlib only).
 
-Lightweight desktop UI (stdlib only) that reviews AWS CodeCommit pull
-requests with a bundled reviewer agent, updates the PR description, and
-auto-merges on approval. Project-agnostic: works with any CodeCommit
-repository + local clone.
+Reviews AWS CodeCommit pull requests with a bundled reviewer agent, updates
+the PR description, and auto-merges on approval; and reviews requirement and
+spec documents, writing the review into the document and pushing it.
+Project-agnostic: works with any repository + local clone.
 
 Run:  python3 app.py   (or ./run.sh, or the packaged desktop build)
 """
@@ -34,6 +34,7 @@ import cli_jobs as CJ  # noqa: E402
 import folderpicker  # noqa: E402
 import prism_cli as PC  # noqa: E402
 import jobs as J  # noqa: E402
+import docreview as DR  # noqa: E402
 import updater as U  # noqa: E402
 from orchestrator import TOOL_DIR  # noqa: E402
 from version import __version__ as APP_VERSION  # noqa: E402
@@ -157,6 +158,16 @@ STAGE_DEFS = [
 ]
 STAGE_LABEL = dict(STAGE_DEFS)
 
+# The stages of a documentation review, kept apart from the pull-request set so
+# the latter (and the placeholder bar shown before any job exists) never changes.
+DOC_STAGE_DEFS = [
+    (DR.STAGE_DOC_REVIEW, "Review"),
+    (DR.STAGE_DOC_WRITE, "Write"),
+    (DR.STAGE_DOC_COMMIT, "Commit"),
+    (DR.STAGE_DOC_PUSH, "Push"),
+]
+ALL_STAGE_DEFS = STAGE_DEFS + DOC_STAGE_DEFS
+
 
 def _relevant_stages(spec):
     """Which of STAGE_DEFS this job's own configuration could ever touch —
@@ -164,6 +175,8 @@ def _relevant_stages(spec):
     (which depends on it), and one that skips merge has nothing for Merge
     check or Merge. Shown for a specific job, not the fixed set every run
     used to render regardless of what it was actually going to do."""
+    if getattr(spec, "kind", "pr") == "docs":
+        return DR.relevant_stages(spec)
     stages = []
     if spec.do_review:
         stages.append(STAGE_REVIEW)
@@ -453,7 +466,7 @@ class ProgressBar(tk.Canvas):
         an empty result) falls back to the full set, so the placeholder
         shown before any job exists still reads as a normal-looking bar.
         """
-        self._defs = [d for d in STAGE_DEFS if d[0] in stages] if stages else list(STAGE_DEFS)
+        self._defs = [d for d in ALL_STAGE_DEFS if d[0] in stages] if stages else list(STAGE_DEFS)
         self.states = {sid: "pending" for sid, _ in self._defs}
         self.notes = {}
         self._draw()
@@ -1056,6 +1069,10 @@ class JobRow(RoundedCard):
                  J.DONE: "Finished"}.get(job.status, job.status)
         if job.status == J.DONE and (job.result or {}).get("merged") is True:
             label = "Merged ✓"
+        elif job.status == J.DONE and (job.result or {}).get("pushed") is True:
+            label = "Pushed ✓"
+        elif job.status == J.DONE and (job.result or {}).get("committed") is True:
+            label = "Committed ✓"
         self.sub.config(text="  ·  ".join(filter(None, [
             label, job.branches, f"by {job.author}" if job.author else "",
             job.spec.summary_bits()])))
@@ -1218,6 +1235,10 @@ class CliJobRow(RoundedCard):
             word = "Starting…"
         if status == J.DONE and record.get("merged") is True:
             word = "Merged ✓"
+        elif status == J.DONE and record.get("pushed") is True:
+            word = "Pushed ✓"
+        elif status == J.DONE and record.get("committed") is True:
+            word = "Committed ✓"
         where = record.get("host") if record.get("host") not in (None, socket.gethostname()) \
             else ""
         bits = [word]
@@ -2010,6 +2031,482 @@ class UpdateDialog(tk.Toplevel):
         self.destroy()
 
 
+class TopScrollFrame(ScrollFrame):
+    """A ScrollFrame whose content always starts at the top.
+
+    The scroll region is never allowed to be smaller than the visible area, so
+    the canvas has no spare room to place a short form anywhere but the top, and
+    a form that fits is pinned to offset zero. (ScrollFrame itself is left as it
+    is: the jobs list relies on it.)
+    """
+
+    def _fit_region(self):
+        w = max(self.canvas.winfo_width(), self.inner.winfo_reqwidth(), 1)
+        need_h = self.inner.winfo_reqheight()
+        view_h = self.canvas.winfo_height()
+        self.canvas.configure(scrollregion=(0, 0, w, max(need_h, view_h)))
+        if need_h <= view_h:
+            self.canvas.yview_moveto(0)
+
+    def resize_content(self):
+        super().resize_content()
+        self._fit_region()
+
+    def _resized(self, e):
+        super()._resized(e)
+        self._fit_region()
+
+
+class DocReviewForm(tk.Frame):
+    """The "Document review" tab of the new-job screen.
+
+    A self-contained form: it owns its own state and widgets and never reads or
+    writes the pull-request form next to it. It uses the same selectors - a
+    working folder that is scanned for clones, a clone picker per repository, the
+    model picker - but asks for branches and document file names instead of a PR
+    id. Both repositories are optional; fill in either or both.
+    """
+
+    ROLES = ("BE", "FE")
+
+    def __init__(self, parent, app):
+        super().__init__(parent, bg=PAL["page"])
+        self.app = app
+        self.mode = "single"          # "single" (one repository) or "multi" (BE + FE)
+        self.detected = []            # [(name, path)] found under the working folder
+        self.cards = {}
+        self._detect_job = None
+        lab, entry = app._lab, app._entry
+
+        # The Start button is pinned below a scrolling body, so it stays
+        # reachable in a short window however tall the form is.
+        arow = tk.Frame(self, bg=PAL["page"])
+        arow.pack(side="bottom", fill="x", pady=(2, 0))
+        self.scroll = TopScrollFrame(self)
+        self.scroll.pack(fill="both", expand=True)
+        self.scroll.canvas.bind("<Configure>", self._canvas_resized, add="+")
+        body = self.scroll.inner
+
+        # ---- project ----
+        pc = RoundedCard(body)
+        pc.pack(fill="x", pady=(0, 6))
+        pi = pc.inner
+        pi.config(padx=12, pady=5)
+        lab(pi, "Project", font=FONT_B, fg="text").pack(anchor="w", pady=(0, 2))
+        lab(pi, "Working folder").pack(anchor="w", pady=(0, 4))
+        frow = tk.Frame(pi, bg=PAL["card"])
+        frow.pack(fill="x")
+        self.proj_var = tk.StringVar(value=_default_project_dir())
+        entry(frow, self.proj_var, mono=True).pack(side="left", fill="x", expand=True,
+                                                   ipady=3, padx=(0, 10))
+        RoundedButton(frow, text="Browse", command=self._browse, style="outline",
+                      height=32, width=110).pack(side="left")
+        self.hint = self._hint_label(pi, "", pady=(4, 0))
+
+        # ---- the repositories whose documents are reviewed ----
+        self.reporow = tk.Frame(body, bg=PAL["page"])
+        self.reporow.pack(fill="x", pady=(0, 6))
+        self.reporow.columnconfigure(0, weight=1, uniform="doc")
+        self.reporow.columnconfigure(1, weight=1, uniform="doc")
+        for col, role in enumerate(self.ROLES):
+            self.cards[role] = self._build_card(role, col)
+
+        # ---- requirements + instructions (left), model + stages (right) ----
+        mid = tk.Frame(body, bg=PAL["page"])
+        mid.pack(fill="x", pady=(0, 6))
+        mid.columnconfigure(0, weight=1, uniform="dmid")
+        mid.columnconfigure(1, weight=1, uniform="dmid")
+
+        rc = RoundedCard(mid)
+        rc.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
+        ri = rc.inner
+        ri.config(padx=12, pady=6)
+        lab(ri, "Requirements", font=FONT_B, fg="text").pack(anchor="w")
+        self._hint_label(ri, "Folder holding the requirements this document was "
+                             "decomposed from.", font=FONT_S, pady=(0, 4))
+        self.req_var = tk.StringVar(value=DR.DEFAULT_REQUIREMENTS_DIR)
+        rrow = tk.Frame(ri, bg=PAL["card"])
+        rrow.pack(fill="x")
+        entry(rrow, self.req_var, mono=True).pack(side="left", fill="x", expand=True,
+                                                  ipady=3, padx=(0, 8))
+        RoundedButton(rrow, text="Browse", command=self._browse_requirements,
+                      style="outline", height=30, width=90, font=FONT_S).pack(side="left")
+        self._hint_label(ri, "Inside a repository it is kept relative to it; otherwise "
+                             "the full path is used.", pady=(2, 0))
+        lab(ri, "Custom instructions (optional)").pack(anchor="w", pady=(8, 2))
+        self.instr_text = self._text_box(ri, 3)
+        self._hint_label(ri, "e.g. \"pay extra attention to the payment retries\" or "
+                             "\"ignore the glossary\"", pady=(2, 0))
+
+        mc = RoundedCard(mid)
+        mc.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
+        mi = mc.inner
+        mi.config(padx=12, pady=6)
+        mhead = tk.Frame(mi, bg=PAL["card"])
+        mhead.pack(fill="x")
+        lab(mhead, "Model and behavior", font=FONT_B, fg="text").pack(side="left")
+        self.model_picker = Picker(mi, title="SELECT MODEL", empty_label="Default model",
+                                   group_key=None, empty_hint="Loading models…")
+        self.model_picker.pack(fill="x", pady=(6, 4))
+        self.model_picker.set_custom(DEFAULT_MODEL)
+        self.commit_var = tk.BooleanVar(value=True)
+        self.push_var = tk.BooleanVar(value=True)
+        self.dry_var = tk.BooleanVar(value=False)
+        CheckRow(mi, "Commit the review comments to the branch",
+                 self.commit_var, on_change=self._sync_stages).pack(anchor="w")
+        self.push_row = CheckRow(mi, "Push the commit to the remote", self.push_var)
+        self.push_row.pack(anchor="w")
+        self.dry_row = CheckRow(mi, "Dry run — review only, write nothing", self.dry_var,
+                                muted=True, on_change=self._sync_stages)
+        self.dry_row.pack(anchor="w")
+        self._hint_label(mi, "The review is written into each document as a \"PRISM review "
+                             "comments\" section, to aid your own review — not replace "
+                             "it.", pady=(6, 0))
+        self._sync_stages()
+
+        # ---- actions ----
+        self.run_btn = RoundedButton(arow, text="▶  Start Prisming", command=app._start,
+                                     style="primary", height=38, radius=10,
+                                     font=(_FAMILY, _pt(11), "bold"))
+        self.run_btn.pack(side="left", fill="x", expand=True)
+        Tooltip(self.run_btn, lambda: "Ctrl+Enter")
+        RoundedButton(arow, text="Cancel", command=app._cancel_new, style="outline",
+                      height=38, radius=10, font=FONT_B,
+                      width=120).pack(side="left", padx=(8, 0))
+        self.proj_var.trace_add("write", self._on_proj_changed)
+        self.refresh_detection()
+
+    # ----- building blocks -----
+    def _hint_label(self, parent, text, font=FONT_XS, fg="muted", pady=(0, 0),
+                    inline=False):
+        """A note that wraps to its card, packed by this call.
+
+        It asks for almost no width of its own (width=1) and stretches to the
+        card. Left to ask for its text, a wrapping label requests its whole
+        wraplength, so a card could never get narrower than it had once been
+        and the row grew past the window."""
+        lb = self.app._lab(parent, text, font=font, fg=fg)
+        lb.config(justify="left", anchor="w", width=1, wraplength=200)
+        # inline: beside a sibling (a button) instead of on its own line.
+        lb.pack(fill="x", anchor="w", pady=pady,
+                **({"side": "left", "expand": True} if inline else {}))
+        # Wraps to the width the label actually gets, wherever it sits.
+        lb.bind("<Configure>", lambda e, w=lb: w.config(wraplength=max(80, e.width - 4)))
+        return lb
+
+    def _text_box(self, parent, height):
+        # width=1: a Text asks for 80 characters by default, which made each
+        # card demand more than half the window and the two overlap.
+        box = tk.Text(parent, height=height, width=1, font=FONT_S, bg=PAL["field"],
+                      fg=PAL["text"],
+                      insertbackground=PAL["text"], relief="flat", wrap="word",
+                      highlightthickness=1, highlightbackground=PAL["border"],
+                      highlightcolor=PAL["accent"])
+        box.pack(fill="x")
+        box.bind("<Control-Return>", self.app._start_hotkey)
+        box.bind("<Control-KP_Enter>", self.app._start_hotkey)
+        return box
+
+    def _build_card(self, role, col):
+        app = self.app
+        card = RoundedCard(self.reporow)
+        inner = card.inner
+        inner.config(padx=12, pady=6)
+        title = app._lab(inner, "", font=FONT_B, fg="text")
+        title.pack(anchor="w")
+        sub = self._hint_label(inner, "Optional — leave empty to skip this repository.",
+                               pady=(0, 4))
+        app._lab(inner, "Clone").pack(anchor="w", pady=(0, 2))
+        picker = Picker(inner, title="SELECT CLONE", empty_label="Select clone…",
+                        group_key=lambda m: "", empty_hint="No clones detected")
+        picker.pack(fill="x")
+        app._lab(inner, "Branch").pack(anchor="w", pady=(6, 2))
+        branch_var = tk.StringVar()
+        app._entry(inner, branch_var, mono=True).pack(fill="x", ipady=3)
+        app._lab(inner, "Document file name(s)").pack(anchor="w", pady=(6, 2))
+        files = self._text_box(inner, 3)
+        # Under the box it belongs to - beside the label it sat right below the
+        # Branch field and read as that field's button.
+        brow = tk.Frame(inner, bg=PAL["card"])
+        brow.pack(fill="x", pady=(4, 0))
+        browse = RoundedButton(brow, text="Browse files…",
+                               command=lambda r=role: self._browse_files(r),
+                               style="outline", height=26, width=116, font=FONT_XS)
+        browse.pack(side="left", padx=(0, 8))
+        self._hint_label(brow, "Pick several, or type paths from the repository root "
+                               "(one per line or comma separated).", inline=True)
+        return {"card": card, "title": title, "sub": sub, "picker": picker,
+                "branch": branch_var, "files": files, "browse": browse, "col": col}
+
+    def _sync_stages(self):
+        """Push needs a commit, and neither means anything in a dry run."""
+        dry = self.dry_var.get()
+        committing = self.commit_var.get() and not dry
+        self.push_row.set_enabled(committing)
+
+    def pickers(self):
+        return [c["picker"] for c in self.cards.values()] + [self.model_picker]
+
+    # ----- working folder and clones -----
+    def _dialog(self, fn, done):
+        """Run a blocking native dialog off the UI thread, then call done(result)
+        on it. Tk must only be touched from this thread, so the answer is polled."""
+        app = self.app
+        if app._browsing:
+            return
+        app._browsing = True
+        box = {}
+
+        def work():
+            box["result"] = fn()
+
+        worker = threading.Thread(target=work, daemon=True)
+        worker.start()
+
+        def poll():
+            if worker.is_alive():
+                self.after(100, poll)
+                return
+            app._browsing = False
+            done(box.get("result"))
+        self.after(100, poll)
+
+    def _browse_folder(self, title, start, apply):
+        """Pick a folder with the platform's own chooser (Tk's as the fallback)."""
+        def finish(path):
+            if path is None:         # no native chooser, or it could not open
+                path = filedialog.askdirectory(title=title, initialdir=start or None)
+            if path:
+                apply(path)
+        if not folderpicker.native_available():
+            return finish(None)
+        self._dialog(lambda: folderpicker.pick_folder(title, start), finish)
+
+    def _browse(self):
+        self._browse_folder("Select project root folder", self.proj_var.get().strip(),
+                            self.proj_var.set)
+
+    def _clone_paths(self):
+        """Roots a picked path may be made relative to: the chosen clones, then the
+        working folder."""
+        by_name = dict(self.detected)
+        roots = [by_name[c["picker"].get().strip()] for c in self.cards.values()
+                 if c["picker"].get().strip() in by_name]
+        wd = self.proj_var.get().strip()
+        return roots + ([wd] if wd else [])
+
+    def _browse_requirements(self):
+        start = self.proj_var.get().strip()
+        roots = self._clone_paths()
+        self._browse_folder(
+            "Select the requirements folder", roots[0] if roots else start,
+            lambda path: self.req_var.set(DR.relativise_folder(path, roots)))
+
+    def _browse_files(self, role):
+        """Pick several documents at once; they are added as repository-relative
+        paths, next to anything already typed."""
+        card = self.cards[role]
+        repo = dict(self.detected).get(card["picker"].get().strip())
+        if not repo:
+            show_warning(self.app, "Clone",
+                         "Select the clone first - file paths are taken relative to it.")
+            return
+        title = "Select the document(s) to review"
+
+        def finish(paths):
+            if paths is None:        # no native chooser, or it could not open
+                paths = list(filedialog.askopenfilenames(title=title, initialdir=repo))
+            if not paths:
+                return
+            rels, skipped = DR.repo_relative(paths, repo)
+            have = list(DR.parse_files(card["files"].get("1.0", "end")))
+            merged = have + [r for r in rels if r not in have]
+            # Built before the box is touched: nothing typed is lost if it fails.
+            card["files"].delete("1.0", "end")
+            card["files"].insert("1.0", "\n".join(merged))
+            if skipped:
+                show_warning(self.app, "Outside the repository",
+                             "These are not inside the selected repository, so they were "
+                             "not added:\n\n" + "\n".join(skipped[:8]))
+        if not folderpicker.native_available():
+            return finish(None)
+        self._dialog(lambda: folderpicker.pick_files(title, repo), finish)
+
+    def _canvas_resized(self, _e):
+        self.scroll._fit_region()
+
+    def _on_proj_changed(self, *_a):
+        if self._detect_job is not None:
+            try:
+                self.after_cancel(self._detect_job)
+            except Exception:  # noqa: BLE001
+                pass
+        self._detect_job = self.after(400, self.refresh_detection)
+
+    def _set_hint(self, text, colour):
+        self.hint.config(text=text, fg=PAL[colour])
+
+    def refresh_detection(self):
+        """Scan the working folder, the same way the pull-request form does.
+
+        The root is itself a repository, or holds at most one: a single
+        repository, one card. Two or more clones: a Backend and a Frontend card,
+        pre-filled from folder-name conventions.
+        """
+        self._detect_job = None
+        raw = self.proj_var.get().strip()
+        base = Path(raw).expanduser() if raw else None
+        self.detected = []
+        if base is None or not base.is_dir():
+            self.mode = "single"
+            self._layout()
+            self._set_hint("Select your project folder to begin — PRISM scans it for git "
+                           "clones." if base is None else "Select a valid root folder.",
+                           "muted" if base is None else "bad")
+            return
+        resolved = base.resolve()
+        found = detect_local_repos(str(base))
+        subs = [(n, p) for n, p in found if Path(p) != resolved]
+        if (base / ".git").exists() or len(subs) <= 1:
+            self.mode = "single"
+            self.detected = found if (base / ".git").exists() else subs
+            self._layout()
+            if self.detected:
+                name = self.detected[0][0]
+                self.cards["BE"]["picker"].set_models([n for n, _ in self.detected])
+                self.cards["BE"]["picker"].set_custom(name)
+                self._set_hint(f"Single repository: {name}.", "muted")
+            else:
+                self._set_hint("No local clones found — a document review needs a clone "
+                               "of the repository to read and commit in.", "warn")
+        else:
+            self.mode = "multi"
+            self.detected = subs
+            names = [n for n, _ in subs]
+            for c in self.cards.values():
+                c["picker"].set_models(names)
+            be = next((n for n in names if _guess_role(n) == "BE"), "")
+            fe = next((n for n in names if _guess_role(n) == "FE"), "")
+            if be and not fe and len(names) == 2:
+                fe = next(n for n in names if n != be)
+            if fe and not be and len(names) == 2:
+                be = next(n for n in names if n != fe)
+            if be:
+                self.cards["BE"]["picker"].set_custom(be)
+            if fe:
+                self.cards["FE"]["picker"].set_custom(fe)
+            self._layout()
+            self._set_hint(f"{len(subs)} clones detected — fill in the repository or "
+                           f"repositories whose documents you want reviewed.", "muted")
+
+    def _layout(self):
+        be, fe = self.cards["BE"], self.cards["FE"]
+        if self.mode == "multi":
+            be["title"].config(text="Backend repository")
+            # columnspan is stated every time: grid keeps the options of the last
+            # call, and a leftover span of 2 from the single-repo layout left the
+            # Backend card full width underneath the Frontend one.
+            be["card"].grid(row=0, column=0, columnspan=1, sticky="nsew", padx=(0, 5))
+            fe["title"].config(text="Frontend repository")
+            fe["card"].grid(row=0, column=1, columnspan=1, sticky="nsew", padx=(5, 0))
+            be["sub"].config(text="Optional — leave empty to skip this repository.")
+        else:
+            be["title"].config(text="Repository")
+            be["sub"].config(text="The branch and documents to review.")
+            be["card"].grid(row=0, column=0, columnspan=2, sticky="nsew", padx=0)
+            fe["card"].grid_remove()
+        self.app._repaint(self.reporow)
+
+    # ----- reading the form -----
+    def _active(self):
+        return ("BE",) if self.mode == "single" else self.ROLES
+
+    def _used(self, role):
+        c = self.cards[role]
+        return bool(c["branch"].get().strip() or DR.parse_files(c["files"].get("1.0", "end")))
+
+    def problem(self):
+        """(title, message) for what is wrong with the form, or None when ready."""
+        if not Path(self.proj_var.get().strip()).is_dir():
+            return "Project folder", "Pick a valid root folder first."
+        by_name = dict(self.detected)
+        if not by_name:
+            return "Repository", ("No local clone was found in that folder. A document "
+                                  "review reads, commits and pushes in a local clone.")
+        used = [r for r in self._active() if self._used(r)]
+        if not used:
+            return "Documents", ("Enter a branch and the document file name(s) to review"
+                                 + (" — for either or both repositories."
+                                    if self.mode == "multi" else "."))
+        seen = {}
+        for role in used:
+            c = self.cards[role]
+            label = "Repository" if self.mode == "single" else (
+                "Backend" if role == "BE" else "Frontend")
+            name = c["picker"].get().strip()
+            if name not in by_name:
+                return label, f"Select the {label.lower()} clone."
+            bad = DR.check_branch(c["branch"].get())
+            if bad:
+                return label, f"{bad[0].upper()}{bad[1:]}."
+            if not DR.parse_files(c["files"].get("1.0", "end")):
+                return label, "Enter the document file name(s) to review."
+            if by_name[name] in seen:
+                return "Mapping", "Backend and Frontend point to the same clone."
+            seen[by_name[name]] = role
+        if not self.req_var.get().strip():
+            return "Requirements", "Enter the folder that holds the requirements."
+        return None
+
+    def build_spec(self):
+        by_name = dict(self.detected)
+        targets = []
+        for role in self._active():
+            if not self._used(role):
+                continue
+            c = self.cards[role]
+            name = c["picker"].get().strip()
+            targets.append(DR.DocTarget(
+                role="repo" if self.mode == "single" else role, repo_name=name,
+                local_repo=by_name[name], branch=c["branch"].get().strip(),
+                files=DR.parse_files(c["files"].get("1.0", "end"))))
+        return DR.DocJobSpec(
+            project_dir=self.proj_var.get().strip(), targets=tuple(targets),
+            requirements_path=self.req_var.get().strip() or DR.DEFAULT_REQUIREMENTS_DIR,
+            model=self.model_picker.get() or None,
+            do_commit=self.commit_var.get(), do_push=self.push_var.get(),
+            dry_run=self.dry_var.get(),
+            custom_instructions=self.instr_text.get("1.0", "end").strip())
+
+    def populate(self, spec):
+        """Seed the form from a previous document job."""
+        self.proj_var.set(spec.project_dir)
+        self.refresh_detection()
+        self.req_var.set(spec.requirements_path)
+        self.commit_var.set(spec.do_commit)
+        self.push_var.set(spec.do_push)
+        self.dry_var.set(spec.dry_run)
+        self._sync_stages()
+        self.instr_text.delete("1.0", "end")
+        self.instr_text.insert("1.0", spec.custom_instructions or "")
+        for c in self.cards.values():
+            c["branch"].set("")
+            c["files"].delete("1.0", "end")
+        for t in spec.targets:
+            role = "BE" if (t.role == "repo" or self.mode == "single") else t.role
+            c = self.cards.get(role)
+            if c is None:
+                continue
+            c["picker"].set_custom(t.repo_name)
+            c["branch"].set(t.branch)
+            c["files"].insert("1.0", "\n".join(t.files))
+
+    def set_models(self, models, hint=None):
+        self.model_picker.set_models(models)
+        if hint is not None:
+            self.model_picker.set_empty_hint(hint)
+
+
 class App(tk.Tk):
     """Controller. Owns the jobs, the queue pump, and four sibling screens.
 
@@ -2097,9 +2594,6 @@ class App(tk.Tk):
         self._title_lb = tk.Label(titles, text="PRISM", font=TITLE_F,
                                   bg=PAL["page"], fg=PAL["text"])
         self._title_lb.pack(anchor="w")
-        self._sub_lb = tk.Label(titles, text="Pull request inspection and safety manager",
-                                font=FONT_S, bg=PAL["page"], fg=PAL["muted"])
-        self._sub_lb.pack(anchor="w")
         self.pill = StatusPill(h)
         self.pill.pack(side="right")
         self.pill.set("Idle", "muted")
@@ -2138,7 +2632,8 @@ class App(tk.Tk):
         self._build_jobs_screen(self.jobs_screen)
         self._build_cli_detail_screen(self.cli_detail_screen)
         self._build_cli_screen(self.cli_screen)
-        self._build_new_screen(self.new_screen)
+        self._build_new_tabs(self.new_screen)
+        self._build_new_screen(self.pr_form)
         self._build_detail_screen(self.detail_screen)
         self._build_help_screen(self.help_screen)
 
@@ -2534,6 +3029,37 @@ class App(tk.Tk):
         self._show_screen(self.help_screen)
 
     # ---------------- screen 2: set up a new job ----------------
+    def _build_new_tabs(self, parent):
+        """Tab selector for the new-job screen: pull-request review, or document
+        review. Each tab is its own form with its own state; the pull-request one
+        is the original form, built unchanged into `self.pr_form`."""
+        bar = tk.Frame(parent, bg=PAL["page"])
+        bar.pack(fill="x", pady=(0, 8))
+        self.tab_pr_btn = RoundedButton(bar, text="PR review", height=32, width=140,
+                                        font=FONT_B, command=lambda: self._show_new_tab("pr"))
+        self.tab_doc_btn = RoundedButton(bar, text="Document review", height=32, width=170,
+                                         font=FONT_B, command=lambda: self._show_new_tab("docs"))
+        self.tab_pr_btn.pack(side="left", padx=(0, 6))
+        self.tab_doc_btn.pack(side="left")
+        self.pr_form = tk.Frame(parent, bg=PAL["page"])
+        self.doc_form = DocReviewForm(parent, self)
+        self.new_tab = "pr"
+        self._show_new_tab("pr", repaint=False)
+
+    def _show_new_tab(self, tab, repaint=True):
+        self._close_pickers()
+        self.new_tab = tab
+        self.tab_pr_btn.set_selected(tab == "pr")
+        self.tab_doc_btn.set_selected(tab == "docs")
+        shown, hidden = ((self.pr_form, self.doc_form) if tab == "pr"
+                         else (self.doc_form, self.pr_form))
+        if hidden.winfo_manager():
+            hidden.pack_forget()
+        if not shown.winfo_manager():
+            shown.pack(fill="both", expand=True)
+        if repaint:
+            self._repaint(shown)
+
     def _build_new_screen(self, parent):
         root = parent
         # ---- Project card ----
@@ -2879,6 +3405,8 @@ class App(tk.Tk):
 
     def _apply_models(self, models):
         self.model_picker.set_models(models)
+        if getattr(self, "doc_form", None) is not None:
+            self.doc_form.set_models(models)
         n_prov = len({m.partition("/")[0] for m in models}) if models else 0
         if models:
             self._models_retries = 0
@@ -3216,7 +3744,12 @@ class App(tk.Tk):
     def show_new(self, spec=None):
         spec = spec or self.last_spec
         if spec is not None:
-            self._populate_form(spec)
+            if getattr(spec, "kind", "pr") == "docs":
+                self.doc_form.populate(spec)
+                self._show_new_tab("docs", repaint=False)
+            else:
+                self._populate_form(spec)
+                self._show_new_tab("pr", repaint=False)
         self._show_screen(self.new_screen)
 
     def _new_from_detail(self):
@@ -3244,9 +3777,12 @@ class App(tk.Tk):
         self._refresh_pill()
 
     def _close_pickers(self):
-        for picker in (getattr(self, "be_picker", None),
-                       getattr(self, "fe_picker", None),
-                       getattr(self, "model_picker", None)):
+        pickers = [getattr(self, "be_picker", None), getattr(self, "fe_picker", None),
+                   getattr(self, "model_picker", None)]
+        form = getattr(self, "doc_form", None)
+        if form is not None:
+            pickers += form.pickers()
+        for picker in pickers:
             if picker is not None:
                 picker.close()
 
@@ -3453,6 +3989,8 @@ class App(tk.Tk):
         if record is None:
             return self._poll_cli(force=True)
         spec = record.get("spec") or {}
+        if spec.get("kind") == "docs":
+            return self._retry_cli_docs_job(job_id, record)
         dup = CJ.find_active(spec.get("repo_name"), spec.get("pr_id"))
         if dup is not None and dup.get("id") != job_id:
             show_warning(self, "Already running",
@@ -3463,6 +4001,27 @@ class App(tk.Tk):
                 pr_id=str(spec.get("pr_id") or ""))) is not None:
             show_warning(self, "Already running",
                          f"{CJ.label(record)} is already being reviewed in this window.")
+            return
+        try:
+            CJ.spawn_detached(["retry", job_id, "--quiet"])
+        except OSError as e:
+            show_warning(self, "Could not start", f"Could not start the CLI: {e}")
+            return
+        self.cli_pending[job_id] = time.time()
+        self._poll_cli(force=True)
+
+    def _retry_cli_docs_job(self, job_id, record):
+        """Retry of a CLI document review - the same guards and launch as a PR."""
+        try:
+            spec = CJ.spec_from_dict(record.get("spec"))
+        except ValueError as e:
+            show_warning(self, "Cannot retry", str(e))
+            return
+        dup = CJ.find_duplicate(spec)
+        if (dup is not None and dup.get("id") != job_id) or \
+                self.manager.duplicate_of(spec) is not None:
+            show_warning(self, "Already running",
+                         f"{CJ.label(record)} is already being reviewed.")
             return
         try:
             CJ.spawn_detached(["retry", job_id, "--quiet"])
@@ -3571,13 +4130,41 @@ class App(tk.Tk):
         """
         if self.screen is not self.new_screen or self.grab_current() is not None:
             return None
-        if self._form_problem() is not None:
+        problem = (self.doc_form.problem() if self.new_tab == "docs"
+                   else self._form_problem())
+        if problem is not None:
             self.bell()
             return "break"
         self._start()
         return "break"
 
+    def _start_docs(self):
+        """Start a documentation review from its tab."""
+        problem = self.doc_form.problem()
+        if problem is not None:
+            show_warning(self, *problem)
+            return
+        spec = self.doc_form.build_spec()
+        elsewhere = CJ.find_duplicate(spec)
+        if elsewhere is not None:
+            show_warning(self, "Already running",
+                         f"{spec.label} is already being reviewed from the command line "
+                         f"(job {elsewhere['id']}).")
+            return
+        try:
+            job = self.manager.create(spec)
+        except J.DuplicateJob as e:
+            show_warning(self, "Already running", str(e))
+            return
+        self.last_spec = spec
+        self.manager.pump()
+        self._refresh_jobs_list()
+        self._refresh_pill()
+        self.show_detail(job.id)
+
     def _start(self):
+        if self.new_tab == "docs":
+            return self._start_docs()
         spec = self._build_spec()
         if spec is None:
             return
@@ -3751,6 +4338,8 @@ class App(tk.Tk):
     _NOTE_PLACEHOLDER = "Add an instruction — the reviewer picks it up at its next turn…"
     _ASK_PLACEHOLDER = ("Ask about this pull request — the reviewer answers from this "
                         "job's context…")
+    _ASK_DOCS_PLACEHOLDER = ("Ask about this document review — the reviewer answers from "
+                             "what it read…")
     _ASK_BUSY_PLACEHOLDER = "Waiting for the reviewer's answer…"
 
     def _update_note_controls(self, job):
@@ -3763,8 +4352,11 @@ class App(tk.Tk):
         """
         if job.is_terminal:
             enabled = not job.followup_busy
+            ask_text = (self._ASK_DOCS_PLACEHOLDER
+                        if getattr(job.spec, "kind", "pr") == "docs"
+                        else self._ASK_PLACEHOLDER)
             _set_placeholder(self.note_entry, self._ASK_BUSY_PLACEHOLDER
-                             if job.followup_busy else self._ASK_PLACEHOLDER)
+                             if job.followup_busy else ask_text)
             self.note_send_btn.set_text("Ask")
         else:
             enabled = job.is_active
@@ -4015,7 +4607,7 @@ class App(tk.Tk):
                 job.status = J.ERROR
                 job.error = payload
                 job.append_log(f"\n⛔ ERROR: {payload}", "err")
-            for sid in [s for s, _ in STAGE_DEFS]:
+            for sid in [s for s, _ in ALL_STAGE_DEFS]:
                 if job.stages.get(sid) == "active":
                     job.stages[sid] = "error"
             job.pending_question = None

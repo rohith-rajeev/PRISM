@@ -1,8 +1,9 @@
-# PRISM — Pull Request Inspection & Safety Manager
+# PRISM
 
 Lightweight, project-agnostic desktop UI (Python **stdlib only** — Tkinter,
 no pip packages) that reviews AWS CodeCommit pull requests end-to-end for
-**any** repository.
+**any** repository, and reviews requirement and spec documents before work
+starts on them (see [Document review](#document-review)).
 
 ## Jobs
 Each pull request runs as its own **job**, and several run at once. PRISM opens
@@ -77,6 +78,50 @@ first — and, once the job has finished, ask the reviewer follow-up questions
 about that PR (read-only; unrelated requests are declined). A
 **Custom instructions** field on the new-job screen does the same before a
 review even starts.
+
+## Document review
+The second tab of the new-job screen reviews **specs and requirement
+decomposition documents** before spec-driven development starts. It is an aid to
+a human reviewer, never a replacement: the comments are written into the
+document for a person to read, challenge and decide on.
+
+You give it the same working folder and clone selectors as a PR review, but
+instead of a PR id: the **branch** and the **document file name(s)** for the
+backend, the frontend, or both (either is optional), plus the **requirements
+folder** (default `docs/requirements`; **Browse** to choose it, kept relative to
+the repository when it is inside one), the model and optional custom
+instructions. Document file names can be typed as paths from the repository root,
+or picked with **Browse…**, which lets you select several files at once.
+
+For each document the `doc-reviewer` agent reads the requirements, the codebase
+and the document, then PRISM:
+
+1. adds a **PRISM review comments** section at the end of the same document,
+   grouped by severity (Blocker / Major / Minor / Suggestion), each comment
+   tagged with a category (Gap, Feasibility, Contradiction, Ambiguity,
+   Traceability, Testability, Risk, Consistency, Scope, Compliance) and a stable
+   id (`DR-3`);
+2. commits it to the branch as `PRISM-<run id>: <brief message>` (the run id
+   is shared by the backend and frontend commits of one run, so
+   `git log --grep PRISM-<run id>` finds them);
+3. pushes it to the same branch on `origin`, never forced.
+
+Commit, Push and Dry run are switches, like the review/sync/merge stages of a PR
+review. Everything happens in a temporary `git worktree` of the branch, so your
+own clone's checked-out branch, files and uncommitted work are never changed. (As
+for PR reviews, the reviewer's agent files are installed under `.opencode/` in the
+project folder — worth a line in your `.gitignore`.)
+
+**Re-reviews are incremental.** Each run is kept in the section as a numbered
+version, newest first. A later run is told which comments were still open and
+what the author changed since; it reports each earlier comment as resolved,
+partly resolved, still open or withdrawn, and reviews the changed parts in full.
+
+**What the agent can and cannot do.** The agent only reports. PRISM, not the
+agent, writes the section, and refuses to write if anything outside the section
+would change. If the push is rejected because the branch moved, PRISM replays
+its one commit on top and pushes again; if that fails, the commit is kept under
+`refs/prism/docs/<run id>-<role>` in your clone and nothing is lost.
 
 ## Consistent reviews of the same change
 A change is often reviewed more than once — a retry, another PR, another branch,
@@ -256,6 +301,54 @@ several clones needs `--repo <name>`; PRISM never guesses between them.
 Precedence is always: flag → saved default → inferred from the clone → built-in
 (`us-east-1`).
 
+### Review documents
+
+```bash
+cd ~/work/my-service                       # a clone, on the branch the documents are on
+prism docs docs/spec.md                    # review it; Ctrl-C stops it cleanly
+prism docs docs/spec.md docs/decomp.md --branch feat/specs
+prism docs --be docs/spec.md --fe docs/ui-spec.md      # backend and frontend, one run
+prism docs docs/spec.md --requirements docs/reqs --no-push
+prism docs docs/spec.md --dry-run -d       # review only, in the background
+prism retry 7f3a9c                         # review again after the author's edits
+prism ask 7f3a9c "why is DR-2 a blocker?"
+```
+
+The same as the app's **Document review** tab: the review is written into each
+document as a *PRISM review comments* section, committed as
+`PRISM-<run id>: <message>` and pushed, in a temporary worktree, so your branch, files and
+uncommitted work are never changed. It works out what it needs from where you are: the repository you
+are inside, the branch you have checked out, files typed the way a shell would
+(relative to where you are, absolute, or from the repository root). With
+`--be` / `--fe` it finds the two clones under the folder by name
+(`…-backend`, `…-frontend`) and asks for `--be-clone` / `--fe-clone` when the
+names do not say; it never guesses between clones. Precedence is flag → saved
+default → inferred from the clone → built-in (`docs/requirements`). The jobs show
+up in `prism jobs`, `logs`, `stop`, `retry` and `ask` and on the app's CLI jobs
+screen. In a terminal a review can stop and ask you a question; a detached one
+carries on without an answer.
+
+### `prism docs` flags
+
+| Flag | Meaning |
+|---|---|
+| `FILE …` | documents to review, in one repository (the one you are in, or `--clone`) |
+| `--path DIR` | project folder (default: the git repository you are in) |
+| `--clone DIR` | the repository's clone, when it is not the folder itself |
+| `--branch NAME` | branch the documents are on (default: the one checked out) |
+| `--be FILE …` / `--fe FILE …` | documents in the backend / frontend repository (not together with plain `FILE`s) |
+| `--be-clone DIR` / `--fe-clone DIR` | that repository's clone (default: found by folder name) |
+| `--be-branch NAME` / `--fe-branch NAME` | that repository's branch (default: the one checked out) |
+| `--requirements DIR` | folder holding the requirements (default `docs/requirements`) |
+| `--model NAME` | reviewer model |
+| `--commit` / `--no-commit` | commit the review comments to the branch, or keep nothing |
+| `--push` / `--no-push` | push the commit (needs a commit) |
+| `--dry-run` | review, but write, commit and push nothing |
+| `-i`, `--instructions TEXT` | extra instructions for the reviewer |
+| `--instructions-file FILE` | read the extra instructions from a file |
+| `-d`, `--detach` | run in the background and return |
+| `-q`, `--quiet` | print nothing (the log is still kept) |
+
 ### `prism run` flags
 
 | Flag | Meaning |
@@ -279,11 +372,12 @@ Precedence is always: flag → saved default → inferred from the clone → bui
 
 | Command | Does |
 |---|---|
+| `prism docs FILE…` | review spec / requirement documents (above) |
 | `prism jobs [-a] [--json]` | list running jobs (`-a`: finished too) |
 | `prism logs ID [-f] [-n N]` | show a job's transcript; `-f` follows until it ends |
 | `prism stop ID` / `stop --all` | stop a running job |
-| `prism retry ID [-d] [-q]` | run a finished job again with the same settings |
-| `prism ask ID "question"` | read-only follow-up question to the reviewer |
+| `prism retry ID [-d] [-q]` | run a finished job again with the same settings (a document review again is incremental) |
+| `prism ask ID "question"` | read-only follow-up question to the reviewer (pull request or document) |
 | `prism rm ID… [--all]` | delete finished jobs' records and logs |
 | `prism models [--refresh]` | list reviewer models |
 | `prism repos [PATH]` | show the git clones PRISM finds in a folder |
@@ -293,7 +387,7 @@ Precedence is always: flag → saved default → inferred from the clone → bui
 | `prism version`, `prism help` | version, command summary |
 
 Exit status: `0` finished (merged or not), `1` the job failed, `2` usage error or
-the PR is already being reviewed, `130` stopped.
+the same PR or documents are already being reviewed, `130` stopped.
 
 ### Configuration
 
@@ -308,11 +402,14 @@ under a `cli` key. Edit it by hand, or use `prism config`:
     "region": "eu-west-1",
     "model": "anthropic/claude-sonnet-5-5",
     "instructions": "Flag missing tests",
+    "requirements": "docs/requirements",
     "review": true,
     "describe": true,
     "merge": false,
     "sync": true,
-    "dry_run": false
+    "dry_run": false,
+    "commit": true,
+    "push": true
   },
   "google_chat_webhook_url": "https://chat.googleapis.com/…"
 }
@@ -324,8 +421,11 @@ under a `cli` key. Edit it by hand, or use `prism config`:
 | `repo` | text | CodeCommit repository name |
 | `region` | text | AWS region |
 | `model` | text | reviewer model |
-| `instructions` | text | extra instructions added to every review |
-| `review`, `describe`, `merge`, `sync`, `dry_run` | yes/no | defaults for the matching flags |
+| `instructions` | text | extra instructions added to every review (`run` and `docs`) |
+| `requirements` | text | requirements folder for `prism docs` |
+| `review`, `describe`, `merge`, `sync` | yes/no | defaults for the matching `prism run` flags |
+| `commit`, `push` | yes/no | defaults for the matching `prism docs` flags |
+| `dry_run` | yes/no | default for `--dry-run` on both commands |
 
 Empty text means "not set". Every key is optional; a wrong type is ignored.
 
@@ -333,6 +433,7 @@ Empty text means "not set". Every key is optional; a wrong type is ignored.
 prism config                              # show
 prism config set region eu-west-1
 prism config set merge no                 # review only unless --merge is given
+prism config set push no                  # docs: commit, but do not push
 prism config set webhook https://chat.googleapis.com/…   # Google Chat webhook
 prism config unset model
 prism config path                         # where the file is
@@ -357,7 +458,8 @@ Screens behind one header (badge, live job tally with a desktop/CLI split on hov
   Stop and Retry. Click a job to read its live conversation in the app (or use
   `prism logs -f` in a terminal).
 - **Jobs** — one row per job: status, target, verdict, impact, Stop, dismiss.
-- **New job** — Project card plus a two-column row pairing Repository mapping
+- **New job** — two tabs, **PR review** and **Document review** (see
+  [Document review](#document-review)). The PR tab is a Project card plus a two-column row pairing Repository mapping
   with Model & behavior (the model card spans the row for single-repo
   projects), then `Start Prisming` (or `Ctrl+Enter`, once every mandatory
   field is filled in).
@@ -496,6 +598,13 @@ disagrees with `version.py`.
 - No agent can merge, push or write. Agents decide; PRISM acts, behind gates in
   code that a prompt cannot reach. (The reviewer's deny rules are verified against
   the real engine in the test suite.)
+- A review that did not actually read the changes **fails — it never merges**. If
+  the fetch fails and the clone lacks the PR's latest commit, the review does not
+  start; a report that says it read nothing ("could not read the diff", "no code
+  was reviewed", a "placeholder" verdict or score, `Coverage: 0 files`) or that
+  declares `Review incomplete` is discarded: no verdict, no description update, no
+  merge, nothing recorded as reviewed. The job ends as an error and can be
+  retried. This is enforced in code, not left to the reviewer's instructions.
 - A review that has to be stopped (the model stalled, or it ran out of time) ends
   as a clearly marked partial report: the findings are written, but it is never
   merged automatically and never recorded as "reviewed".

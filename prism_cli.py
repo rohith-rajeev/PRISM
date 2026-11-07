@@ -2,6 +2,7 @@
 """PRISM on the command line.
 
     prism run 214                 review PR 214 of the repository in this folder
+    prism docs docs/spec.md       review a spec / requirement document in this repository
     prism jobs                    what is running, and what finished
     prism logs 7f3a9c -f          follow a job's transcript
     prism stop 7f3a9c             stop a job
@@ -33,6 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config as CFG  # noqa: E402
 import cli_jobs as CJ  # noqa: E402
+import docreview as DR  # noqa: E402
 import jobs as J  # noqa: E402
 from orchestrator import (  # noqa: E402
     REGION_DEFAULT, TOOL_DIR, Cancelled, RunControl, detect_local_repos, followup_declined,
@@ -45,13 +47,15 @@ PROG = "prism"
 
 # Words the first argument can be. The desktop binary uses this to decide
 # whether it was started as a command or as the application.
-COMMANDS = ("run", "jobs", "logs", "stop", "retry", "ask", "rm", "models", "repos",
+COMMANDS = ("run", "docs", "jobs", "logs", "stop", "retry", "ask", "rm", "models", "repos",
             "config", "man", "version", "update", "help")
 
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_STOPPED = 0, 1, 2, 130
 
 STAGE_NAMES = {STAGE_REVIEW: "Review", STAGE_DESCRIBE: "Describe",
-               STAGE_MERGE_CHECK: "Merge check", STAGE_SYNC: "Sync", STAGE_MERGE: "Merge"}
+               STAGE_MERGE_CHECK: "Merge check", STAGE_SYNC: "Sync", STAGE_MERGE: "Merge",
+               DR.STAGE_DOC_REVIEW: "Review", DR.STAGE_DOC_WRITE: "Write",
+               DR.STAGE_DOC_COMMIT: "Commit", DR.STAGE_DOC_PUSH: "Push"}
 
 _ANSI = {"ok": "32", "warn": "33", "err": "31", "dim": "2", "bold": "1"}
 
@@ -213,6 +217,153 @@ def build_spec(args, cfg=None, cwd=None):
         do_merge=flag(args.merge, "merge"), do_sync=flag(args.sync, "sync"),
         dry_run=flag(args.dry_run, "dry_run"),
         webhook_url=CFG.get_webhook_url() or None,
+        custom_instructions=(instructions or "").strip(), origin="cli")
+
+
+def _current_branch(clone):
+    branch = _git(clone, "rev-parse", "--abbrev-ref", "HEAD")
+    return "" if branch in ("", "HEAD") else branch
+
+
+def _doc_path(arg, clone, cwd):
+    """A document argument as a path from the repository root.
+
+    Typed the way a shell would: relative to where you are (so tab completion
+    from a subfolder works), or absolute, or - for a file that only exists on
+    the branch - already from the repository root.
+    """
+    clone_root = Path(clone).resolve()
+    given = Path(arg).expanduser()
+    for candidate in ([given] if given.is_absolute() else [Path(cwd) / given, clone_root / given]):
+        try:
+            rel = candidate.resolve().relative_to(clone_root)
+        except (ValueError, OSError):
+            continue
+        if candidate.exists() and rel.parts:
+            return rel.as_posix()
+    if given.is_absolute():
+        raise UsageError(f"{arg} is not inside {clone_root}.")
+    return Path(arg).as_posix().lstrip("./") or arg
+
+
+def build_docs_spec(args, cfg=None, cwd=None):
+    """The DocJobSpec for `prism docs`, from the command line, saved defaults and
+    where you are - the counterpart of build_spec.
+
+    One repository (the usual case) is plain arguments: `prism docs docs/spec.md`
+    reviews it in the repository you are in, on the branch you have checked out.
+    A backend and/or frontend are `--be FILE...` and `--fe FILE...`, each with an
+    optional `--be-clone/--be-branch` (`--fe-...`). PRISM never guesses between
+    clones: it says what to pass.
+    """
+    cfg = cfg if cfg is not None else CFG.get_cli()
+    cwd = Path(cwd or os.getcwd())
+    start = Path(args.path or cfg.get("project_dir") or cwd).expanduser()
+    try:
+        start = start.resolve()
+    except OSError:
+        pass
+    if not start.is_dir():
+        raise UsageError(f"{start} is not a folder.")
+    top = _git(start, "rev-parse", "--show-toplevel")
+    base = Path(top) if top and not args.path else start
+    is_repo = (base / ".git").exists()
+    subs = [(n, p) for n, p in detect_local_repos(str(base)) if Path(p) != base]
+
+    plain, be, fe = list(args.files or []), list(args.be or []), list(args.fe or [])
+    if plain and (be or fe):
+        raise UsageError("Give the documents either as plain arguments (one repository) or "
+                         "with --be / --fe, not both.")
+    if not (plain or be or fe):
+        raise UsageError(f"Say which document(s) to review: {PROG} docs docs/spec.md   "
+                         f"(or --be / --fe FILE...)")
+    if plain:
+        if args.be_clone or args.be_branch or args.fe_clone or args.fe_branch:
+            raise UsageError("--be-clone/--be-branch/--fe-clone/--fe-branch go with --be / --fe.")
+        wanted = [("repo", args.clone, args.branch, plain)]
+    else:
+        if args.clone or args.branch:
+            raise UsageError("--clone and --branch are for a single repository; with --be / "
+                             "--fe use --be-clone/--be-branch and --fe-clone/--fe-branch.")
+        for role, files, clone, branch in (("be", be, args.be_clone, args.be_branch),
+                                           ("fe", fe, args.fe_clone, args.fe_branch)):
+            if not files and (clone or branch):
+                raise UsageError(f"--{role}-clone/--{role}-branch need --{role} FILE...")
+        wanted = ([("BE", args.be_clone, args.be_branch, be)] if be else []) + \
+                 ([("FE", args.fe_clone, args.fe_branch, fe)] if fe else [])
+
+    def pick_clone(role, explicit):
+        if explicit:
+            path = Path(explicit).expanduser()
+            try:
+                path = path.resolve()
+            except OSError:
+                pass
+            if not (path.is_dir() and (path / ".git").exists()):
+                raise UsageError(f"{explicit} is not a git clone.")
+            return str(path)
+        if role == "repo" or (len(wanted) == 1 and is_repo):
+            if is_repo:
+                return str(base)
+            if len(subs) == 1:
+                return subs[0][1]
+            if subs:
+                raise UsageError(
+                    f"{base} holds {len(subs)} clones ({', '.join(n for n, _ in subs)}). "
+                    f"Say which one: --clone <dir>")
+            raise UsageError(f"No git clone found in {base}. Run from inside one, or pass "
+                             f"--clone <dir>.")
+        named = [(n, p) for n, p in subs if DR.guess_role(n) == role]
+        if len(named) == 1:
+            return named[0][1]
+        # Two clones, one of which is plainly the other role: this one is the rest.
+        opposite = [(n, p) for n, p in subs if DR.guess_role(n) == ("FE" if role == "BE" else "BE")]
+        if len(subs) == 2 and len(opposite) == 1:
+            return [p for n, p in subs if (n, p) != opposite[0]][0]
+        what = "backend" if role == "BE" else "frontend"
+        raise UsageError(f"Cannot tell which clone is the {what}"
+                         + (f" in {base} ({', '.join(n for n, _ in subs)})" if subs else "")
+                         + f". Say so: --{role.lower()}-clone <dir>")
+
+    targets = []
+    for role, explicit, branch, files in wanted:
+        clone = pick_clone(role, explicit)
+        name = branch or _current_branch(clone)
+        if not name:
+            raise UsageError(f"{clone} is not on a branch (detached HEAD). Say which one: "
+                             + ("--branch <name>" if role == "repo"
+                                else f"--{role.lower()}-branch <name>"))
+        bad = DR.check_branch(name)
+        if bad:
+            raise UsageError(f"{bad[0].upper()}{bad[1:]}.")
+        targets.append(DR.DocTarget(
+            role=role, repo_name=Path(clone).name, local_repo=clone, branch=name,
+            files=tuple(dict.fromkeys(_doc_path(f, clone, cwd) for f in files))))
+    if len({t.local_repo for t in targets}) != len(targets):
+        raise UsageError("The backend and the frontend are the same clone. Pass "
+                         "--be-clone and --fe-clone.")
+
+    requirements = (args.requirements or cfg.get("requirements") or "").strip() \
+        or DR.DEFAULT_REQUIREMENTS_DIR
+    typed = (cwd / Path(requirements).expanduser()) if not Path(requirements).expanduser() \
+        .is_absolute() else Path(requirements).expanduser()
+    if typed.is_dir():     # a folder you can see from here: keep it relative to its repository
+        requirements = DR.relativise_folder(typed, [t.local_repo for t in targets] + [str(base)])
+
+    def flag(cli_value, key):
+        return cfg[key] if cli_value is None else cli_value
+
+    instructions = args.instructions if args.instructions is not None else cfg["instructions"]
+    if args.instructions_file:
+        try:
+            instructions = Path(args.instructions_file).expanduser().read_text(encoding="utf-8")
+        except OSError as e:
+            raise UsageError(f"Cannot read {args.instructions_file}: {e.strerror or e}")
+    do_commit = flag(args.commit, "commit")
+    return DR.DocJobSpec(
+        project_dir=str(base), targets=tuple(targets), requirements_path=requirements,
+        model=args.model or cfg["model"] or None, do_commit=do_commit,
+        do_push=flag(args.push, "push") and do_commit, dry_run=flag(args.dry_run, "dry_run"),
         custom_instructions=(instructions or "").strip(), origin="cli")
 
 
@@ -406,10 +557,12 @@ def _install_signals(control, reporter):
                 pass        # not the main thread; the stop file still works
 
 
-def execute(spec, job_id=None, quiet=False, runner=full_pipeline, interactive=None):
+def execute(spec, job_id=None, quiet=False, runner=None, interactive=None):
     """Run one job in this process and return an exit code."""
     job_id = job_id or CJ.new_id()
-    dup = CJ.find_active(spec.repo_name, spec.pr_id)
+    # A document job brings its own pipeline; a pull request uses full_pipeline.
+    runner = runner or getattr(spec, "runner", None) or full_pipeline
+    dup = CJ.find_duplicate(spec)
     if dup is not None and dup.get("id") != job_id:
         print(f"{spec.label} is already being reviewed (job {dup['id']}).", file=sys.stderr)
         return EXIT_USAGE
@@ -432,6 +585,9 @@ def execute(spec, job_id=None, quiet=False, runner=full_pipeline, interactive=No
                   "stopped": str(summary.get("stopped") or ""),
                   "tokens": summary.get("tokens") or None,
                   "stage": ""}
+        if getattr(spec, "kind", "pr") == "docs":
+            fields.update(committed=summary.get("committed") is True,
+                          pushed=summary.get("pushed") is True)
         if not fields["tokens"]:
             fields.pop("tokens")
         shown = {k: v for k, v in summary.items() if k not in ("review", "tokens")}
@@ -478,6 +634,41 @@ def _add_run_options(p):
     p.add_argument("--job-id", help=argparse.SUPPRESS)
 
 
+def _add_docs_options(p):
+    p.add_argument("files", nargs="*", metavar="file",
+                   help="document(s) to review, in the repository you are in")
+    p.add_argument("--path", help="project folder (default: the git repository you are in)")
+    p.add_argument("--clone", help="the repository's clone, when it is not the folder itself")
+    p.add_argument("--branch", help="branch the documents are on (default: the one checked out)")
+    p.add_argument("--be", nargs="+", metavar="FILE", help="documents in the backend repository")
+    p.add_argument("--be-clone", metavar="DIR", help="the backend clone (default: guessed from the "
+                                                      "folder names)")
+    p.add_argument("--be-branch", metavar="NAME", help="backend branch (default: checked out)")
+    p.add_argument("--fe", nargs="+", metavar="FILE", help="documents in the frontend repository")
+    p.add_argument("--fe-clone", metavar="DIR", help="the frontend clone (default: guessed from "
+                                                      "the folder names)")
+    p.add_argument("--fe-branch", metavar="NAME", help="frontend branch (default: checked out)")
+    p.add_argument("--requirements", metavar="DIR",
+                   help=f"folder holding the requirements the documents were decomposed from "
+                        f"(default: {DR.DEFAULT_REQUIREMENTS_DIR})")
+    p.add_argument("--model", help="reviewer model, e.g. anthropic/claude-sonnet-5-5")
+    for flag, dest, what in (("commit", "commit", "commit the review comments to the branch"),
+                             ("push", "push", "push the commit to the remote")):
+        p.add_argument(f"--{flag}", dest=dest, action="store_true", default=None, help=what)
+        p.add_argument(f"--no-{flag}", dest=dest, action="store_false", help=f"do not {what}")
+    p.add_argument("--dry-run", dest="dry_run", action="store_true", default=None,
+                   help="review, but write, commit and push nothing")
+    p.add_argument("--no-dry-run", dest="dry_run", action="store_false", help=argparse.SUPPRESS)
+    p.add_argument("-i", "--instructions", help="extra instructions for the reviewer")
+    p.add_argument("--instructions-file", help="read the extra instructions from a file")
+    p.add_argument("-d", "--detach", action="store_true",
+                   help="run in the background and return; survives logging out")
+    p.add_argument("-q", "--quiet", action="store_true",
+                   help="print nothing (the log is still kept)")
+    p.add_argument("--job-id", help=argparse.SUPPRESS)
+    p.add_argument("--spec-json", help=argparse.SUPPRESS)
+
+
 def build_parser():
     p = argparse.ArgumentParser(
         prog=PROG, description="PRISM - review and safely merge AWS CodeCommit pull requests.",
@@ -489,6 +680,15 @@ def build_parser():
                        description="Review PR <pr_id> of the repository in the current folder.")
     r.add_argument("pr_id", metavar="pr_id")
     _add_run_options(r)
+
+    d = sub.add_parser(
+        "docs", help="review a spec or requirement document",
+        description="Review requirement-decomposition documents or specs against the "
+                    "requirements they came from and the codebase. The review is written "
+                    "into each document as a 'PRISM review comments' section, committed as "
+                    "PRISM-<run id>: <message> and pushed - an aid to your own review, not a "
+                    "replacement for it.")
+    _add_docs_options(d)
 
     j = sub.add_parser("jobs", help="list jobs started from the command line")
     j.add_argument("-a", "--all", action="store_true", help="include finished jobs")
@@ -556,6 +756,26 @@ def cmd_run(args):
     return execute(spec, job_id, quiet=args.quiet)
 
 
+def cmd_docs(args):
+    if args.spec_json:                       # a detached run: the spec was resolved already
+        try:
+            spec = CJ.spec_from_dict(json.loads(args.spec_json))
+        except (ValueError, TypeError) as e:
+            raise UsageError(f"Bad --spec-json: {e}")
+    else:
+        spec = build_docs_spec(args)
+    dup = CJ.find_duplicate(spec)
+    if dup is not None and dup.get("id") != args.job_id:
+        raise UsageError(f"{spec.label} is already being reviewed (job {dup['id']}).")
+    job_id = args.job_id or CJ.new_id()
+    if args.detach:
+        # The resolved spec travels as-is, so the background process does not depend on
+        # its own working directory or on the saved defaults changing meanwhile.
+        return detach(["docs", "--spec-json", json.dumps(CJ.spec_to_dict(spec))],
+                      job_id, spec.label)
+    return execute(spec, job_id, quiet=args.quiet)
+
+
 def _forward_run_args(args):
     """Re-create the options of a detached run, from the parsed values.
 
@@ -616,12 +836,17 @@ def cmd_jobs(args):
             print(f"(see finished ones with: {PROG} jobs --all)")
         return EXIT_OK
     now = time.time()
-    rows = [("ID", "STATUS", "PULL REQUEST", "STAGE / RESULT", "AGE")]
+    has_docs = any((r.get("spec") or {}).get("kind") == "docs" for r in records)
+    rows = [("ID", "STATUS", "TARGET" if has_docs else "PULL REQUEST", "STAGE / RESULT", "AGE")]
     for r in records:
         active = CJ.is_active(r)
         detail = r.get("stage") if active else (r.get("verdict") or r.get("error") or "")
         if not active and r.get("merged"):
             detail = (detail + "  ·  merged").strip(" ·")
+        elif not active and r.get("pushed"):
+            detail = (detail + "  ·  pushed").strip(" ·")
+        elif not active and r.get("committed"):
+            detail = (detail + "  ·  committed").strip(" ·")
         rows.append((r["id"], _row_status(r), CJ.label(r), (detail or "")[:48],
                      human_age(now - (r.get("started") or now))))
     widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
@@ -702,10 +927,11 @@ def cmd_retry(args):
         spec = CJ.spec_from_dict(record.get("spec"))
     except ValueError as e:
         raise UsageError(f"Cannot retry {args.job_id}: {e}")
-    # The webhook is a machine-wide setting, read fresh as the desktop does.
-    spec = J.JobSpec(**dict(CJ.spec_to_dict(spec), webhook_url=CFG.get_webhook_url() or None,
-                            origin="cli"))
-    dup = CJ.find_active(spec.repo_name, spec.pr_id)
+    if getattr(spec, "kind", "pr") != "docs":
+        # The webhook is a machine-wide setting, read fresh as the desktop does.
+        spec = J.JobSpec(**dict(CJ.spec_to_dict(spec), webhook_url=CFG.get_webhook_url() or None,
+                                origin="cli"))
+    dup = CJ.find_duplicate(spec)
     if dup is not None and dup.get("id") != args.job_id:
         raise UsageError(f"{spec.label} is already being reviewed (job {dup['id']}).")
     if args.detach:
@@ -734,12 +960,17 @@ def cmd_ask(args):
 
     code = EXIT_OK
     try:
-        reply, sid = run_followup(
-            question, spec.project_dir, spec.repo_name, spec.pr_id,
-            local_repo=spec.local_repo, region=spec.region, model=spec.model,
-            session_id=record.get("session_id") or None, outcome=outcome,
-            emit=emit, control=control)
-        reason = followup_declined(reply)
+        if getattr(spec, "kind", "pr") == "docs":
+            reply, sid = DR.run_followup(
+                question, spec.project_dir, model=spec.model,
+                session_id=record.get("session_id") or None, emit=emit, control=control)
+        else:
+            reply, sid = run_followup(
+                question, spec.project_dir, spec.repo_name, spec.pr_id,
+                local_repo=spec.local_repo, region=spec.region, model=spec.model,
+                session_id=record.get("session_id") or None, outcome=outcome,
+                emit=emit, control=control)
+        reason = followup_declined(reply) if getattr(spec, "kind", "pr") != "docs" else None
         reporter.line(f"⛔ Not actioned — {reason}" if reason else "✔ Follow-up answered.",
                       "warn" if reason else "ok")
         if sid:
@@ -906,7 +1137,7 @@ def cmd_update(args):
 
 
 HANDLERS = {"run": cmd_run, "jobs": cmd_jobs, "logs": cmd_logs, "stop": cmd_stop,
-            "retry": cmd_retry, "ask": cmd_ask, "rm": cmd_rm, "models": cmd_models,
+            "docs": cmd_docs, "retry": cmd_retry, "ask": cmd_ask, "rm": cmd_rm, "models": cmd_models,
             "repos": cmd_repos, "config": cmd_config, "man": cmd_man,
             "update": cmd_update}
 

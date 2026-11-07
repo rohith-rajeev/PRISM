@@ -1,6 +1,6 @@
 .TH PRISM 1 "" "PRISM" "PRISM Manual"
 .SH NAME
-prism \- review and safely merge AWS CodeCommit pull requests from the command line
+prism \- review and safely merge AWS CodeCommit pull requests, and review spec documents, from the command line
 .SH SYNOPSIS
 .B prism
 .I command
@@ -15,6 +15,25 @@ prism \- review and safely merge AWS CodeCommit pull requests from the command l
 .RB [ \-\-no\-merge ]
 .RB [ \-\-dry\-run ]
 .RB [ \-d ]
+.br
+.B prism docs
+.I file
+\&...
+.RB [ \-\-branch
+.IR NAME ]
+.RB [ \-\-requirements
+.IR DIR ]
+.RB [ \-\-no\-push ]
+.RB [ \-\-dry\-run ]
+.RB [ \-d ]
+.br
+.B prism docs
+.B \-\-be
+.I file
+\&...
+.B \-\-fe
+.I file
+\&...
 .SH DESCRIPTION
 .B prism
 runs the same review, description and merge pipeline as the PRISM desktop
@@ -30,6 +49,30 @@ remote, then your saved defaults. A folder that holds several clones needs
 .BR \-\-repo ;
 PRISM never guesses between them.
 .PP
+.PP
+.B prism docs
+reviews requirement\-decomposition documents and specs, the same way the desktop
+application's Document review tab does. The reviewer reads the requirements the
+documents were decomposed from and the codebase, and PRISM adds its findings to
+the end of each document as a \(lqPRISM review comments\(rq section, grouped by severity
+(Blocker, Major, Minor, Suggestion) with a category and a stable id such as
+.BR DR\-3 .
+The section is written to aid a human review, not to replace it. PRISM then
+commits it to the branch as
+.B PRISM\-<run id>: <brief message>
+and pushes it to
+.BR origin ,
+never forced. All of this happens in a temporary
+.B git worktree
+of the branch, so your clone's checked\-out branch, files and uncommitted work are
+never changed (as for a pull request review, the reviewer's agent files are
+installed under
+.I .opencode/
+in the project folder). Running it again on the same documents is an incremental review:
+the reviewer reports whether each earlier comment is resolved, partly resolved,
+still open or withdrawn, then reviews what changed, and each run is kept as a
+numbered version in the same section.
+.PP
 Every run keeps a record and a log under
 .IR ~/.prism/cli\-jobs/ ,
 which is how the desktop application lists, stops and retries jobs started here.
@@ -41,6 +84,14 @@ The packaged desktop build accepts the same commands, for example
 Review pull request
 .IR pr_id .
 Runs in the foreground; Ctrl\-C stops it cleanly (twice to leave at once).
+.TP
+.BI "docs " file ...
+Review one or more documents in the repository you are in, on the branch you have
+checked out. For a backend and/or frontend use
+.B \-\-be
+and
+.B \-\-fe
+instead of plain arguments. Runs in the foreground; Ctrl\-C stops it cleanly.
 .TP
 .B jobs
 List running jobs.
@@ -132,6 +183,89 @@ Run in the background and return; the job survives logging out.
 Print nothing. The log is still kept.
 .PP
 A flag always beats a saved default.
+.SH OPTIONS FOR DOCS
+Documents are named as you would to a shell: relative to where you are, absolute,
+or, for a file that exists only on the branch, from the repository root.
+.TP
+.I file ...
+Document(s) to review, in a single repository: the one you are in, or
+.BR \-\-clone .
+.TP
+.BI \-\-path " DIR"
+Project folder. Default: the git repository you are in, else the saved
+.BR project_dir .
+.TP
+.BI \-\-clone " DIR"
+The repository's clone, when it is not the folder itself.
+.TP
+.BI \-\-branch " NAME"
+Branch the documents are on. Default: the branch checked out in the clone. A
+detached HEAD needs this.
+.TP
+.BI \-\-be " FILE" ...
+Documents in the backend repository. Use with
+.BR \-\-fe ,
+or alone. Not together with plain
+.I file
+arguments.
+.TP
+.BI \-\-be\-clone " DIR"
+The backend clone. Default: the one among the clones under the project folder
+whose name says backend (\fIbe\fR, \fIbackend\fR), or the other of two when only
+the frontend is named. Never guessed between clones that do not say which is which.
+.TP
+.BI \-\-be\-branch " NAME"
+Backend branch. Default: the one checked out.
+.TP
+.BI \-\-fe " FILE" ...
+Documents in the frontend repository.
+.TP
+.BI \-\-fe\-clone " DIR"
+The frontend clone; found the same way as the backend one.
+.TP
+.BI \-\-fe\-branch " NAME"
+Frontend branch. Default: the one checked out.
+.TP
+.BI \-\-requirements " DIR"
+Folder holding the requirements the documents were decomposed from. Default: saved
+.BR requirements ,
+else
+.IR docs/requirements .
+A relative path is read from the reviewed branch of each repository (then from the
+project folder); a folder you can see from where you are is stored relative to the
+repository it lies in.
+.TP
+.BI \-\-model " NAME"
+Reviewer model; see
+.BR "prism models" .
+.TP
+.BR \-\-commit ", " \-\-no\-commit
+Commit the review comments to the branch (default), or leave nothing behind.
+Without a commit nothing is kept: the review exists only in the log.
+.TP
+.BR \-\-push ", " \-\-no\-push
+Push the commit to the remote (default). Needs a commit. If the branch moved on
+the remote, PRISM replays its one commit on top and pushes again; if that fails
+the commit is kept as
+.I refs/prism/docs/<run id>\-<role>
+in the clone and nothing is lost.
+.TP
+.B \-\-dry\-run
+Review, but write, commit and push nothing.
+.TP
+.BR \-i ", " \-\-instructions " \fITEXT\fR"
+Extra instructions for the reviewer.
+.TP
+.BI \-\-instructions\-file " FILE"
+Read the extra instructions from a file.
+.TP
+.BR \-d ", " \-\-detach
+Run in the background and return; the job survives logging out.
+.TP
+.BR \-q ", " \-\-quiet
+Print nothing. The log is still kept.
+.PP
+A flag always beats a saved default.
 .SH OTHER OPTIONS
 .TP
 .B jobs \-a, \-\-all
@@ -150,7 +284,7 @@ Only the last N lines.
 Stop every running CLI job.
 .TP
 .B retry \-d, \-q
-Detach, or run quietly.
+Detach, or run quietly. Works for document reviews too.
 .TP
 .B rm \-\-all
 Delete every finished job.
@@ -181,11 +315,14 @@ key:
     "region": "eu\-west\-1",
     "model": "anthropic/claude\-sonnet\-5\-5",
     "instructions": "Flag missing tests",
+    "requirements": "docs/requirements",
     "review": true,
     "describe": true,
     "merge": false,
     "sync": true,
-    "dry_run": false
+    "dry_run": false,
+    "commit": true,
+    "push": true
   },
   "google_chat_webhook_url": "https://chat.googleapis.com/..."
 }
@@ -196,16 +333,33 @@ Text keys are
 .BR project_dir ,
 .BR repo ,
 .BR region ,
-.B model
+.BR model ,
+.B instructions
 and
-.BR instructions ;
+.BR requirements ;
 an empty value means "not set". Yes/no keys are
 .BR review ,
 .BR describe ,
 .BR merge ,
 .B sync
 and
-.BR dry_run .
+.BR dry_run ,
+which
+.B prism run
+reads, and
+.B commit
+and
+.BR push ,
+which
+.B prism docs
+reads.
+.BR model ,
+.B instructions
+and
+.B dry_run
+apply to both commands, and
+.B requirements
+is only for documents.
 Edit the file by hand or use:
 .PP
 .RS
@@ -228,6 +382,11 @@ In a terminal, PRISM asks you directly when it needs an answer (merge conflicts,
 the confirmation for a high\-impact merge). A detached or non\-interactive job
 has nobody to ask and takes the cautious answer: conflicts are not resolved and
 a high\-impact merge is not confirmed.
+.PP
+A document review can also stop and ask you something when it cannot review
+without the answer (which of two requirement folders is authoritative, for
+example). In a terminal you answer on the spot; a detached run has nobody to ask
+and carries on without an answer.
 .SH EXAMPLES
 Review PR 214 of the repository in the current folder:
 .PP
@@ -241,6 +400,37 @@ Review only, without merging, in the background, then follow it:
 prism run 214 \-\-no\-merge \-d
 .br
 prism logs 7f3a9c \-f
+.RE
+.PP
+Review a spec in the repository you are in, on the branch you have checked out:
+.PP
+.RS
+prism docs docs/spec.md
+.RE
+.PP
+Review two documents on a named branch, without pushing, then look at the result:
+.PP
+.RS
+prism docs docs/spec.md docs/decomposition.md \-\-branch feat/specs \-\-no\-push
+.RE
+.PP
+Backend and frontend documents in one run, requirements kept elsewhere, in the
+background:
+.PP
+.RS
+cd ~/work    # holds shop\-backend and shop\-frontend
+.br
+prism docs \-\-be docs/spec.md \-\-fe docs/ui\-spec.md \-\-requirements docs/reqs \-d
+.br
+prism logs 7f3a9c \-f
+.RE
+.PP
+Review again after the author's edits, then ask about a comment:
+.PP
+.RS
+prism retry 7f3a9c
+.br
+prism ask 7f3a9c why is DR\-2 a blocker
 .RE
 .PP
 Set defaults once:
@@ -259,7 +449,7 @@ Success (a finished review, merged or not).
 The job failed.
 .TP
 .B 2
-Usage error, or the pull request is already being reviewed.
+Usage error, or the same pull request or documents are already being reviewed.
 .TP
 .B 130
 The job was stopped.

@@ -1,4 +1,4 @@
-# PRISM — Pull Request Inspection & Safety Manager
+# PRISM
 **Tool documentation** · lives in `PRISM/docs/requirements/PRISM.md`
 
 ---

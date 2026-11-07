@@ -3,10 +3,11 @@
 PRISM only delegates to an agent for genuinely specialized judgment — reading
 and explaining code. Everything mechanical (resolving PR context, checking
 mergeability, syncing branches, the final pre-merge check) is a direct
-CodeCommit/git call in `orchestrator.py` instead. That currently leaves two
-agents: `pr-reviewer` and `conflict-analyst`.
+CodeCommit/git call in `orchestrator.py` instead. That currently leaves three
+agents: `pr-reviewer`, `conflict-analyst` and `doc-reviewer`.
 
-Every PRISM agent except `pr-reviewer` ends its reply with one fenced block:
+Every PRISM agent except `pr-reviewer` and `doc-reviewer` (which end with their own
+report formats, parsed by PRISM) ends its reply with one fenced block:
 
     ```prism
     decision: <one of the values its own file lists>
@@ -31,6 +32,14 @@ cheaper than rediscovering the same structure file-by-file. It's a lookup, not
 a replacement for the diff itself, and it's optional: skip it when it isn't
 there. An agent with no shell (`bash: deny`), like conflict-analyst, has
 nothing to check with and doesn't need this note.
+
+**A reviewer that could not read the changes says so; it never invents a verdict.**
+`pr-reviewer` and `doc-reviewer` report `**Verdict:** ❓ Review incomplete` when they
+could not read what they were asked to review. PRISM does not rely on that alone:
+it also fails any report that says, in its own words, that nothing was reviewed
+(`orchestrator.review_incompleteness`), and refuses to start a review whose code is
+not on the machine (`_ensure_reviewable_refs`). A failed review writes nothing,
+merges nothing and is recorded as nothing, so a retry starts clean.
 
 **Say only what's useful.** Every agent narrates as little as possible: no
 greeting, no "I'll start by..." before a command, no restating a tool's

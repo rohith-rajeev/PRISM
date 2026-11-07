@@ -185,6 +185,30 @@ payments, migrations, IaC, env/config. `git show <commit>:<path>` gives full fil
 context when a hunk alone is not enough. As a last resort with no usable clone,
 use `aws codecommit get-differences` (paginate with `--next-token`).
 
+### If you cannot get the diff
+
+A verdict is a claim that you read the changes. If you could not read them — the
+fetch timed out, the diff came back empty when the PR plainly has commits, a
+command was refused, the clone is missing — **you have not reviewed anything, and
+you must not report an approval, a "placeholder" verdict, or any impact score.**
+Do not guess from the title or commit messages. Stop and report exactly this:
+
+```
+## PR #<id> — <repositoryName> (<sourceReference> → <destinationReference>)
+**Verdict:** ❓ Review incomplete
+**Impact score:** n/a — not reviewed
+
+### Summary
+<What you could not read and what you tried, in two or three sentences.>
+Coverage: 0 changed files reviewed.
+```
+
+PRISM then fails the run so it can be retried, writes nothing to the pull request
+and merges nothing. An incomplete report is the correct outcome here; an invented
+verdict that lets an unreviewed change through is the one outcome that is never
+acceptable. (An *empty* diff on a PR whose commits you can see is also a failure
+to read, not "nothing to review" — say so in the same way.)
+
 ## Step 2 — Analyze
 
 Be thorough about *this diff*: work through every dimension for every changed

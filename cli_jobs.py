@@ -31,6 +31,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 import config
+import docreview
 import jobs as J
 
 INTERRUPTED = "interrupted"
@@ -79,13 +80,52 @@ def valid_id(job_id):
 
 # ---------------------------------------------------------------- specs --
 def spec_to_dict(spec):
+    if getattr(spec, "kind", "pr") == "docs":
+        return {"kind": "docs", "project_dir": spec.project_dir,
+                "targets": [{"role": t.role, "repo_name": t.repo_name,
+                             "local_repo": t.local_repo, "branch": t.branch,
+                             "files": list(t.files)} for t in spec.targets],
+                "requirements_path": spec.requirements_path, "model": spec.model,
+                "do_commit": spec.do_commit, "do_push": spec.do_push,
+                "dry_run": spec.dry_run, "custom_instructions": spec.custom_instructions}
     data = asdict(spec)
     return {k: data.get(k) for k in _SPEC_FIELDS}
 
 
+def _docs_spec_from_dict(data):
+    targets = []
+    for t in data.get("targets") or []:
+        if not isinstance(t, dict):
+            continue
+        files = tuple(str(f) for f in (t.get("files") or []) if str(f).strip())
+        if not (str(t.get("local_repo") or "").strip() and str(t.get("branch") or "").strip()
+                and files):
+            raise ValueError("saved document job has an incomplete target")
+        targets.append(docreview.DocTarget(
+            role=str(t.get("role") or "repo"), repo_name=str(t.get("repo_name") or ""),
+            local_repo=str(t["local_repo"]), branch=str(t["branch"]), files=files))
+    if not targets or not str(data.get("project_dir") or "").strip():
+        raise ValueError("saved document job has no targets")
+    return docreview.DocJobSpec(
+        project_dir=str(data["project_dir"]), targets=tuple(targets),
+        requirements_path=str(data.get("requirements_path") or
+                              docreview.DEFAULT_REQUIREMENTS_DIR),
+        model=data.get("model") or None,
+        do_commit=data.get("do_commit") is not False,
+        do_push=data.get("do_push") is not False,
+        dry_run=data.get("dry_run") is True,
+        custom_instructions=str(data.get("custom_instructions") or ""), origin="cli")
+
+
 def spec_from_dict(data):
-    """A JobSpec from a record, or ValueError if it cannot describe a job."""
+    """A JobSpec from a record, or ValueError if it cannot describe a job.
+
+    A document job (`"kind": "docs"`) comes back as a docreview.DocJobSpec;
+    records without a kind are pull-request jobs, exactly as before.
+    """
     data = data if isinstance(data, dict) else {}
+    if data.get("kind") == "docs":
+        return _docs_spec_from_dict(data)
     kwargs = {k: data[k] for k in _SPEC_FIELDS if k in data}
     for required in ("project_dir", "repo_name", "pr_id"):
         if not str(kwargs.get(required) or "").strip():
@@ -124,7 +164,8 @@ def create(spec, job_id=None, cwd=None):
         "cwd": str(cwd or os.getcwd()), "status": J.RUNNING, "stage": "",
         "started": now, "heartbeat": now, "finished": None,
         "spec": spec_to_dict(spec), "verdict": "", "impact": "",
-        "branches": "", "author": "", "tokens": None, "merged": None,
+        "branches": getattr(spec, "branches_text", "") or "", "author": "",
+        "tokens": None, "merged": None,
         "stopped": "", "error": "", "session_id": "",
     }
     for ext in ("stop", "log"):          # a reused id must not inherit either
@@ -207,8 +248,36 @@ def find_active(repo_name, pr_id):
     return None
 
 
+def find_duplicate(spec):
+    """A live CLI job covering the same thing as `spec`, whichever kind it is.
+
+    A pull request is the same job when repository and PR id match; a document
+    review when it covers the same documents on the same branches.
+    """
+    if getattr(spec, "kind", "pr") != "docs":
+        return find_active(spec.repo_name, spec.pr_id)
+    for record in active_jobs():
+        data = record.get("spec") or {}
+        if data.get("kind") != "docs":
+            continue
+        try:
+            other = _docs_spec_from_dict(data)
+        except ValueError:
+            continue
+        if other.dup_key == spec.dup_key:
+            return record
+    return None
+
+
 def label(record):
     spec = record.get("spec") or {}
+    if spec.get("kind") == "docs":
+        targets = [t for t in spec.get("targets") or [] if isinstance(t, dict)]
+        names = " + ".join({"BE": "Backend", "FE": "Frontend"}.get(t.get("role"),
+                                                                    t.get("repo_name") or "?")
+                           for t in targets) or "?"
+        count = sum(len(t.get("files") or []) for t in targets)
+        return f"Docs · {names} · {count} file{'' if count == 1 else 's'}"
     return f"{spec.get('repo_name', '?')} #{spec.get('pr_id', '?')}"
 
 

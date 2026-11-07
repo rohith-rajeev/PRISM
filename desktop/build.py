@@ -62,8 +62,9 @@ def preflight():
         fail(f"PyInstaller is missing — install it with:\n"
              f"    {sys.executable} -m pip install -r {Path('desktop') / 'requirements-build.txt'}")
     for rel in ("app.py", "orchestrator.py", "jobs.py", "updater.py",
-                "prism_cli.py", "cli_jobs.py", "folderpicker.py",
+                "prism_cli.py", "cli_jobs.py", "folderpicker.py", "docreview.py",
                 "version.py", Path("agents") / "pr-reviewer.md",
+                Path("agents") / "doc-reviewer.md",
                 Path("docs") / "MANUAL.md"):
         if not (ROOT / rel).is_file():
             fail(f"missing {rel} — run this from the PRISM checkout")
@@ -180,6 +181,7 @@ def main():
         "--add-data", f"{ROOT / 'man'}{os.pathsep}man",
         "--hidden-import", "orchestrator",
         "--hidden-import", "jobs",
+        "--hidden-import", "docreview",
         "--hidden-import", "updater",
         "--hidden-import", "version",
         "--hidden-import", "config",

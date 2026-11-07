@@ -358,10 +358,15 @@ class ReviewResult:
     # authorises a merge and is never recorded as "reviewed": parts of the PR
     # were not looked at.
     partial: bool = False
+    # Non-empty when the report itself shows the reviewer did not examine the
+    # changes (see review_incompleteness). Such a "review" has no verdict worth the
+    # name, so it can never authorise a merge, whatever its verdict line says.
+    incomplete_reason: str = ""
 
     def merge_allowed(self) -> bool:
         v = self.verdict_key
-        return v in ("approve", "approve-with-comments", "skipped") and not self.partial
+        return (v in ("approve", "approve-with-comments", "skipped") and not self.partial
+                and not self.incomplete_reason)
 
 
 _AWC_RE = re.compile(r"approv\w*\W+(?:w/|with\b)")
@@ -371,8 +376,18 @@ _APPROVE_RE = re.compile(r"approv\w*|✅")
 _BLOCK_RE = re.compile(r"\bblock\b|⛔")
 
 
+# The one honest thing a reviewer that could not read the changes can say. It is
+# matched first: "⛔ Review incomplete" must not be read as a Block, nor anything
+# starting this way as an approval.
+_INCOMPLETE_VERDICT_RE = re.compile(
+    r"^\W*(?:review\s+)?(?:incomplete|not\s+reviewed|could\s*n[o']t\s+(?:be\s+)?review\w*|"
+    r"unable\s+to\s+review)\b")
+
+
 def normalise_verdict(raw: str) -> str:
     t = raw.lower()
+    if _INCOMPLETE_VERDICT_RE.search(t):
+        return "incomplete"
     if _AWC_RE.search(t) or "⚠" in raw:
         return "approve-with-comments"
     if _REQUEST_RE.search(t) or "🔴" in raw:
@@ -413,6 +428,65 @@ def strip_ansi(text: str) -> str:
     return ANSI_RE.sub("", text or "")
 
 
+class ReviewIncomplete(RuntimeError):
+    """The reviewer did not (or could not) examine what it was asked to review.
+
+    Raised instead of returning a verdict, so the job ends as a failure that can
+    simply be retried: nothing has been written to the pull request, nothing has
+    been merged and nothing has been recorded as reviewed.
+    """
+
+
+# A review is a claim that code was read. These are the reviewer saying, in its own
+# words, that it did not read it - the shape a real incident took: the diff could
+# not be fetched, so the report said "no code was reviewed ... this score is a
+# placeholder", yet carried "Approve with comments" and the pull request was
+# merged. Every pattern is an affirmative statement of not having reviewed; a
+# report that merely says nothing about coverage (a clean approval) never matches.
+_OBJ = (r"(?:the\s+|any\s+)?(?:pr(?:'s)?\s+|pull\s+request(?:'s)?\s+)?"
+        r"(?:diff|changes?|changeset|changed\s+files?|document|requirements?)")
+_NOT_REVIEWED = tuple(re.compile(p, re.IGNORECASE) for p in (
+    # "I could not read the diff", "unable to fetch the changes", "failed to get the diff"
+    r"\b(?:could\s*n[o']t|can\s*not|can't|did\s+not|didn't|unable\s+to|not\s+able\s+to|"
+    r"failed\s+to)\s+(?:read|get|obtain|fetch|access|retrieve|see|load)\s+" + _OBJ
+    # "...the changes to logo.png" is one file the reviewer could not read, not all of them.
+    + r"\b(?!\s+(?:to|in|of|for|made|under|inside|within|from|between|on|at)\b)",
+    r"\bno\s+(?:code|changes?|diff)\s+(?:was|were)\s+(?:reviewed|read|examined|inspected)\b",
+    r"\b(?:verdict|score)(?:\s+above)?\s+is\s+(?:only\s+)?a\s+placeholder\b",
+    r"\bnot\s+a\s+(?:real\s+)?(?:risk|impact)\s+assessment\b",
+    r"\bno\s+verdict\s+based\s+on\s+(?:its|the)\s+contents?\b",
+    r"\b(?:have|has|had)\s+not\s+(?:checked|reviewed|examined|verified)\s+"
+    r"(?:any\b|correctness\b)",
+    r"\breview\s+coverage\s*[—–-]+\s*`?n/?a\b",
+    r"\bcoverage\s*:\s*0\s+(?:of\s+\d+\s+)?(?:changed\s+)?(?:files?|documents?)\b",
+    r"\b0\s+changed\s+files\s+(?:were\s+)?reviewed\b",
+))
+# Only for a whole review: a wrap-up report after a run was cut short legitimately
+# says the review "did not complete", and still carries the findings it got to.
+_NOT_REVIEWED_WHOLE = tuple(re.compile(p, re.IGNORECASE) for p in (
+    r"\b(?:the\s+)?review\s+(?:did\s+not|didn'?t|could\s*n[o']t)\s+(?:complete|finish)\b",
+))
+
+
+def review_incompleteness(text, verdict_key="", partial=False) -> str:
+    """Why this report cannot be a review of the changes, or "" when nothing says so.
+
+    Deliberately about what the report *says*: PRISM cannot see inside the
+    reviewer, but a reviewer that read nothing says so (or, bound by its
+    instructions, declares the review incomplete). Anything it says here fails the
+    run, which is the safe direction - a failed review is retried, a merged
+    unreviewed one cannot be taken back.
+    """
+    if verdict_key == "incomplete":
+        return "the reviewer declared the review incomplete"
+    body = strip_ansi(text or "")
+    for rx in _NOT_REVIEWED + (() if partial else _NOT_REVIEWED_WHOLE):
+        m = rx.search(body)
+        if m:
+            return f"the report says so itself (\"{' '.join(m.group(0).split())[:90]}\")"
+    return ""
+
+
 def parse_review_output(text: str) -> ReviewResult:
     """Parse the pr-reviewer agent's chat report (Step 4 shape)."""
     res = ReviewResult(raw_output=text, findings=[])
@@ -437,6 +511,8 @@ def parse_review_output(text: str) -> ReviewResult:
     ms = re.search(r"###\s*Summary\s*\n(.+)", text or "", re.IGNORECASE | re.DOTALL)
     if ms:
         res.summary = ms.group(1).strip()[:6000]
+    res.incomplete_reason = review_incompleteness(
+        text, res.verdict_key, partial=CUT_SHORT_MARKER in (text or ""))
     return res
 
 
@@ -1748,6 +1824,50 @@ def _fetch_pr_refs(local_repo, dest_ref, source_ref, emit=_emit_plain):
         return False
 
 
+def _ensure_reviewable_refs(local_repo, pr_meta, source_ref, dest_ref, refs_ready,
+                            emit=_emit_plain):
+    """Never hand the reviewer a pull request whose code is not on this machine.
+
+    After a failed fetch the old behaviour was "the reviewer will fetch them
+    itself" - and when its fetch failed too it had nothing to read, yet reported a
+    verdict. PRISM knows the commit the pull request is at, so it can check:
+
+    * the fetch worked: nothing to do;
+    * it failed, but the clone already holds exactly that commit on the source
+      branch (and the destination): review from the clone, say so, carry on;
+    * it failed and the commit is not here: raise ReviewIncomplete now, before a
+      model run is spent on a review that cannot see the changes.
+
+    With no local clone (API mode) or no known commit there is nothing to check
+    against, so this stays out of the way; the report itself is still checked
+    (see review_incompleteness).
+    """
+    if refs_ready or not local_repo or not source_ref or not dest_ref:
+        return refs_ready
+    commit = (pr_meta.get("sourceCommit") or "") if isinstance(pr_meta, dict) else ""
+    if not commit:
+        return False
+
+    def rev(spec):
+        try:
+            done = subprocess.run(["git", "rev-parse", "--verify", "--quiet",
+                                   f"{spec}^{{commit}}"], cwd=local_repo,
+                                  capture_output=True, text=True, timeout=30)
+        except Exception:  # noqa: BLE001
+            return ""
+        return done.stdout.strip() if done.returncode == 0 else ""
+
+    if rev(f"origin/{source_ref}") == commit and rev(f"origin/{dest_ref}"):
+        emit(f"⚠ Could not fetch the PR's branches, but this clone already has the pull "
+             f"request's latest commit ({commit[:8]}) — reviewing from the clone.")
+        return True
+    raise ReviewIncomplete(
+        f"PRISM could not fetch the pull request's branches from CodeCommit, and this clone "
+        f"does not have its latest commit ({commit[:8]}), so there is nothing to review. "
+        f"Nothing was reviewed, written or merged. Check the connection and credentials "
+        f"(`git fetch origin {source_ref}` in the clone) and retry the job.")
+
+
 def _git_capped(local_repo, args, cap):
     """Run a read-only git command; (text, truncated). text is None on failure.
 
@@ -1943,6 +2063,8 @@ def run_opencode_review(pr_id, repo_name, local_repo, project_dir,
     # One fetch for the whole review. The incremental check, the review history
     # and the reviewer used to fetch separately — the slowest step of a review.
     refs_ready = _fetch_pr_refs(local_repo, dest_ref, source_ref, emit=emit)
+    refs_ready = _ensure_reviewable_refs(local_repo, pr_meta, source_ref, dest_ref,
+                                         refs_ready, emit=emit)
     incremental = _incremental_context(pr_id, repo_name, local_repo, region=region,
                                        emit=emit, pr=pr_meta or None,
                                        refs_fetched=refs_ready)
@@ -2885,6 +3007,21 @@ def _run_pipeline(project_dir, repo_name, pr_id, local_repo=None,
                     review.impact_score = restated.impact_score
                     review.impact_reason = restated.impact_reason
 
+        if review.incomplete_reason:
+            # No verdict line is printed and nothing below runs: the description is
+            # not written, nothing is merged, and the commit is not recorded as
+            # reviewed - so a retry reviews the pull request from scratch.
+            pg(STAGE_REVIEW, "error")
+            emit("\n⛔ The review did not examine this pull request — "
+                 f"{review.incomplete_reason}.")
+            emit("  PRISM discards it: no verdict, no description update, no merge. "
+                 "This is usually a network or access problem (a failed `git fetch`, a "
+                 "blocked shell). Fix it and retry the job.")
+            raise ReviewIncomplete(
+                f"The review did not examine this pull request ({review.incomplete_reason}), "
+                f"so it produced no verdict. Nothing was written to the pull request and "
+                f"nothing was merged. Retry the job once the cause is fixed — usually the "
+                f"clone could not reach CodeCommit or the reviewer could not run git.")
         emit(f"\n◆ Verdict: {review.verdict_raw or review.verdict_key}   "
              f"Impact: {review.impact_score or '?'}/10 {review.impact_reason}")
         # carry_forward/restate may have replaced `review`; set the flag last.

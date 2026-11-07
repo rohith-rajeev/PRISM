@@ -15,6 +15,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+import docreview
 from orchestrator import (REGION_DEFAULT, Cancelled, RunControl, followup_declined,
                           full_pipeline, run_followup)
 
@@ -62,6 +63,10 @@ class JobSpec:
     # behaves identically whoever asked for it.
     origin: str = "manual"
     origin_ref: str = ""
+
+    # Which kind of job this is. A documentation review (docreview.DocJobSpec)
+    # says "docs"; everything that reads `kind` treats a missing one as "pr".
+    kind = "pr"
 
     @property
     def label(self):
@@ -216,10 +221,15 @@ class Job:
     @property
     def branches(self):
         """"source → dest", or "" until the pipeline has looked the PR up."""
+        if getattr(self.spec, "kind", "pr") == "docs":
+            return self.spec.branches_text
         return f"{self.source} → {self.dest}" if self.source and self.dest else ""
 
     def summary_line(self):
         """One-line description for the detail screen header."""
+        if getattr(self.spec, "kind", "pr") == "docs":
+            return "  ·  ".join([self.spec.label, self.spec.branches_text,
+                                 self.spec.summary_bits()])
         bits = [self.spec.label, self.spec.region]
         if self.spec.origin == "codegen":
             bits.append("via codegen")
@@ -249,7 +259,8 @@ class JobManager:
     """
 
     def __init__(self, out_q, runner=full_pipeline, max_parallel=None,
-                 followup_runner=run_followup, on_outcome=None):
+                 followup_runner=run_followup, on_outcome=None,
+                 doc_followup_runner=docreview.run_followup):
         self.out_q = out_q
         # Optional observer, called on the worker thread as
         # on_outcome(job, summary=..., error=..., stopped=...) once a run ends.
@@ -257,6 +268,7 @@ class JobManager:
         # swallowed. None (the default) leaves behaviour exactly as it was.
         self._on_outcome = on_outcome
         self._followup_runner = followup_runner
+        self._doc_followup_runner = doc_followup_runner
         self.jobs = {}           # insertion-ordered; doubles as display order
         self._next_id = 1
         self._runner = runner
@@ -274,6 +286,15 @@ class JobManager:
         findings would be silently lost.
         """
         for job in self.jobs.values():
+            if getattr(spec, "kind", "pr") == "docs" or \
+                    getattr(job.spec, "kind", "pr") == "docs":
+                # A documentation review is the same job only when it covers
+                # the very same documents on the same branches.
+                if job.is_active and getattr(job.spec, "kind", "pr") == \
+                        getattr(spec, "kind", "pr") and \
+                        job.spec.dup_key == spec.dup_key:
+                    return job
+                continue
             if (job.is_active and job.spec.repo_name == spec.repo_name
                     and str(job.spec.pr_id) == str(spec.pr_id)):
                 return job
@@ -368,7 +389,10 @@ class JobManager:
     def _work(self, job):
         """Worker body. Posts messages; never touches Job state directly."""
         try:
-            summary = self._runner(
+            # A documentation job brings its own pipeline; a pull request uses
+            # the one this manager was built with, exactly as before.
+            runner = getattr(job.spec, "runner", None) or self._runner
+            summary = runner(
                 emit=lambda m, tag=None: job.emit_event("log", (m, tag)),
                 progress=lambda stage, state: job.emit_event("progress", (stage, state)),
                 control=job.control, ask=job.ask.ask, get_note=job.pop_note,
@@ -438,11 +462,16 @@ class JobManager:
             outcome = ("merged" if result.get("merged") is True
                        else f"not merged ({result.get('stopped') or job.status})")
             spec = job.spec
-            reply, sid = self._followup_runner(
-                text, spec.project_dir, spec.repo_name, spec.pr_id,
-                local_repo=spec.local_repo, region=spec.region, model=spec.model,
-                session_id=job.session_id or None, outcome=outcome,
-                emit=emit, control=control)
+            if getattr(spec, "kind", "pr") == "docs":
+                reply, sid = self._doc_followup_runner(
+                    text, spec.project_dir, model=spec.model,
+                    session_id=job.session_id or None, emit=emit, control=control)
+            else:
+                reply, sid = self._followup_runner(
+                    text, spec.project_dir, spec.repo_name, spec.pr_id,
+                    local_repo=spec.local_repo, region=spec.region, model=spec.model,
+                    session_id=job.session_id or None, outcome=outcome,
+                    emit=emit, control=control)
             if sid:
                 emit(sid, "session")
             reason = followup_declined(reply)
