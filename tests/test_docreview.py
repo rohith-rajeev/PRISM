@@ -594,10 +594,10 @@ class Pipeline(unittest.TestCase):
 
     def test_preflight_reports_every_missing_document_with_a_suggestion(self):
         with self.assertRaises(RuntimeError) as cm:
-            self.run_job(targets=[self.target(("docs/SPEC.md", "docs/other.md"))])
+            self.run_job(targets=[self.target(("docs/spce.md", "docs/other.md"))])
         msg = str(cm.exception)
         self.assertIn("Pre-flight", msg)
-        self.assertIn("docs/SPEC.md", msg)
+        self.assertIn("docs/spce.md", msg)
         self.assertIn("docs/other.md", msg)
         self.assertIn("Did you mean: docs/spec.md", msg)
         self.assertEqual(self.calls, [])
