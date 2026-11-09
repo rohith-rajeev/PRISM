@@ -353,7 +353,7 @@ class PreparedBlock(RealRepo):
         said = []
         self.assertFalse(o._fetch_pr_refs(str(self.clone), "main", "feat",
                                           emit=lambda m, *a, **k: said.append(m)))
-        self.assertTrue(any("will fetch them itself" in m for m in said))
+        self.assertTrue(any("Could not fetch the PR's branches:" in m for m in said))
 
 
 class PromptWiring(RealRepo):
@@ -641,3 +641,53 @@ class InstructionsStayLean(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class FetchFailureIsExplained(unittest.TestCase):
+    """The incident: "could not fetch ... check the connection and credentials" with no
+    hint which, because git's own message was thrown away."""
+
+    def run_fetch(self, results):
+        from unittest import mock
+        calls, said = [], []
+
+        def fake_run(cmd, **kw):
+            calls.append((cmd, kw))
+            r = results.pop(0)
+            if isinstance(r, Exception):
+                raise r
+            return subprocess.CompletedProcess(cmd, r[0], stdout="", stderr=r[1])
+        with mock.patch.object(o.subprocess, "run", fake_run), \
+                mock.patch.object(o.time, "sleep", lambda *_: None):
+            ok = o._fetch_pr_refs("/repo", "main", "feat",
+                                  emit=lambda m, *a, **k: said.append(m))
+        return ok, calls, said
+
+    def test_git_never_waits_for_a_person(self):
+        ok, calls, _ = self.run_fetch([(0, "")])
+        self.assertTrue(ok)
+        env = calls[0][1]["env"]
+        self.assertEqual(env["GIT_TERMINAL_PROMPT"], "0")
+        self.assertIs(calls[0][1]["stdin"], subprocess.DEVNULL)
+
+    def test_a_timeout_is_retried_once_with_a_longer_limit_and_can_succeed(self):
+        ok, calls, said = self.run_fetch([subprocess.TimeoutExpired("git", 120), (0, "")])
+        self.assertTrue(ok)
+        self.assertEqual(len(calls), 2)
+        self.assertGreater(calls[1][1]["timeout"], calls[0][1]["timeout"])
+        self.assertIn("--no-tags", calls[1][0])
+        self.assertTrue(any("Trying once more" in m for m in said))
+
+    def test_a_credentials_failure_is_named_and_not_retried(self):
+        ok, calls, said = self.run_fetch([(128, "fatal: Authentication failed for 'https://x'")])
+        self.assertFalse(ok)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(any("credentials" in m and "Authentication failed" in m for m in said))
+
+    def test_the_final_error_carries_the_cause(self):
+        self.run_fetch([subprocess.TimeoutExpired("git", 120),
+                        subprocess.TimeoutExpired("git", 300)])
+        with self.assertRaises(o.ReviewIncomplete) as cm:
+            o._ensure_reviewable_refs("/repo", {"sourceCommit": "a" * 40}, "feat", "main",
+                                      False, emit=lambda *a, **k: None)
+        self.assertIn("timed out", str(cm.exception))

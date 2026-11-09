@@ -1869,26 +1869,88 @@ PREFETCH_DIFF_EXCLUDES = (
 )
 
 
+# Why the last fetch of a clone failed, in words a person can act on, keyed by clone.
+# Read by _ensure_reviewable_refs so the final error says what git said.
+_FETCH_FAILURE = {}
+
+_FETCH_HINTS = (
+    (("could not read username", "authentication failed", "403", "401", "access denied",
+      "unable to locate credentials", "credential", "token has expired", "sso", "expired"),
+     "credentials: sign in to AWS again (`aws sso login` or `aws login`) and check that "
+     "git's CodeCommit credential helper works"),
+    (("couldn't find remote ref", "could not find remote ref", "not our ref"),
+     "the branch no longer exists on CodeCommit (merged and deleted, or renamed)"),
+    (("could not resolve host", "connection", "timed out", "network", "unreachable",
+      "ssl", "tls"),
+     "the connection to CodeCommit (network, VPN or proxy)"),
+)
+
+
+def _explain_fetch_failure(stderr, timed_out=False):
+    last = [ln.strip() for ln in (stderr or "").splitlines() if ln.strip()]
+    said = last[-1][:200] if last else ""
+    if timed_out:
+        return "the fetch timed out (a large repository or a slow connection)" + \
+            (f"; git said: {said}" if said else "")
+    low = (stderr or "").lower()
+    for needles, hint in _FETCH_HINTS:
+        if any(n in low for n in needles):
+            return f"{hint}; git said: {said}" if said else hint
+    return f"git said: {said}" if said else "git gave no reason"
+
+
+def _fetch_env():
+    """Git must never wait for a person: with no terminal a credential prompt is a
+    hang (or an instant failure that hides the real problem)."""
+    env = dict(os.environ)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
+
 def _fetch_pr_refs(local_repo, dest_ref, source_ref, emit=_emit_plain):
     """Fetch both branches once, so nothing later has to. True when it worked.
 
     A fetch reads remote refs and writes only remote-tracking refs, never the
     working tree, so it is safe outside the sync/merge lock — the same fetch the
     reviewer used to run for itself, and the slowest step of a review.
+
+    A failure says why (git's own last line, with a hint), and a slow fetch is given
+    a second, longer attempt: git keeps what it already downloaded, so the retry
+    carries on rather than starting again.
     """
     if not (local_repo and dest_ref and source_ref):
         return False
-    try:
-        emit("▸ Fetching the PR's branches …")
-        done = subprocess.run(["git", "fetch", "origin", dest_ref, source_ref],
-                              cwd=local_repo, capture_output=True,
-                              timeout=PREFETCH_GIT_TIMEOUT * 2)
-        if done.returncode != 0:
-            emit("⚠ Could not fetch the PR's branches — the reviewer will fetch them itself.")
-        return done.returncode == 0
-    except Exception:  # noqa: BLE001
-        emit("⚠ Could not fetch the PR's branches — the reviewer will fetch them itself.")
-        return False
+    key = str(local_repo)
+    _FETCH_FAILURE.pop(key, None)
+    emit("▸ Fetching the PR's branches …")
+    attempts = ((["git", "fetch", "origin", dest_ref, source_ref], PREFETCH_GIT_TIMEOUT * 2),
+                (["git", "fetch", "--no-tags", "origin", dest_ref, source_ref],
+                 PREFETCH_GIT_TIMEOUT * 5))
+    reason = ""
+    for i, (cmd, limit) in enumerate(attempts):
+        try:
+            done = subprocess.run(cmd, cwd=local_repo, capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace", timeout=limit,
+                                  stdin=subprocess.DEVNULL, env=_fetch_env())
+        except subprocess.TimeoutExpired:
+            reason, retry = _explain_fetch_failure("", timed_out=True), True
+        except Exception as e:  # noqa: BLE001
+            reason, retry = f"git could not be run ({e})", False
+        else:
+            if done.returncode == 0:
+                return True
+            reason = _explain_fetch_failure(done.stderr or done.stdout)
+            # Credentials and a deleted branch do not fix themselves in a minute.
+            retry = not any(n in reason for n in ("credentials:", "no longer exists"))
+        if i == 0 and retry:
+            emit(f"⚠ Fetching the PR's branches failed ({reason}). Trying once more, "
+                 f"with a longer limit …")
+            time.sleep(3)
+            continue
+        break
+    _FETCH_FAILURE[key] = reason
+    emit(f"⚠ Could not fetch the PR's branches: {reason}.")
+    return False
 
 
 def _ensure_reviewable_refs(local_repo, pr_meta, source_ref, dest_ref, refs_ready,
@@ -1931,8 +1993,10 @@ def _ensure_reviewable_refs(local_repo, pr_meta, source_ref, dest_ref, refs_read
     raise ReviewIncomplete(
         f"PRISM could not fetch the pull request's branches from CodeCommit, and this clone "
         f"does not have its latest commit ({commit[:8]}), so there is nothing to review. "
-        f"Nothing was reviewed, written or merged. Check the connection and credentials "
-        f"(`git fetch origin {source_ref}` in the clone) and retry the job.")
+        f"Nothing was reviewed, written or merged. Cause: "
+        f"{_FETCH_FAILURE.get(str(local_repo)) or 'unknown (the fetch gave no reason)'}. "
+        f"Fix it, check that `git fetch origin {source_ref}` works in the clone, and "
+        f"retry the job.")
 
 
 def _pr_change_scope(local_repo, pr_meta, source_ref, dest_ref, refs_ready):
