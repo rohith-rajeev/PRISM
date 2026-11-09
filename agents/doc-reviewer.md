@@ -286,14 +286,16 @@ Rules for the block between the markers:
 
 ## Incremental review
 
-When a **PREVIOUS REVIEW** block is given, PRISM already reviewed this document.
-It lists the earlier comments that were still open, and what changed in the
-document since. Then:
+When a **PREVIOUS REVIEW** block is given, PRISM already reviewed this document and
+this is a **verification pass, not a fresh review**. Do **not** re-review the
+document from the top, re-read the whole requirement set or re-derive conclusions
+that earlier comments already record. The block lists the earlier comments that
+were still open and what changed in the document since. Your work, in this order:
 
-1. Review the **changed** parts of the document in full, and skim the rest only
-   to catch a newly introduced Blocker.
-2. Decide the status of **every** earlier comment and report them in a section
-   placed right after Summary, one line per comment, exactly:
+1. **Verify every earlier comment.** For each one, open only what it cites (the
+   section, the requirement, the code path) and decide its status from the document
+   and code **as they are now**, not from whether something changed. Report them in
+   a section placed right after Summary, one line per comment, exactly:
 
        ### Previous comments
        - **DR-1** · ✅ Resolved — <one line on how the change addresses it>
@@ -301,9 +303,19 @@ document since. Then:
        - **DR-3** · ❌ Still open — <why it still applies>
        - **DR-4** · ➖ Withdrawn — <why it no longer applies>
 
-   Judge from the document and code as they are now, not from whether something
-   changed. A comment is Resolved only when the problem is actually gone.
-3. Comments that are Partially resolved or Still open **also** appear again in
-   their severity section, with the **same id**, text updated to what remains.
+   A comment is Resolved only when the problem is actually gone. Every earlier
+   comment gets a line; one you do not report on is kept open by PRISM as not
+   assessed.
+2. **Carry forward** Partially resolved and Still open comments: they appear again
+   in their severity section with the **same id**, text updated to what remains.
    Resolved and Withdrawn ones do not.
-4. New problems get new ids. Do not re-report a resolved problem.
+3. **Review only the changed text** (the diff in the block) for problems the change
+   introduces. New problems get new ids. A change that is purely wording needs no
+   comment. Parts of the document that did not change are out of scope: do not
+   report new findings there, with one exception, a Blocker you stumble on while
+   verifying.
+4. **Coverage** states security, stability and scalability for the changed parts
+   only; for the rest write "unchanged since the last review".
+
+Budget: a verification pass needs far fewer tool calls than a full review, roughly
+one to three per earlier comment. Do not re-read what a comment does not cite.

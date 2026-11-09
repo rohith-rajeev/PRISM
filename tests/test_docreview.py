@@ -459,6 +459,60 @@ class Pipeline(unittest.TestCase):
         self.assertEqual([r.meta["id"] for r in runs], [second["run_id"], first["run_id"]])
         self.assertIn("Body, revised.", self.remote_text())
 
+    def _edit_and_push(self):
+        _sh(self.clone, "fetch", "origin")
+        _sh(self.clone, "checkout", "-q", "feat/x")
+        _sh(self.clone, "pull", "-q", "origin", "feat/x")
+        p = self.clone / "docs" / "spec.md"
+        p.write_text(p.read_text(encoding="utf-8").replace("Body.", "Body, revised."),
+                     encoding="utf-8")
+        _sh(self.clone, "commit", "-qam", "revise")
+        _sh(self.clone, "push", "-q", "origin", "feat/x")
+
+    def test_an_incremental_review_is_a_verification_pass_not_a_full_review(self):
+        self.run_job()
+        self._edit_and_push()
+        self.run_job()
+        first, second = self.calls[0], self.calls[1]
+        self.assertIn("VERIFICATION pass", second)
+        self.assertIn("Do NOT re-review", second)
+        self.assertIn("EVERY earlier comment", second)
+        self.assertIn("Review ONLY the changed text", second)
+        # the full-review brief (read it all, check everything) is not sent again
+        self.assertNotIn("ALWAYS CHECKED", second)
+        self.assertNotIn("Requirement files:", second)
+        self.assertNotIn("VERIFICATION pass", first)
+        self.assertIn("ALWAYS CHECKED", first)
+
+    def test_earlier_comments_the_reviewer_skips_stay_open(self):
+        self.run_job()                  # leaves DR-1 (blocker) and DR-2 (major)
+        self._edit_and_push()
+        # the second report only mentions DR-1 (resolved); DR-2 is never reported on
+        self.reports = ["""**Verdict:** \u2705 Approve
+**Impact score:** 2/10 \u2014 small
+
+<<<PRISM-REVIEW>>>
+### Summary
+- **Document:** spec.
+
+### Previous comments
+- **DR-1** \u00b7 \u2705 Resolved \u2014 REQ-7 now has a spec.
+
+### Coverage
+- **Security:** unchanged since the last review
+- **Stability:** unchanged since the last review
+- **Scalability:** unchanged since the last review
+<<<END-PRISM-REVIEW>>>"""]
+        self.run_job()
+        _b, runs, _a = D.split_document(self.remote_text())
+        body = runs[0].body
+        self.assertIn("### Not assessed", body)
+        self.assertEqual([f[1] for f in D.findings(body)], ["DR-2"])   # still open, not lost
+        self.assertEqual(D.previous_statuses(body), {"DR-1": "resolved"})
+        self.assertIn("1 resolved, 1 not assessed", runs[0].meta["earlier"])
+        self.assertTrue(any("did not report on DR-2" in m for m in self.log
+                            if isinstance(m, str)))
+
     def test_dry_run_writes_nothing(self):
         before = self.remote_log()
         res = self.run_job(dry_run=True)
@@ -607,6 +661,30 @@ class Pipeline(unittest.TestCase):
             self.run_job(targets=[self.target(branch="no/such")])
         self.assertIn("Pre-flight", str(cm.exception))
         self.assertEqual(self.calls, [])
+
+
+class PreviousStatuses(unittest.TestCase):
+    BODY = ("### Summary\n- x\n\n### Previous comments\n"
+            "- **DR-1** \u00b7 \u2705 Resolved \u2014 fixed.\n"
+            "- **DR-2** \u00b7 \U0001f536 Partially resolved \u2014 half.\n"
+            "- **DR-3** \u00b7 \u274c Still open \u2014 yes.\n"
+            "- **DR-4** \u00b7 \u2796 Withdrawn \u2014 n/a.\n\n### Major\n"
+            "- **[Major] DR-2** \u00b7 Gap \u00b7 s \u2014 half.\n")
+
+    def test_every_status_is_read(self):
+        self.assertEqual(D.previous_statuses(self.BODY),
+                         {"DR-1": "resolved", "DR-2": "partial", "DR-3": "open",
+                          "DR-4": "withdrawn"})
+
+    def test_summary_names_each_status(self):
+        s = D.earlier_summary(D.previous_statuses(self.BODY), ["DR-9"])
+        self.assertEqual(s, "1 resolved, 1 partially resolved, 1 still open, "
+                            "1 withdrawn, 1 not assessed")
+
+    def test_nothing_is_added_when_everything_was_reported(self):
+        open_list = [("Major", "DR-2", "- **[Major] DR-2** \u00b7 Gap \u00b7 s \u2014 half.")]
+        body, missing = D.carry_unassessed(self.BODY, open_list)
+        self.assertEqual((body, missing), (self.BODY, []))
 
 
 class Tone(unittest.TestCase):

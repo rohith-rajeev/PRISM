@@ -379,6 +379,7 @@ def _render_run(run, newest):
         inner = (f"### {title}\n\n**Verdict:** {verdict}"
                  + (f" · **Impact:** {m['impact']}" if m.get("impact") else "")
                  + (f" · {m['counts']}" if m.get("counts") else "")
+                 + (f"\n\n**Earlier comments:** {m['earlier']}" if m.get("earlier") else "")
                  + "\n\n" + _wrapped(run.body))
     else:
         inner = (f"<details>\n<summary>{title} · {verdict}"
@@ -833,6 +834,17 @@ REQUIREMENTS_ABSENT = (
     "and is the design good to implement without breaking anything?")
 
 
+INCREMENTAL_MODE = (
+    "INCREMENTAL REVIEW - a VERIFICATION pass, not a fresh review. This document was already "
+    "reviewed and the earlier comments are listed below. Your job, in this order: (1) decide "
+    "for EVERY earlier comment whether it is now resolved, by checking the document (and the "
+    "code or requirement it cites) as they are today; (2) read the changes the author made "
+    "and report only NEW problems those changes introduce. Do NOT re-review the parts that "
+    "did not change, do not re-read the whole requirement set, and do not re-report a "
+    "problem that is resolved. Your conclusions on security, stability and scalability "
+    "cover the changed parts only; say 'unchanged since the last review' for the rest.")
+
+
 def build_prompt(target, doc_rel, doc_path, req_folder, req_files, req_truncated,
                  other_docs, worktree, other_worktrees, custom, previous, first_id,
                  persona=DEFAULT_PERSONA):
@@ -842,11 +854,16 @@ def build_prompt(target, doc_rel, doc_path, req_folder, req_files, req_truncated
     document against the codebase alone.
     """
     info = PERSONAS[persona]
+    incremental = bool(previous)
     lines = [
         f"PERSONA: {info['label']}.",
         info["lens"],
-        REQUIREMENTS_GIVEN if req_folder else REQUIREMENTS_ABSENT,
-        ALWAYS_TEXT,
+    ]
+    if incremental:
+        lines.append(INCREMENTAL_MODE)
+    else:
+        lines += [REQUIREMENTS_GIVEN if req_folder else REQUIREMENTS_ABSENT, ALWAYS_TEXT]
+    lines += [
         f"Review the document `{doc_rel}` in the {target.label} repository "
         f"'{target.repo_name}', branch '{target.branch}'.",
         f"Read it from: {doc_path}",
@@ -859,9 +876,13 @@ def build_prompt(target, doc_rel, doc_path, req_folder, req_files, req_truncated
         lines.append(f"Requirement documents (the source this document was decomposed from) "
                      f"are in: {req_folder}")
         shown = [str(p) for p in req_files]
-        lines.append("Requirement files:\n" + "\n".join(f"  - {p}" for p in shown)
-                     if shown else "That folder holds no readable files.")
-        if req_truncated:
+        if incremental:
+            lines.append("Open a requirement file only when an earlier comment or a change "
+                         "cites it. Do not re-read the set.")
+        else:
+            lines.append("Requirement files:\n" + "\n".join(f"  - {p}" for p in shown)
+                         if shown else "That folder holds no readable files.")
+        if req_truncated and not incremental:
             lines.append(f"(Only the first {MAX_REQ_FILES} files are listed; look in the "
                          f"folder for the rest.)")
     if other_docs:
@@ -887,18 +908,82 @@ def build_previous_block(runs, delta, open_list, persona=None):
         return ""
     last = prior.meta
     listed = "\n".join(f"  {line}" for _sev, _id, line in open_list) or "  (none were open)"
+    ids = ", ".join(_id for _sev, _id, _line in open_list)
     delta_text = delta.strip() if delta and delta.strip() else \
         "(no change to the document itself since that review)"
+    todo = (f"1. Report the status of EVERY earlier comment above ({ids}) under "
+            f"'### Previous comments', one line each: Resolved, Partially resolved, Still "
+            f"open or Withdrawn, with the evidence. A comment you do not mention is treated "
+            f"as not assessed.\n" if open_list else
+            "1. Nothing was left open, so there is nothing to verify.\n")
     return (
         f"PREVIOUS REVIEW - this is an INCREMENTAL review. PRISM reviewed this document "
         f"before (review v{last.get('v', '?')}, run {last.get('id', '?')}"
         + (f", at commit {last['commit'][:8]}" if last.get("commit") else "")
         + f"; verdict {last.get('verdict', 'unknown')}).\n"
-        f"Comments that review left open:\n{listed}\n\n"
+        f"Comments that review left open (each is yours to verify):\n{listed}\n\n"
         f"What the author changed since (review sections ignored):\n<<<\n{delta_text}\n>>>\n\n"
-        f"Follow the incremental-review steps in your workflow: report the status of every "
-        f"comment above under '### Previous comments', carry still-open ones forward with "
-        f"the same id, and review the changed parts in full.")
+        f"Your tasks:\n{todo}"
+        f"2. Carry Partially resolved and Still open comments forward with the same id and "
+        f"updated text.\n"
+        f"3. Review ONLY the changed text above for new problems; give them new ids.\n"
+        f"4. Do not review anything else.")
+
+
+_STATUS_LINE_RE = re.compile(
+    r"^\s*[-*]\s*\*\*(DR-\d+)\*\*\s*[·|:-]*\s*(.*)$", re.IGNORECASE | re.MULTILINE)
+_STATUS_WORDS = (("partial", "partial"), ("still open", "open"), ("open", "open"),
+                 ("resolved", "resolved"), ("withdrawn", "withdrawn"))
+
+
+def previous_statuses(body):
+    """{DR-n: resolved | partial | open | withdrawn} from a review's 'Previous comments'."""
+    m = _PREVIOUS_HEAD_RE.search(body or "")
+    if not m:
+        return {}
+    nxt = _NEXT_HEAD_RE.search(body, m.end())
+    section = body[m.end(): nxt.start() if nxt else len(body)]
+    out = {}
+    for lm in _STATUS_LINE_RE.finditer(section):
+        text = lm.group(2).lower()
+        head = text.split("\u2014")[0].split(" - ")[0]
+        for word, key in _STATUS_WORDS:
+            if word in head:
+                out[lm.group(1).upper()] = key
+                break
+    return out
+
+
+def carry_unassessed(body, open_list):
+    """(body, [ids]): earlier comments the reviewer never reported on stay OPEN.
+
+    A comment that is silently dropped would look resolved to every later review, so
+    PRISM puts each one back, verbatim, under its own heading. Nothing is called
+    resolved unless the reviewer said so.
+    """
+    said = set(previous_statuses(body))
+    seen = {fid for _s, fid, _l in findings(body)}
+    missing = [(sev, fid, line) for sev, fid, line in open_list
+               if fid.upper() not in said and fid.upper() not in seen]
+    if not missing:
+        return body, []
+    block = ("### Not assessed\n"
+             + "\n".join(line for _sev, _fid, line in missing)
+             + "\n")
+    cov = re.search(r"^#{2,4}\s*Coverage\s*$", body, re.IGNORECASE | re.MULTILINE)
+    body = (body[:cov.start()] + block + "\n" + body[cov.start():]) if cov \
+        else body.rstrip("\n") + "\n\n" + block
+    return body, [fid for _s, fid, _l in missing]
+
+
+def earlier_summary(statuses, unassessed=()):
+    names = (("resolved", "resolved"), ("partial", "partially resolved"),
+             ("open", "still open"), ("withdrawn", "withdrawn"))
+    bits = [f"{sum(1 for v in statuses.values() if v == k)} {label}" for k, label in names
+            if any(v == k for v in statuses.values())]
+    if unassessed:
+        bits.append(f"{len(unassessed)} not assessed")
+    return ", ".join(bits)
 
 
 # ---- running the agent -------------------------------------------------------
@@ -1180,7 +1265,7 @@ def _pipeline(project_dir, targets, requirements_path="", model=None,
             t = wt.target
             others = [(o.target.label, str(o.path)) for o in trees if o is not wt]
             _b, runs, _a = split_document(old_text)
-            previous = ""
+            previous, open_list = "", []
             prior = latest_run(runs, persona)
             if prior is not None:
                 last = prior.meta
@@ -1242,6 +1327,19 @@ def _pipeline(project_dir, targets, requirements_path="", model=None,
                      f"{', '.join(ALWAYS_NAMES[w] for w in skipped)}"
                      f" - it is meant to for every review. Check that area yourself, or run "
                      f"the review again.")
+            earlier = ""
+            if previous:
+                # An incremental review is a verification pass: every comment that was
+                # open must come back with a status, or stay open.
+                body, unassessed = carry_unassessed(body, open_list)
+                statuses = previous_statuses(body)
+                earlier = earlier_summary(statuses, unassessed)
+                if unassessed:
+                    emit(f"⚠ The reviewer did not report on {', '.join(unassessed)}; "
+                         f"{'it stays' if len(unassessed) == 1 else 'they stay'} open "
+                         f"under 'Not assessed'.")
+                if earlier:
+                    emit(f"▸ {rel}: earlier comments - {earlier}.")
             counts = severity_counts(body)
             key, raised = reconcile_verdict(res.verdict_key, counts)
             if raised:
@@ -1258,6 +1356,8 @@ def _pipeline(project_dir, targets, requirements_path="", model=None,
                     "verdict": verdict_label(key) + (" (partial)" if partial else ""),
                     "impact": f"{res.impact_score}/10" if res.impact_score else "",
                     "counts": counts_text(counts)}
+            if earlier:
+                meta["earlier"] = earlier
             new_text = with_review(old_text, Run(meta, body))
             if not outside_unchanged(old_text, new_text):
                 raise RuntimeError(f"Refusing to write {rel}: the review would have changed "

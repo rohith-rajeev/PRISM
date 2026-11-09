@@ -133,8 +133,10 @@ project folder — worth a line in your `.gitignore`.)
 
 **Re-reviews are incremental.** Each run is kept in the section as a numbered
 version, newest first. A later run is told which comments were still open and
-what the author changed since; it reports each earlier comment as resolved,
-partly resolved, still open or withdrawn, and reviews the changed parts in full.
+what the author changed since. It is a verification pass, not a fresh review: it
+reports each earlier comment as resolved, partly resolved, still open or withdrawn,
+and looks for new problems only in the text the author changed. A comment it fails
+to report on stays open, under "Not assessed", never silently resolved.
 
 **What the agent can and cannot do.** The agent only reports. PRISM, not the
 agent, writes the section, and refuses to write if anything outside the section
