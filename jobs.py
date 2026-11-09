@@ -11,6 +11,7 @@ note on JobManager.
 """
 
 import collections
+import dataclasses
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -246,6 +247,10 @@ class Job:
         return "  ·  ".join(bits)
 
 
+# Sentinel for retry(): "leave the job's model as it is" (None means the default model).
+KEEP_MODEL = object()
+
+
 class DuplicateJob(Exception):
     """Raised when the same pull request is already being worked on."""
 
@@ -321,7 +326,7 @@ class JobManager:
         self._next_id += 1
         return job
 
-    def retry(self, job_id):
+    def retry(self, job_id, model=KEEP_MODEL):
         """Rerun a finished job in place — same id, row and spec.
 
         Same repo, PR id, flags and model — nothing to retype, and nothing
@@ -341,6 +346,10 @@ class JobManager:
         job = self.jobs.get(job_id)
         if job is None or not job.is_terminal:
             return None
+        if model is not KEEP_MODEL and (model or None) != job.spec.model:
+            # The next iteration may use a different model; everything else
+            # in the spec stays exactly as it was.
+            job.spec = dataclasses.replace(job.spec, model=model or None)
         dup = self.duplicate_of(job.spec)
         if dup is not None:
             raise DuplicateJob(

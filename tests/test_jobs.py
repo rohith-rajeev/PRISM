@@ -93,6 +93,33 @@ class RetryTests(unittest.TestCase):
         self.m.retry(job.id)
         self.assertIsNone(job.pop_note())
 
+    def test_retry_can_switch_the_model_and_keeps_the_rest_of_the_spec(self):
+        job = self.m.create(spec("214", model="old/model", dry_run=True))
+        job.status = J.DONE
+        self.m.retry(job.id, model="new/model")
+        self.assertEqual(job.spec.model, "new/model")
+        self.assertTrue(job.spec.dry_run)
+        self.assertEqual(job.spec.pr_id, "214")
+
+    def test_retry_without_a_model_keeps_it_and_an_empty_one_means_default(self):
+        job = self.m.create(spec("214", model="old/model"))
+        job.status = J.DONE
+        self.m.retry(job.id)
+        self.assertEqual(job.spec.model, "old/model")
+        job.status = J.DONE
+        self.m.retry(job.id, model="")
+        self.assertIsNone(job.spec.model)
+
+    def test_a_document_review_can_be_retried_with_another_model(self):
+        import docreview as DR
+        t = DR.DocTarget(role="BE", repo_name="r", local_repo="/tmp/r", branch="b",
+                         files=("docs/a.md",))
+        job = self.m.create(DR.DocJobSpec(project_dir="/tmp", targets=(t,), model="a/b"))
+        job.status = J.DONE
+        self.assertIs(self.m.retry(job.id, model="c/d"), job)
+        self.assertEqual(job.spec.model, "c/d")
+        self.assertEqual(job.status, J.QUEUED)
+
     def test_retrying_an_active_job_is_a_no_op(self):
         job = self.m.create(spec("214"))
         self.assertEqual(job.status, J.QUEUED)   # active — nothing to retry yet

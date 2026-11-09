@@ -2780,7 +2780,8 @@ class App(tk.Tk):
             bits.append(_since(time.time() - record["started"]))
         bits.append(f"job {job_id}")
         spec = record.get("spec") or {}
-        bits += [record.get("branches") or "", spec.get("region") or ""]
+        bits += [record.get("branches") or "", spec.get("region") or "",
+                 f"model {spec['model']}" if spec.get("model") else "default model"]
         self.cli_d_title.config(text=CJ.label(record))
         self.cli_d_sub.config(text="  ·  ".join(b for b in bits if b))
         if record.get("verdict") and not active:
@@ -3253,6 +3254,19 @@ class App(tk.Tk):
                                          style="outline", height=30, width=110,
                                          font=FONT_S)
         self.new_job_btn.pack(side="right", padx=(0, 8))
+        # ---- model: what this run used, and what a retry will use. Changing it
+        # affects only the next run of this job, never the one in progress. ----
+        mrow = RoundedCard(root)
+        mrow.pack(fill="x", pady=(0, 6))
+        mi_ = mrow.inner
+        mi_.config(padx=12, pady=5)
+        self._lab(mi_, "MODEL", font=FONT_XS).pack(side="left", padx=(0, 10))
+        self.detail_model_picker = Picker(mi_, title="SELECT MODEL", empty_label="Default model",
+                                          group_key=None, empty_hint="Loading models…",
+                                          field_height=26, field_chars=34)
+        self.detail_model_picker.pack(side="left")
+        self.detail_model_hint = self._lab(mi_, "", font=FONT_XS)
+        self.detail_model_hint.pack(side="left", padx=(10, 0))
         # ---- progress: below the action, because it reports on it ----
         self.seg = ProgressBar(root)
         self.seg.pack(fill="x", pady=(2, 4))
@@ -3438,6 +3452,12 @@ class App(tk.Tk):
 
     def _apply_models(self, models):
         self.model_picker.set_models(models)
+        picker = getattr(self, "detail_model_picker", None)
+        if picker is not None:
+            picker.set_models(models)
+            job = self.manager.jobs.get(self.selected_job_id)
+            if job is not None:      # set_models drops a value the list lacks
+                picker.set_custom(self._job_model(job))
         if getattr(self, "doc_form", None) is not None:
             self.doc_form.set_models(models)
         n_prov = len({m.partition("/")[0] for m in models}) if models else 0
@@ -3807,10 +3827,23 @@ class App(tk.Tk):
         self._new_return = None
         self._show_screen(self.detail_screen)
         self._render_job(job)
+        self.detail_model_picker.set_custom(self._job_model(job))
+        self._refresh_model_hint(job)
         self._refresh_pill()
 
+    @staticmethod
+    def _job_model(job):
+        return job.spec.model or ""
+
+    def _refresh_model_hint(self, job):
+        if job.is_terminal:
+            text = "Change it to use another model when you press Retry."
+        else:
+            text = "Used by this run. Change it before the next Retry."
+        self.detail_model_hint.config(text=text)
+
     def _close_pickers(self):
-        pickers = [getattr(self, "be_picker", None), getattr(self, "fe_picker", None),
+        pickers = [getattr(self, "detail_model_picker", None), getattr(self, "be_picker", None), getattr(self, "fe_picker", None),
                    getattr(self, "model_picker", None)]
         form = getattr(self, "doc_form", None)
         if form is not None:
@@ -4248,8 +4281,12 @@ class App(tk.Tk):
         """Resubmit a finished job's exact spec as a new one — same repo, PR
         id and flags, no form to refill. The new job's own review picks up
         automatically where PRISM's last one left off (see JobManager.retry)."""
+        job = self.manager.jobs.get(job_id)
+        model = J.KEEP_MODEL
+        if job is not None and job_id == self.selected_job_id and self.screen is self.detail_screen:
+            model = self.detail_model_picker.get()      # "" = the default model
         try:
-            new_job = self.manager.retry(job_id)
+            new_job = self.manager.retry(job_id, model=model)
         except J.DuplicateJob as e:
             show_warning(self, "Already running", str(e))
             return
@@ -4312,6 +4349,7 @@ class App(tk.Tk):
             self.stop_btn.set_text("■  Stop")
             self.stop_btn.set_command(self._stop)
             self.stop_btn.set_enabled(job.is_active)
+        self._refresh_model_hint(job)
         self._render_log(job)
         self._update_note_controls(job)
         if job.pending_question:
