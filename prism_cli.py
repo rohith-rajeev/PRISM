@@ -20,6 +20,7 @@ Stdlib only, and no Tkinter - this module must import on a machine with no
 display and no Tk.
 """
 import argparse
+import dataclasses
 import json
 import os
 import re
@@ -721,6 +722,9 @@ def build_parser():
     rt.add_argument("job_id")
     rt.add_argument("-d", "--detach", action="store_true")
     rt.add_argument("-q", "--quiet", action="store_true")
+    rt.add_argument("-m", "--model", default=None,
+                    help="use this model for the rerun (default: the job's own; "
+                         "'default' selects the engine's default model)")
 
     a = sub.add_parser("ask", help="ask the reviewer about a finished job (read-only)")
     a.add_argument("job_id")
@@ -945,11 +949,14 @@ def cmd_retry(args):
         # The webhook is a machine-wide setting, read fresh as the desktop does.
         spec = J.JobSpec(**dict(CJ.spec_to_dict(spec), webhook_url=CFG.get_webhook_url() or None,
                                 origin="cli"))
+    if args.model:
+        spec = dataclasses.replace(spec, model=None if args.model == "default" else args.model)
     dup = CJ.find_duplicate(spec)
     if dup is not None and dup.get("id") != args.job_id:
         raise UsageError(f"{spec.label} is already being reviewed (job {dup['id']}).")
     if args.detach:
-        return detach(["retry", args.job_id], args.job_id, spec.label)
+        return detach(["retry", args.job_id] + (["--model", args.model] if args.model else []),
+                      args.job_id, spec.label)
     return execute(spec, args.job_id, quiet=args.quiet)
 
 

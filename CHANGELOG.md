@@ -4,6 +4,15 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v5.7
+
+- **Pick the model for the next run from a job's own screen.** Every pull-request
+  and document review now shows the model it used, and you can choose another one
+  there before pressing Retry. Nothing else about the job changes.
+- **A finished document review can be re-run from its screen** to start another
+  incremental pass, the same way a pull request can. From the command line,
+  `prism retry <id> --model <name>` does the same.
+
 ## v5.6
 
 - **Re-reviewing a document now verifies the earlier comments instead of reviewing
