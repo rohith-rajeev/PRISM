@@ -503,7 +503,7 @@ class Pipeline(unittest.TestCase):
         self.assertIn("was not found", str(cm.exception))
 
     def test_a_reply_without_a_report_writes_nothing_and_fails_the_job(self):
-        self.reports = ["I looked at it and it is fine."]
+        self.reports = ["I looked at it and it is fine."] * 2     # the retry fails too
         O_cont = O._continue_turn
         O._continue_turn = lambda *a, **k: (0, "still no report", "sess-1")
         self.addCleanup(setattr, O, "_continue_turn", O_cont)
@@ -571,6 +571,59 @@ class Pipeline(unittest.TestCase):
         self.run_job(progress=lambda s, st: seen.append((s, st)))
         self.assertIn((D.STAGE_DOC_PUSH, "done"), seen)
         self.assertEqual(seen[0], (D.STAGE_DOC_REVIEW, "active"))
+
+
+    def test_a_remark_about_coverage_does_not_discard_a_delivered_review(self):
+        """The frontend document was dropped as "not examined" because its Coverage said
+        it "did not read the requirements ..." - though a full review came with it."""
+        report = REPORT.replace("### Coverage", "### Coverage\n- Did not read the requirements "
+                                "folder again, as it was read for the other document.")
+        self.reports = [report]
+        res = self.run_job()
+        self.assertEqual(res["documents"], 1)
+        self.assertEqual(res["not_reviewed"], 0)
+        self.assertTrue(any("check its Coverage" in m for m in self.log if isinstance(m, str)))
+
+    def test_a_declared_incomplete_review_is_retried_once(self):
+        gave_up = ("**Verdict:** \u2753 Review incomplete\n**Impact score:** n/a\n\n"
+                   "Summary: could not read it. Coverage: 0 files reviewed.")
+        self.reports = [gave_up]               # the second attempt gets the normal REPORT
+        res = self.run_job()
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(res["documents"], 1)
+
+    def test_preflight_reports_every_missing_document_with_a_suggestion(self):
+        with self.assertRaises(RuntimeError) as cm:
+            self.run_job(targets=[self.target(("docs/SPEC.md", "docs/other.md"))])
+        msg = str(cm.exception)
+        self.assertIn("Pre-flight", msg)
+        self.assertIn("docs/SPEC.md", msg)
+        self.assertIn("docs/other.md", msg)
+        self.assertIn("Did you mean: docs/spec.md", msg)
+        self.assertEqual(self.calls, [])
+
+    def test_preflight_reports_a_missing_branch_before_any_model_time(self):
+        with self.assertRaises(RuntimeError) as cm:
+            self.run_job(targets=[self.target(branch="no/such")])
+        self.assertIn("Pre-flight", str(cm.exception))
+        self.assertEqual(self.calls, [])
+
+
+class Tone(unittest.TestCase):
+    def test_narration_is_removed_and_prose_becomes_bullets(self):
+        out = D.professionalise(
+            "### Summary\nI reviewed the backend document against 12 requirements. "
+            "Refunds are missing.\nLet me note the main risk.\n- **Security:** ok\n\n"
+            "### Blockers\n- **[Blocker] DR-1** \u00b7 Gap \u00b7 s \u2014 I think x.\n")
+        self.assertNotIn("I reviewed", out)
+        self.assertNotIn("Let me", out)
+        self.assertIn("- Refunds are missing.", out)
+        self.assertIn("- **[Blocker] DR-1** \u00b7 Gap \u00b7 s \u2014 I think x.", out)
+
+    def test_counting_is_unaffected(self):
+        body = D.sanitise_body("### Summary\nWe checked it.\n### Major\n"
+                               "- **[Major] DR-2** \u00b7 Gap \u00b7 s \u2014 y.")
+        self.assertEqual(D.severity_counts(body)["Major"], 1)
 
 
 class ContinuationTurns(unittest.TestCase):

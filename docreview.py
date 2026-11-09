@@ -18,6 +18,7 @@ Nothing here imports Tk, and nothing here is used by the pull-request pipeline;
 it only borrows engine plumbing from orchestrator.py.
 """
 
+import difflib
 import json
 import re
 import subprocess
@@ -506,6 +507,15 @@ def parse_agent_report(text):
     body = blocks[-1].strip()
     if not body:
         return res, None
+    if res.incomplete_reason and res.verdict_key != "incomplete" and findings(body):
+        # The reviewer is told to write no review block when it could not read what it
+        # was given, so a delivered block IS a review. A phrase like "did not read the
+        # requirements" inside it is the reviewer describing its own coverage (often
+        # about a part of the requirements, or a repeat of the other document's read)
+        # and failed a perfectly good review of the frontend document as "not examined".
+        # Keep the review and carry the phrase as a note. Only when it carries comments:
+        # a block with none that says it read nothing is the placeholder PRISM refuses.
+        res.caveat, res.incomplete_reason = res.incomplete_reason, ""
     return res, sanitise_body(body)[:MAX_REVIEW_CHARS]
 
 
@@ -514,7 +524,45 @@ def sanitise_body(body):
     it must not be able to forge or close the section, or a run record."""
     body = body.replace("<!-- prism-review", "&lt;!-- prism-review")
     body = body.replace("<<<PRISM-REVIEW>>>", "").replace("<<<END-PRISM-REVIEW>>>", "")
-    return body.strip("\n")
+    return professionalise(body.strip("\n"))
+
+
+# Conversational narration the comments must not carry: "I reviewed the document",
+# "We checked ...", "Let me start by ...". The comments are a record, not a chat.
+_NARRATION_RE = re.compile(
+    r"^(?:(?:I|We)(?:'ve|\s+have|\s+also|\s+then|\s+first)*\s+"
+    r"(?:reviewed|read|examined|checked|looked|went|analy[sz]ed|inspected|verified|"
+    r"cross-?checked|compared|started|began|focused|noticed|found|observed)\b"
+    r"|(?:Let me|Let's|Here(?:'s| is| are)|Below (?:is|are)|As requested|Sure|Certainly|"
+    r"Based on my (?:review|analysis))\b)[^.\n]*\.?\s*", re.IGNORECASE)
+_LEADING_PERSON_RE = re.compile(r"^(?:I|We)\s+(?=(?:could|couldn't|did|didn't|was|were|recommend|"
+                                r"suggest|am|are|cannot|can't)\b)", re.IGNORECASE)
+
+
+def professionalise(body):
+    """The review body with narration removed and prose lines made into bullets.
+
+    Applies only to the free-text parts (Summary and Coverage). Comment lines,
+    headings, tables, quotes and anything already a list item are left alone, so
+    the shape PRISM counts and tracks comments by is never touched.
+    """
+    out, section = [], ""
+    for line in body.split("\n"):
+        head = re.match(r"^#{2,4}\s*(.+?)\s*$", line)
+        if head:
+            section = head.group(1).strip().lower()
+            out.append(line)
+            continue
+        text = line.strip()
+        if not text or section not in ("summary", "coverage") or text[0] in "-*+|>#<`" \
+                or re.match(r"^\d+[.)]\s", text):
+            out.append(line)
+            continue
+        text = _NARRATION_RE.sub("", text, count=1).strip()
+        text = _LEADING_PERSON_RE.sub("", text)
+        if text:
+            out.append("- " + text[0].upper() + text[1:])
+    return "\n".join(out)
 
 
 _VERDICT_FLOOR = (("block", 3), ("request-changes", 2), ("approve-with-comments", 1),
@@ -546,7 +594,6 @@ def verdict_label(key):
 
 def doc_delta(old_text, new_text, limit=MAX_DELTA_CHARS):
     """A unified diff of what the author changed, review sections ignored."""
-    import difflib
     old = strip_section(old_text).splitlines(keepends=True)
     new = strip_section(new_text).splitlines(keepends=True)
     diff = "".join(difflib.unified_diff(old, new, "reviewed", "now", n=2))
@@ -968,6 +1015,29 @@ def _write(path, text):
         fh.write(text)
 
 
+def _readable(path):
+    try:
+        with open(path, "rb") as fh:
+            fh.read(1)
+        return True
+    except OSError:
+        return False
+
+
+def _did_you_mean(wt, rel):
+    """" Did you mean ...?" for a path that is not on the branch, or "". Catches the
+    usual causes: a different case, a typo, a file in another folder."""
+    try:
+        listing = _git(wt.path, "ls-tree", "-r", "--name-only", "HEAD", check=False).stdout
+        names = [n for n in listing.splitlines() if n.lower().endswith((".md", ".txt", ".rst"))]
+    except Exception:  # noqa: BLE001
+        return ""
+    norm = rel.replace("\\", "/")
+    near = [n for n in names if n.lower() == norm.lower()] \
+        or difflib.get_close_matches(norm, names, n=3, cutoff=0.6)
+    return f" Did you mean: {', '.join(near)}?" if near else ""
+
+
 def check_spec(spec):
     """A human-readable problem with the job as specified, or None."""
     if not spec.targets:
@@ -1034,10 +1104,21 @@ def _pipeline(project_dir, targets, requirements_path="", model=None,
         # Every worktree first: the requirements and the cross-repo reads must be
         # available to every document, and a bad branch should fail before any
         # model time is spent.
+        # Pre-flight, part 1: every branch. All problems are gathered and reported
+        # together, so one typo does not hide another behind a retry.
+        problems = []
         for t in targets:
             wt = _Worktree(t, run_id, emit)
             stack.append(wt)         # registered first so a half-made one is cleaned up
-            trees.append(wt.__enter__())
+            try:
+                trees.append(wt.__enter__())
+            except O.Cancelled:
+                raise
+            except Exception as e:  # noqa: BLE001
+                problems.append(f"{t.label}: {e}")
+        if problems:
+            raise RuntimeError("Pre-flight check failed - nothing was reviewed.\n  - "
+                               + "\n  - ".join(problems))
         # Requirements are optional. Given, the review is centred on whether the
         # decomposition satisfies all of them; absent, on the document against the codebase.
         req_folder, req_files, req_trunc = None, [], False
@@ -1057,24 +1138,38 @@ def _pipeline(project_dir, targets, requirements_path="", model=None,
         else:
             emit("▸ No requirements given: reviewing the document against the codebase alone.")
 
-        # Check every document up front, so a typo in the last file name does not
-        # cost a model run on the first.
+        # Pre-flight, part 2: every document, on its branch, before any model time.
         docs = []                                   # (worktree, rel, path, old_text)
+        problems = []
         for wt in trees:
             for rel in wt.target.files:
                 path = resolve_inside(wt.path, rel)
                 if path is None or not path.is_file():
-                    raise RuntimeError(f"{wt.target.label}: '{rel}' is not a file on branch "
-                                       f"'{wt.target.branch}'. Paths are relative to the "
-                                       f"repository root.")
+                    problems.append(
+                        f"{wt.target.label}: '{rel}' is not a file on branch "
+                        f"'{wt.target.branch}'. Paths are relative to the repository root."
+                        + _did_you_mean(wt, rel))
+                    continue
                 if path.stat().st_size > MAX_DOC_BYTES:
-                    raise RuntimeError(f"{wt.target.label}: '{rel}' is larger than "
-                                       f"{MAX_DOC_BYTES // (1024 * 1024)} MB.")
+                    problems.append(f"{wt.target.label}: '{rel}' is larger than "
+                                    f"{MAX_DOC_BYTES // (1024 * 1024)} MB.")
+                    continue
                 try:
                     docs.append((wt, rel, path, _read(path)))
-                except UnicodeDecodeError:
-                    raise RuntimeError(f"{wt.target.label}: '{rel}' is not a UTF-8 text "
-                                       f"document.") from None
+                except (UnicodeDecodeError, OSError):
+                    problems.append(f"{wt.target.label}: '{rel}' is not a readable UTF-8 "
+                                    f"text document.")
+        unreadable = [str(p) for p in req_files if not _readable(p)]
+        if unreadable:
+            problems.append(f"{len(unreadable)} requirement file(s) cannot be read, for "
+                            f"example {unreadable[0]}.")
+        if problems:
+            raise RuntimeError("Pre-flight check failed - nothing was reviewed.\n  - "
+                               + "\n  - ".join(problems))
+        emit("✔ Pre-flight: " + "; ".join(
+            f"{wt.target.label} {wt.target.branch} ({len(wt.target.files)} document"
+            f"{'' if len(wt.target.files) == 1 else 's'} found)" for wt in trees)
+            + (f"; {len(req_files)} requirement file(s) readable" if req_folder else "") + ".")
         all_docs = [f"{wt.target.label}: {rel}" for wt, rel, _p, _t in docs]
         if custom_instructions.strip():
             emit(f"▸ Custom instructions given to the reviewer: "
@@ -1107,16 +1202,34 @@ def _pipeline(project_dir, targets, requirements_path="", model=None,
             emit(f"═══ {t.label} · {rel} ═══")
             res, body, sid, partial = review_document(
                 prompt, project_dir, emit, model, control, meter, ask=ask, get_note=get_note)
+            if res.incomplete_reason or body is None:
+                # One automatic second attempt in a fresh session: a reviewer that gave up
+                # (or lost its way) once usually does not do so twice, and a person should
+                # not have to retry a whole job for one document.
+                why = res.incomplete_reason or "no review report was delivered"
+                emit(f"⚠ {rel}: first attempt gave no review ({why}). Trying once more.")
+                ck()
+                retry_prompt = (prompt + "\n\nPRISM has verified that every path above exists "
+                                "and is readable; read them with your tools. A previous "
+                                "attempt at this document did not deliver a review. Read the "
+                                "document and the requirements, then report in the required "
+                                "format.")
+                res, body, sid, partial = review_document(
+                    retry_prompt, project_dir, emit, model, control, meter, ask=ask,
+                    get_note=get_note)
             session_id = sid or session_id
             if sid:
                 emit(sid, "session")
+            if res.caveat:
+                emit(f"⚠ {rel}: the report contains \"{res.caveat[:140]}\" - the review was "
+                     f"delivered and is kept; check its Coverage section for what was not read.")
             if res.incomplete_reason:
                 # Same rule as a pull request: a reviewer that did not read the document
                 # has no verdict. Nothing is written or committed for it.
                 failed.append(rel)
                 emit(f"⛔ The reviewer did not examine {rel} — {res.incomplete_reason}. "
-                     f"Nothing is written for it. Fix the cause (is the file there, and "
-                     f"the requirements folder readable?) and retry the job.")
+                     f"Nothing is written for it. Both attempts failed; check the "
+                     f"requirements folder and the document, then retry the job.")
                 continue
             if body is None:
                 failed.append(rel)

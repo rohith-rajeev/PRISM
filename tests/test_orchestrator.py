@@ -1089,3 +1089,23 @@ class DetachedChildEnvironment(unittest.TestCase):
         import cli_jobs as CJ
         with mock.patch.dict(CJ.os.environ, {"PATH": "/usr/bin"}, clear=True):
             self.assertEqual(CJ.child_env(), {"PATH": "/usr/bin"})
+
+
+class StopKillsTheWholeTree(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "process groups are POSIX")
+    def test_cancel_takes_the_launcher_and_its_helpers_down(self):
+        proc = subprocess.Popen(["sh", "-c", "sleep 60 & echo $!; wait"],
+                                stdout=subprocess.PIPE, text=True, **o._group_kwargs())
+        helper = int(proc.stdout.readline())
+        control = o.RunControl()
+        control.attach(proc)
+        control.cancel()
+        proc.wait(timeout=10)
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            try:
+                os.kill(helper, 0)
+            except OSError:
+                return
+            time.sleep(0.1)
+        self.fail("the helper process survived Stop")
