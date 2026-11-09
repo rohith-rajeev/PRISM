@@ -4,6 +4,21 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v5.4
+
+- **Fixed: a document could be skipped as "not reviewed"** (for example the
+  frontend document of a two-repo review) when the reviewer's Coverage merely
+  mentioned something it hadn't read. A review that carries comments is now kept,
+  with a warning, and a document that gets no review is retried once on its own.
+- **Checks before the review starts.** Every branch, document and requirements
+  file is verified up front and all problems are reported together, with a
+  "did you mean" for a mistyped file name.
+- **Stop now really stops a run.** It ends the review engine and everything it
+  started, so a stopped run no longer lingers or keeps using tokens.
+- **Document review comments are formal and consistent.** Bullet lists only, no
+  conversational wording ("I reviewed…"), the same fields on every comment, and
+  fixed Summary and Coverage lines.
+
 ## v5.3
 
 - **Fixed: on Windows, a review could finish but the PR description wasn't

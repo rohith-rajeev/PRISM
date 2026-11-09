@@ -270,6 +270,39 @@ class SyncConflict(RuntimeError):
             f"{len(entries)} file(s).{(chr(10) + detail) if detail else ''}")
 
 
+def _group_kwargs():
+    """Popen kwargs that put a child in its own process group / session, so that
+    stopping it can take its helpers down with it."""
+    if os.name == "nt":
+        return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+    return {"start_new_session": True}
+
+
+def kill_tree(proc, force=False):
+    """Stop `proc` and everything it started.
+
+    The review engine is a launcher that spawns helpers which inherit its output
+    pipe. Terminating only the launcher left them running and the pipe open, so
+    a stopped run kept "running" (and kept spending tokens) until they exited.
+    """
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                           capture_output=True, timeout=10)
+        else:
+            import signal
+            os.killpg(proc.pid, signal.SIGKILL if force else signal.SIGTERM)
+        return
+    except Exception:  # noqa: BLE001 - fall back to the one process we know
+        pass
+    try:
+        proc.kill() if force else proc.terminate()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 class RunControl:
     """Cancellation token shared between the UI thread and the worker.
 
@@ -289,10 +322,11 @@ class RunControl:
         with self._lock:
             proc = self._proc
         if proc is not None:
-            try:
-                proc.terminate()
-            except Exception:  # noqa: BLE001
-                pass
+            kill_tree(proc)
+            # Anything that ignored the polite request is not given the choice twice.
+            t = threading.Timer(3.0, kill_tree, args=(proc, True))
+            t.daemon = True
+            t.start()
 
     def cancelled(self):
         return self._event.is_set()
@@ -367,6 +401,9 @@ class ReviewResult:
     # changes (see review_incompleteness). Such a "review" has no verdict worth the
     # name, so it can never authorise a merge, whatever its verdict line says.
     incomplete_reason: str = ""
+    # Something the report said that reads like "not reviewed", from a report that
+    # nonetheless delivered a review. A note for the person, not a failure.
+    caveat: str = ""
 
     def merge_allowed(self) -> bool:
         v = self.verdict_key
@@ -1080,7 +1117,7 @@ def _run_stream(cmd, cwd, emit, timeout=None, control=None, json_mode=False,
         cmd, cwd=cwd, env=_env_for_cwd(cwd), stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
-        bufsize=1,
+        bufsize=1, **_group_kwargs(),
     )
     if control is not None:
         control.attach(proc)
@@ -1111,7 +1148,7 @@ def _run_stream(cmd, cwd, emit, timeout=None, control=None, json_mode=False,
                 if reason:
                     cut["why"] = reason
                     emit(f"⚠ Stopping this step: {reason}.")
-                    proc.kill()
+                    kill_tree(proc, force=True)
                     return
                 if idle >= next_beat:
                     next_beat = idle + HEARTBEAT_EVERY
@@ -1200,10 +1237,7 @@ def _run_stream(cmd, cwd, emit, timeout=None, control=None, json_mode=False,
             emit_block(piece)
         proc.wait(timeout=60)
     except Exception as e:  # noqa: BLE001
-        try:
-            proc.kill()
-        except Exception:  # noqa: BLE001
-            pass
+        kill_tree(proc, force=True)
         out_lines.append(f"\n[process error: {e}]\n")
         return 1, "".join(out_lines), None
     finally:
