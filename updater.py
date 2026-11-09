@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -163,7 +164,27 @@ def _ssl_context():
     return _SSL_CONTEXT
 
 
+class _Transient(UpdateError):
+    """A failure that is usually gone a moment later: worth another try."""
+
+
+# Waits before the 2nd and 3rd attempt. A gateway timeout (502/503/504) or a dropped
+# connection is the service having a bad second, not the release being wrong.
+_RETRY_DELAYS = (2, 6)
+_TRANSIENT_CODES = (500, 502, 503, 504)
+
+
 def _open(url, timeout=CONNECT_TIMEOUT, accept="application/vnd.github+json"):
+    """Open `url`, trying again a couple of times when the failure is a passing one."""
+    for delay in _RETRY_DELAYS:
+        try:
+            return _open_once(url, timeout, accept)
+        except _Transient:
+            time.sleep(delay)
+    return _open_once(url, timeout, accept)
+
+
+def _open_once(url, timeout, accept):
     # GitHub rejects requests without a User-Agent outright.
     req = urllib.request.Request(url, headers={
         "User-Agent": f"PRISM/{__version__}",
@@ -177,6 +198,10 @@ def _open(url, timeout=CONNECT_TIMEOUT, accept="application/vnd.github+json"):
         if exc.code in (403, 429):
             raise UpdateError("Too many checks from this machine just now. "
                               "Try again in a few minutes.") from exc
+        if exc.code in _TRANSIENT_CODES:
+            raise _Transient(f"The update service is temporarily unavailable "
+                             f"({exc.code}). This is usually brief: try again in a "
+                             f"minute.") from exc
         raise UpdateError(f"The update service returned an error "
                           f"({exc.code}).") from exc
     except urllib.error.URLError as exc:
@@ -186,11 +211,11 @@ def _open(url, timeout=CONNECT_TIMEOUT, accept="application/vnd.github+json"):
                               f"({reason})") from exc
         # The plain-language line first, the detail after: one is what to do
         # about it, the other is only useful if that does not work.
-        raise UpdateError(f"Could not connect. Check your internet connection "
-                          f"and try again.\n\n({reason})") from exc
+        raise _Transient(f"Could not connect. Check your internet connection "
+                         f"and try again.\n\n({reason})") from exc
     except OSError as exc:
-        raise UpdateError(f"Could not connect. Check your internet connection "
-                          f"and try again.\n\n({exc})") from exc
+        raise _Transient(f"Could not connect. Check your internet connection "
+                         f"and try again.\n\n({exc})") from exc
 
 
 def _pick_asset(assets, key=None):

@@ -12,6 +12,9 @@ release, so keep entries short and about what you'd actually notice.
 - **A slow fetch is retried once, with a longer limit.** On a large repository the
   first attempt could time out and stop the review. Git no longer waits for a
   credential prompt that nobody can answer.
+- **Fixed: updating failed on a passing "update service returned an error (504)".**
+  The updater now retries temporary errors and dropped connections a couple of
+  times, and says plainly when the service is temporarily unavailable.
 
 ## v5.4
 
