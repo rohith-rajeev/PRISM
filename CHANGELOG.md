@@ -4,6 +4,15 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v5.5
+
+- **A failed fetch of a pull request's branches now says why.** Instead of
+  "check the connection and credentials", PRISM shows git's own message with a
+  hint: expired AWS credentials, a deleted branch, or a connection problem.
+- **A slow fetch is retried once, with a longer limit.** On a large repository the
+  first attempt could time out and stop the review. Git no longer waits for a
+  credential prompt that nobody can answer.
+
 ## v5.4
 
 - **Fixed: a document could be skipped as "not reviewed"** (for example the
