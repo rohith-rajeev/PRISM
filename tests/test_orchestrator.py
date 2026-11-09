@@ -980,8 +980,24 @@ class RunDirectoryEnvironment(unittest.TestCase):
 
     def test_environment_is_otherwise_untouched_and_not_mutated(self):
         env = o._env_for_cwd(tempfile.gettempdir())
-        self.assertEqual({k: v for k, v in env.items() if k != "PWD"},
-                         {k: v for k, v in os.environ.items() if k != "PWD"})
+        own = ("PWD", "PYTHONUTF8", "PYTHONIOENCODING")
+        self.assertEqual({k: v for k, v in env.items() if k not in own},
+                         {k: v for k, v in os.environ.items() if k not in own})
+        self.assertEqual(env["PYTHONUTF8"], "1")
+        self.assertEqual(env["PYTHONIOENCODING"], "utf-8")
+
+    def test_aws_cli_runs_with_utf8_io(self):
+        """Windows: the aws CLI's piped output defaulted to cp1252 and crashed
+        on a review's "✅" ('charmap' codec can't encode character)."""
+        seen = {}
+
+        def fake_run(cmd, **kw):
+            seen.update(kw)
+            return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+        with mock.patch.object(o.subprocess, "run", fake_run):
+            o.aws_cli("get-pull-request", "--pull-request-id", "1")
+        self.assertEqual(seen["env"]["PYTHONUTF8"], "1")
+        self.assertEqual(seen["env"]["PYTHONIOENCODING"], "utf-8")
 
     @unittest.skipUnless(o.engine_path(), "needs the review engine installed")
     def test_the_real_engine_finds_the_agent_from_another_directory(self):

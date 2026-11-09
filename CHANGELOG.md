@@ -4,6 +4,13 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v5.3
+
+- **Fixed: on Windows, a review could finish but the PR description wasn't
+  updated and the PR couldn't be merged** ("'charmap' codec can't encode
+  character"). The AWS CLI was writing in the legacy codepage and choked on the
+  review's ✅. PRISM now makes it use UTF-8.
+
 ## v5.2
 
 - **Choose who reviews a document:** Business Analyst (functional), Architect

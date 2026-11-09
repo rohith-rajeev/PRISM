@@ -997,6 +997,21 @@ def _human_span(seconds):
     return f"{round(seconds / 60)} minutes" if seconds >= 120 else f"{seconds} seconds"
 
 
+def _utf8_env(env=None):
+    """`env` (default: ours) with Python children forced to UTF-8 I/O.
+
+    The aws CLI is a Python program. On Windows, with its output piped, it
+    encodes with the legacy ANSI codepage (cp1252) and dies with "'charmap'
+    codec can't encode character" on anything outside it — a review's own
+    "✅" is enough, and the description it just wrote then makes every later
+    get-pull-request fail too. We read its output as UTF-8, so say so.
+    """
+    env = dict(os.environ if env is None else env)
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
+
+
 def _env_for_cwd(cwd):
     """The environment for a child that must run in `cwd`.
 
@@ -1005,7 +1020,7 @@ def _env_for_cwd(cwd):
     directory from $PWD, so without this it looked for the agents (and ran the
     review) in the wrong folder — "Agent not found". Older engines ignore PWD.
     """
-    env = dict(os.environ)
+    env = _utf8_env()
     if cwd:
         env["PWD"] = str(Path(cwd).expanduser().resolve())
     return env
@@ -2407,7 +2422,8 @@ def run_opencode_approve_description(pr_id, project_dir, session_id=None,
 def aws_cli(*args, region=REGION_DEFAULT):
     cmd = ["aws", "codecommit"] + list(args) + (["--region", region] if region else [])
     proc = subprocess.run(cmd, capture_output=True, text=True,
-                          encoding="utf-8", errors="replace", timeout=120)
+                          encoding="utf-8", errors="replace", timeout=120,
+                          env=_utf8_env())
     if proc.returncode != 0:
         raise RuntimeError(f"aws {' '.join(cmd[2:])} failed:\n{proc.stderr.strip() or proc.stdout.strip()}")
     try:
