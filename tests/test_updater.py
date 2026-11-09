@@ -348,11 +348,48 @@ class NothingPublishedYet(unittest.TestCase):
     when nothing was.
     """
 
+    def setUp(self):
+        real = u._RETRY_DELAYS
+        u._RETRY_DELAYS = (0, 0)           # no real waiting between attempts
+        self.addCleanup(setattr, u, "_RETRY_DELAYS", real)
+
     def _check_against(self, raising):
         real = u.urllib.request.urlopen
         u.urllib.request.urlopen = raising
         self.addCleanup(setattr, u.urllib.request, "urlopen", real)
         return u.check(timeout=1)
+
+    def test_a_gateway_timeout_is_retried_and_can_recover(self):
+        """The incident: one 504 from the update service ended the update."""
+        calls = []
+        real = u.urllib.request.urlopen
+
+        def flaky(*a, **k):
+            calls.append(1)
+            if len(calls) < 3:
+                raise u.urllib.error.HTTPError("u", 504, "Gateway Timeout", {}, None)
+            raise u.urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+        u.urllib.request.urlopen = flaky
+        self.addCleanup(setattr, u.urllib.request, "urlopen", real)
+        self.assertIsNone(u.check(timeout=1))        # got through to a real answer
+        self.assertEqual(len(calls), 3)
+
+    def test_a_persistent_504_says_it_is_temporary(self):
+        def raise_504(*a, **k):
+            raise u.urllib.error.HTTPError("u", 504, "Gateway Timeout", {}, None)
+        with self.assertRaises(u.UpdateError) as cm:
+            self._check_against(raise_504)
+        self.assertIn("temporarily unavailable", str(cm.exception))
+        self.assertIn("504", str(cm.exception))
+
+    def test_a_missing_release_is_not_retried(self):
+        calls = []
+
+        def raise_404(*a, **k):
+            calls.append(1)
+            raise u.urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+        self._check_against(raise_404)
+        self.assertEqual(len(calls), 1)
 
     def test_a_missing_release_list_is_not_an_error(self):
         def raise_404(*a, **k):
