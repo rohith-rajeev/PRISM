@@ -403,6 +403,8 @@ carries on without an answer.
 | `prism ask ID "question"` | read-only follow-up question to the reviewer (pull request or document) |
 | `prism rm ID… [--all]` | delete finished jobs' records and logs |
 | `prism models [--refresh]` | list reviewer models |
+| `prism doctor [--repo DIR] [--pr ID] [-m MODEL] [--quick] [-o FILE]` | check git, `aws` and its sign-in, CodeCommit access, the review engine and models; says how to fix each problem |
+| `prism export ID [-o FILE]` | save a job's log + settings + setup check as one `.zip` to send for debugging (secrets removed). On the desktop: **Save log…** on a job's screen |
 | `prism repos [PATH]` | show the git clones PRISM finds in a folder |
 | `prism config …` | show or change saved defaults (below) |
 | `prism man` | install the man page |

@@ -4,6 +4,20 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v5.8
+
+- **`prism doctor` checks your setup and says how to fix what is wrong** — git, the
+  AWS CLI and your sign-in, CodeCommit access, the review engine and its models.
+  Add `--repo`, `--pr` and `--model` to test the exact job that failed.
+- **Save a job's log to send for debugging.** "Save log…" on any job's screen (or
+  `prism export <id>`) writes one `.zip` with the log, the job's settings and a setup
+  check. Passwords, tokens and webhook URLs are removed first.
+- **Fixed "unknown → unknown" reviews on Macs and Linux when PRISM is started from the
+  Dock or a launcher.** Those don't read your shell profile, so `aws` could not be
+  found; PRISM now asks your login shell for its PATH. A missing `aws` is now reported
+  as such instead of sending the reviewer off without the branches.
+- **A failed review run now shows the engine's last output** instead of "See log."
+
 ## v5.7
 
 - **Pick the model for the next run from a job's own screen.** Every pull-request

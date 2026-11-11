@@ -120,6 +120,14 @@ Delete finished jobs' records and logs.
 .B models
 List the reviewer models available.
 .TP
+.B doctor
+Check this machine's setup: git, the AWS CLI and its sign\-in, CodeCommit access, the
+review engine and its models. Says how to fix what is wrong. Exits 1 when a check fails.
+.TP
+.BI "export " id
+Save a job's log, settings and a setup check as one .zip file to send for debugging.
+Passwords, tokens and webhook URLs are removed first.
+.TP
 .B repos
 Show the git clones PRISM finds in a folder.
 .TP
@@ -326,6 +334,25 @@ Delete every finished job.
 .TP
 .B models \-\-refresh
 Ask the engine again instead of using the cached list.
+.TP
+.B doctor \-\-repo \fIDIR\fR, \-\-pr \fIID\fR, \-\-region \fIREGION\fR, \-\-model \fINAME\fR
+Also test the clone (can it fetch from origin), the pull request (can PRISM read it),
+the region, and that the model exists. Use the values of the job that failed.
+.TP
+.B doctor \-\-quick
+Only look at this machine: no network or engine calls.
+.TP
+.B doctor \-\-json
+Machine\-readable output.
+.TP
+.B doctor \-o \fIFILE\fR, \-\-output \fIFILE\fR
+Also save the report to a .zip.
+.TP
+.B export \-o \fIFILE\fR, \-\-output \fIFILE\fR
+Where to save the .zip (default: the current folder).
+.TP
+.B export \-\-no\-checks
+Leave out the network setup checks (faster, less useful).
 .TP
 .B update \-\-install
 Download and install a newer release (packaged builds only).

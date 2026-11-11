@@ -35,6 +35,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config as CFG  # noqa: E402
 import cli_jobs as CJ  # noqa: E402
+import diagnostics as DG  # noqa: E402
 import docreview as DR  # noqa: E402
 import jobs as J  # noqa: E402
 from orchestrator import (  # noqa: E402
@@ -49,7 +50,7 @@ PROG = "prism"
 # Words the first argument can be. The desktop binary uses this to decide
 # whether it was started as a command or as the application.
 COMMANDS = ("run", "docs", "jobs", "logs", "stop", "retry", "ask", "rm", "models", "repos",
-            "config", "man", "version", "update", "help")
+            "doctor", "export", "config", "man", "version", "update", "help")
 
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_STOPPED = 0, 1, 2, 130
 
@@ -737,6 +738,31 @@ def build_parser():
     m = sub.add_parser("models", help="list the reviewer models available")
     m.add_argument("--refresh", action="store_true", help="ask the engine again")
 
+    dr = sub.add_parser("doctor", help="check this machine's setup (git, aws, engine, access)",
+                        description="Checks that everything PRISM needs is installed and "
+                                    "signed in, and says how to fix what is not. Add --repo, "
+                                    "--pr and --model to test the exact job that failed.")
+    dr.add_argument("--repo", help="a local clone: checks it can fetch from origin")
+    dr.add_argument("--pr", help="a pull request id: checks PRISM can read it")
+    dr.add_argument("--region", default=None, help=f"AWS region (default {REGION_DEFAULT})")
+    dr.add_argument("-m", "--model", help="check this model id is available")
+    dr.add_argument("--quick", action="store_true",
+                    help="only look at this machine (no network or engine calls)")
+    dr.add_argument("--json", action="store_true", help="machine-readable output")
+    dr.add_argument("-o", "--output", metavar="FILE",
+                    help="also save the report to FILE (a .zip with the checks, ready to send)")
+
+    ex = sub.add_parser("export", help="save a job's log as a .zip to send for debugging",
+                        description="Packs a job's transcript, settings and a setup check into "
+                                    "one .zip. Passwords, tokens and webhook URLs are removed "
+                                    "first; read log.txt before sending it outside your "
+                                    "organisation.")
+    ex.add_argument("job_id")
+    ex.add_argument("-o", "--output", metavar="FILE",
+                    help="where to save it (default: the current folder)")
+    ex.add_argument("--no-checks", action="store_true",
+                    help="skip the network setup checks (faster, less useful)")
+
     rp = sub.add_parser("repos", help="show the git clones PRISM finds in a folder")
     rp.add_argument("path", nargs="?", default=".")
 
@@ -1035,6 +1061,35 @@ def cmd_models(args):
     return EXIT_OK
 
 
+def cmd_doctor(args):
+    checks = DG.run_checks(region=args.region, repo=args.repo, pr=args.pr,
+                           model=args.model, deep=not args.quick)
+    if args.json:
+        print(json.dumps([dataclasses.asdict(c) for c in checks], indent=2))
+    else:
+        print(DG.render_text(checks, paint=paint))
+    if args.output:
+        path = DG.export_bundle(args.output, "doctor", "", checks=checks,
+                                note="This bundle holds only the setup checks (no job).")
+        print(f"\nSaved to {path}")
+    return EXIT_ERROR if any(c.status == DG.FAIL for c in checks) else EXIT_OK
+
+
+def cmd_export(args):
+    record = _need_record(args.job_id)
+    log = CJ.read_log(args.job_id)
+    if not log:
+        raise UsageError(f"Job {args.job_id} has no log to export.")
+    checks = DG.run_checks(deep=not args.no_checks, region=(record.get("spec") or {}).get("region"),
+                           repo=(record.get("spec") or {}).get("local_repo"),
+                           model=(record.get("spec") or {}).get("model"))
+    dest = args.output or DG.default_name(args.job_id)
+    path = DG.export_bundle(dest, args.job_id, log, record=record, checks=checks)
+    print(f"Saved to {Path(path).resolve()}")
+    print("Credentials were removed; read log.txt before sending it outside your organisation.")
+    return EXIT_OK
+
+
 def cmd_repos(args):
     base = Path(args.path).expanduser()
     found = detect_local_repos(str(base))
@@ -1164,6 +1219,7 @@ def cmd_update(args):
 
 HANDLERS = {"run": cmd_run, "jobs": cmd_jobs, "logs": cmd_logs, "stop": cmd_stop,
             "docs": cmd_docs, "retry": cmd_retry, "ask": cmd_ask, "rm": cmd_rm, "models": cmd_models,
+            "doctor": cmd_doctor, "export": cmd_export,
             "repos": cmd_repos, "config": cmd_config, "man": cmd_man,
             "update": cmd_update}
 

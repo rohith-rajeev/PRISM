@@ -38,6 +38,7 @@ from orchestrator import (  # noqa: E402
 import config as CFG  # noqa: E402
 import codegen_bridge as IB  # noqa: E402
 import cli_jobs as CJ  # noqa: E402
+import diagnostics as DG  # noqa: E402
 import folderpicker  # noqa: E402
 import prism_cli as PC  # noqa: E402
 import jobs as J  # noqa: E402
@@ -2726,6 +2727,8 @@ class App(tk.Tk):
                  fg=PAL["muted"]).pack(side="left", padx=(4, 0))
         tk.Label(head, text="Started from the command line - updates live",
                  font=FONT_XS, bg=PAL["page"], fg=PAL["muted"]).pack(side="right")
+        self._link(head, "Save log…", lambda: self._save_log_bundle("cli"),
+                   bg=PAL["page"]).pack(side="right", padx=(0, 12))
         body = tk.Frame(parent, bg=PAL["log_bg"])
         body.pack(fill="both", expand=True, pady=(4, 0))
         self.cli_log = tk.Text(body, height=4, font=_mono(), bg=PAL["log_bg"],
@@ -3337,6 +3340,8 @@ class App(tk.Tk):
         self.clear_btn.bind("<Button-1>", lambda _e: self._clear_log())
         self.clear_btn.bind("<Enter>", lambda e: e.widget.config(fg=PAL["accent"]))
         self.clear_btn.bind("<Leave>", lambda e: e.widget.config(fg=PAL["muted"]))
+        self._link(lhead, "Save log…", lambda: self._save_log_bundle("job"),
+                   bg=PAL["log_bg"]).pack(side="right")
         lbody = tk.Frame(li, bg=PAL["log_bg"])
         lbody.pack(fill="both", expand=True, pady=(4, 0))
         self.log = tk.Text(lbody, height=4, font=_mono(), bg=PAL["log_bg"],
@@ -4038,6 +4043,65 @@ class App(tk.Tk):
             self.cli_empty.pack(pady=40)
         if created:
             self._repaint(self.cli_list.inner)
+
+    def _link(self, parent, text, command, bg):
+        """A small muted text link, like the log's Clear."""
+        lab = tk.Label(parent, text=text, font=FONT_XS, bg=bg, fg=PAL["muted"],
+                       cursor="hand2", padx=6)
+        lab.bind("<Button-1>", lambda _e: command())
+        lab.bind("<Enter>", lambda e: e.widget.config(fg=PAL["accent"]))
+        lab.bind("<Leave>", lambda e: e.widget.config(fg=PAL["muted"]))
+        return lab
+
+    def _save_log_bundle(self, kind):
+        """Save the open job's log, settings and a setup check as one .zip.
+
+        The file is for sending to whoever is debugging a failed run, so it is a
+        plain .zip (opens anywhere) and credentials are removed before writing.
+        The setup checks reach the network, so they run off the UI thread.
+        """
+        if kind == "cli":
+            job_id = self.cli_detail_id
+            record = CJ.load(job_id) if job_id else None
+            log = CJ.read_log(job_id) if job_id else ""
+        else:
+            job = self.manager.jobs.get(self.selected_job_id)
+            job_id = job.id if job else None
+            record = DG.record_from_job(job) if job else None
+            log = "\n".join(text for text, _tag in job.log) if job else ""
+        if not job_id or record is None:
+            return show_warning(self, "No job open", "Open a job first, then save its log.")
+        if not log.strip():
+            return show_warning(self, "Nothing to save", "This job has no log yet.")
+        dest = filedialog.asksaveasfilename(
+            parent=self, title="Save the job's log", defaultextension=".zip",
+            initialfile=DG.default_name(job_id), filetypes=[("Zip archive", "*.zip")])
+        if not dest:
+            return
+        spec = record.get("spec") or {}
+        result = {}
+
+        def work():
+            try:
+                checks = DG.run_checks(region=spec.get("region"), repo=spec.get("local_repo"),
+                                       model=spec.get("model"))
+                result["path"] = DG.export_bundle(dest, job_id, log, record=record, checks=checks)
+            except Exception as exc:  # noqa: BLE001
+                result["error"] = f"{type(exc).__name__}: {exc}"
+
+        threading.Thread(target=work, daemon=True).start()
+        self._await_log_bundle(result)
+
+    def _await_log_bundle(self, result):
+        if not result:
+            self.after(200, lambda: self._await_log_bundle(result))
+            return
+        if "error" in result:
+            return show_warning(self, "Could not save the log", result["error"])
+        show_warning(self, "Log saved",
+                     f"{result['path']}\n\nSend that file for debugging. Passwords, tokens and "
+                     f"webhook URLs were removed, but the log can still contain pull-request "
+                     f"titles, branch names and code - look through it first if that matters.")
 
     def _stop_cli_job(self, job_id):
         if not CJ.request_stop(job_id):
