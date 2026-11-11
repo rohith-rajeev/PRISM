@@ -32,6 +32,54 @@ import notifier
 
 REGION_DEFAULT = "us-east-1"
 
+# Tools PRISM shells out to. An app started from the Dock/Finder/a launcher on
+# macOS or Linux does not read the user's shell profile, so its PATH can lack
+# the folder `aws` or `git` was installed to (where that is differs per
+# machine: Homebrew, the AWS pkg installer, a version manager...). Nothing is
+# guessed here: the PATH is asked of the user's own login shell.
+REQUIRED_TOOLS = ("aws", "git")
+
+
+def _login_shell_path():
+    """The PATH the user's login shell would give a terminal, or "" if unknown."""
+    shell = os.environ.get("SHELL") or ""
+    if os.name == "nt" or not shell or not os.path.isfile(shell):
+        return ""
+    mark = "__PRISM_PATH__"
+    try:
+        # printenv, not $PATH: fish prints $PATH space-separated. The markers
+        # keep rc-file chatter out of the answer. Closed stdin and a short
+        # timeout so a prompt-happy profile cannot hang start-up.
+        done = subprocess.run(
+            [shell, "-ilc", f"printf '{mark}%s{mark}' \"$(printenv PATH)\""],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=8, stdin=subprocess.DEVNULL)
+    except Exception:  # noqa: BLE001 - best effort
+        return ""
+    m = re.search(re.escape(mark) + r"(.*?)" + re.escape(mark), done.stdout or "", re.S)
+    return m.group(1).strip() if m else ""
+
+
+def ensure_tool_path():
+    """Make sure the tools PRISM needs can be found; returns the ones still missing.
+
+    Only when something is missing from the inherited PATH does it consult the
+    login shell, and it only appends folders not already present, so a PATH
+    that already works is never changed. Children (git, aws, the review engine
+    and so the reviewer agent) inherit os.environ, so one fix covers them all.
+    """
+    missing = [t for t in REQUIRED_TOOLS if not shutil.which(t)]
+    if missing:
+        have = os.environ.get("PATH", "").split(os.pathsep)
+        extra = [d for d in _login_shell_path().split(os.pathsep) if d and d not in have]
+        if extra:
+            os.environ["PATH"] = os.pathsep.join(have + extra)
+            missing = [t for t in REQUIRED_TOOLS if not shutil.which(t)]
+    return missing
+
+
+ensure_tool_path()
+
 # CodeCommit rejects descriptions longer than this.
 PR_DESCRIPTION_MAX = 10240
 
@@ -2249,8 +2297,13 @@ def run_opencode_review(pr_id, repo_name, local_repo, project_dir,
         pr_meta = get_pr(pr_id, region=region)
         source_ref = pr_meta.get("sourceReference") or ""
         dest_ref = pr_meta.get("destinationReference") or ""
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         source_ref = dest_ref = ""
+        if not shutil.which("aws"):
+            # Nothing can be reviewed without it - and the reviewer would only hit
+            # the same wall. Say so, rather than send it off with no branches.
+            raise RuntimeError(str(exc)) from None
+        emit(f"⚠ Could not look up the pull request's branches: {str(exc)[:600]}")
     # One fetch for the whole review. The incremental check, the review history
     # and the reviewer used to fetch separately — the slowest step of a review.
     refs_ready = _fetch_pr_refs(local_repo, dest_ref, source_ref, emit=emit)
@@ -2368,7 +2421,12 @@ def run_opencode_review(pr_id, repo_name, local_repo, project_dir,
             out = _wrap_up_cut_short_review(out, project_dir, session_id, emit, model,
                                             control, meter)
     elif rc != 0 and "Verdict" not in out:
-        raise RuntimeError(f"Review run failed (exit {rc}). See log.")
+        tail = [ln.strip() for ln in out.splitlines() if ln.strip()][-12:]
+        raise RuntimeError(
+            f"Review run failed (exit {rc}). The engine's last output:\n"
+            + ("\n".join("  " + ln[:300] for ln in tail) if tail else "  (it printed nothing)")
+            + "\nRun `prism doctor` to check this machine's setup, and use 'Save log…' on "
+              "the job (or `prism export <job id>`) to send the full log for debugging.")
     return out, session_id
 
 
@@ -2519,9 +2577,16 @@ def run_opencode_approve_description(pr_id, project_dir, session_id=None,
 
 def aws_cli(*args, region=REGION_DEFAULT):
     cmd = ["aws", "codecommit"] + list(args) + (["--region", region] if region else [])
-    proc = subprocess.run(cmd, capture_output=True, text=True,
-                          encoding="utf-8", errors="replace", timeout=120,
-                          env=_utf8_env())
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=120,
+                              env=_utf8_env())
+    except FileNotFoundError:
+        raise RuntimeError(
+            "The AWS CLI (`aws`) was not found on PATH, so PRISM cannot read the pull "
+            "request. Install it and sign in (`aws configure` or `aws login`), and check "
+            "that `aws --version` works in a terminal. PATH seen by PRISM: "
+            + os.environ.get("PATH", "")) from None
     if proc.returncode != 0:
         raise RuntimeError(f"aws {' '.join(cmd[2:])} failed:\n{proc.stderr.strip() or proc.stdout.strip()}")
     try:
