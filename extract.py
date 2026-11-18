@@ -232,25 +232,35 @@ def _pdf(path):
     except ImportError:
         pypdf = None
     if pypdf is not None:
-        reader = pypdf.PdfReader(str(path))
-        if getattr(reader, "is_encrypted", False):
-            try:
-                if not reader.decrypt(""):
-                    raise ExtractError("it is password-protected")
-            except ExtractError:
-                raise
-            except Exception:  # noqa: BLE001
-                raise ExtractError("it is password-protected")
-        pages = []
-        for i, page in enumerate(reader.pages, 1):
-            try:
-                text = (page.extract_text() or "").strip()
-            except Exception:  # noqa: BLE001
-                text = ""
-            if text:
-                pages.append(f"## Page {i}\n{text}")
-        return "\n\n".join(pages)
+        try:
+            text = _pdf_pypdf(pypdf, path)
+        except ExtractError:
+            raise
+        except Exception:  # noqa: BLE001 - a PDF pypdf rejects may still have readable text
+            text = ""
+        if text.strip():
+            return text
     return _pdf_basic(path)
+
+
+def _pdf_pypdf(pypdf, path):
+    reader = pypdf.PdfReader(str(path))
+    if getattr(reader, "is_encrypted", False):
+        try:
+            ok = reader.decrypt("")
+        except Exception:  # noqa: BLE001
+            ok = 0
+        if not ok:
+            raise ExtractError("it is password-protected")
+    pages = []
+    for i, page in enumerate(reader.pages, 1):
+        try:
+            text = (page.extract_text() or "").strip()
+        except Exception:  # noqa: BLE001
+            text = ""
+        if text:
+            pages.append(f"## Page {i}\n{text}")
+    return "\n\n".join(pages)
 
 
 _STREAM = re.compile(rb"<<(.*?)>>\s*stream\r?\n(.*?)endstream", re.S)
