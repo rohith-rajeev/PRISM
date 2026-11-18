@@ -29,6 +29,8 @@ from pathlib import Path
 import bundle
 import config
 import notifier
+import winproc
+from pathutil import native_path
 
 REGION_DEFAULT = "us-east-1"
 
@@ -37,6 +39,8 @@ REGION_DEFAULT = "us-east-1"
 # the folder `aws` or `git` was installed to (where that is differs per
 # machine: Homebrew, the AWS pkg installer, a version manager...). Nothing is
 # guessed here: the PATH is asked of the user's own login shell.
+winproc.install()          # no console windows flashing up for every child on Windows
+
 REQUIRED_TOOLS = ("aws", "git")
 
 
@@ -248,7 +252,7 @@ def _lock_for(path):
     tables would hand out two different locks for the same real directory.
     """
     try:
-        key = str(Path(path).expanduser().resolve())
+        key = str(Path(native_path(path)).resolve())
     except Exception:  # noqa: BLE001
         key = str(path)
     with _PATH_LOCKS_GUARD:
@@ -657,7 +661,7 @@ def ensure_bundled_agents(project_dir: str, emit=_emit_plain) -> list:
             f"Bundled agents missing: {AGENTS_DIR}. PRISM's unpacked files were removed "
             f"while it was running (it was started by a process that has since exited, or "
             f"the temp folder was cleared). Quit PRISM and start it again.")
-    dest_dir = Path(project_dir).expanduser().resolve() / ".opencode" / "agents"
+    dest_dir = Path(native_path(project_dir)).resolve() / ".opencode" / "agents"
     dest_dir.mkdir(parents=True, exist_ok=True)
     installed, written = [], 0
     for src in sorted(agents_src.glob("*.md")):
@@ -725,6 +729,17 @@ def engine_path():
     for cand in ENGINE_FALLBACKS:
         if cand.is_file() and os.access(cand, os.X_OK):
             return str(cand)
+    if os.name == "nt":
+        # A GUI launch may not carry the user's PATH: look where npm, bun and the
+        # engine's own installer put it.
+        roots = [Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "npm",
+                 Path.home() / ".bun" / "bin", Path.home() / ".opencode" / "bin",
+                 Path.home() / ".local" / "bin"]
+        for root in roots:
+            for ext in (".exe", ".cmd", ".bat"):
+                cand = root / (ENGINE_BIN + ext)
+                if cand.is_file():
+                    return str(cand)
     return None
 
 
@@ -956,7 +971,7 @@ def detect_local_repos(project_dir):
     no repo names are assumed. Never raises — returns [] when unscannable.
     """
     try:
-        base = Path(project_dir).expanduser().resolve()
+        base = Path(native_path(project_dir)).resolve()
     except Exception:  # noqa: BLE001
         return []
     if not base.is_dir():
@@ -989,9 +1004,9 @@ def resolve_repo(repo_name, project_dir, local_repo=None):
     repo_name = (repo_name or "").strip()
     if not repo_name:
         raise ValueError("CodeCommit repository name is required.")
-    base = Path(project_dir).expanduser().resolve()
+    base = Path(native_path(project_dir)).resolve()
     if local_repo:
-        p = Path(local_repo).expanduser().resolve()
+        p = Path(native_path(local_repo)).resolve()
         if not p.is_dir():
             raise RuntimeError(f"Local clone path not found: {p}")
         return repo_name, str(p)
@@ -1107,7 +1122,7 @@ def _env_for_cwd(cwd):
     """
     env = _utf8_env()
     if cwd:
-        env["PWD"] = str(Path(cwd).expanduser().resolve())
+        env["PWD"] = str(Path(native_path(cwd)).resolve())
     return env
 
 
@@ -1140,6 +1155,42 @@ def _announce_engine(exe, emit):
     threading.Thread(target=_ask, daemon=True).start()
 
 
+def _launch_argv(cmd, emit):
+    """(argv, cleanup) to actually start `cmd` with.
+
+    On Windows the engine is usually an npm `.cmd` launcher, and a batch file
+    cannot be handed a multi-line (or long) prompt: cmd.exe cuts it at the first
+    line break and at 8191 characters. So the launcher is replaced by what it
+    runs. If that cannot be worked out, the prompt travels in a file attached
+    with --file instead of on the command line.
+    """
+    if not winproc.is_batch_launcher(cmd[0]):
+        return list(cmd), None
+    argv = winproc.direct_argv(cmd)
+    if argv[0] != cmd[0]:
+        return argv, None
+    prompt = str(cmd[-1]) if len(cmd) > 2 and cmd[1] == "run" else ""
+    if not prompt or (len(prompt) < 900 and not re.search(r'[\r\n%"^&|<>]', prompt)):
+        return list(cmd), None
+    if "--file" in _engine_run_help(cmd[0]):
+        try:
+            fd, name = tempfile.mkstemp(prefix="prism-prompt-", suffix=".md")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(prompt)
+            note = ("Your full instructions are in the attached file. Read it completely "
+                    "and follow it exactly; it is the task.")
+            emit("▸ Sending the instructions as an attached file (this engine launcher "
+                 "cannot take them on its command line).")
+            return list(cmd[:-1]) + ["--file", name, "--", note], \
+                lambda: os.path.exists(name) and os.remove(name)
+        except OSError:
+            pass
+    flat = re.sub(r"\s*[\r\n]+\s*", " / ", prompt).replace('"', "'").replace("%", "\uff05")
+    emit("⚠ The engine launcher could not be bypassed, so the instructions were flattened "
+         "to one line. If the review is poor, install the engine so `opencode.exe` is on PATH.")
+    return list(cmd[:-1]) + [flat], None
+
+
 def _run_stream(cmd, cwd, emit, timeout=None, control=None, json_mode=False,
                 idle_timeout=None):
     """Run cmd, streaming output to emit.
@@ -1161,12 +1212,19 @@ def _run_stream(cmd, cwd, emit, timeout=None, control=None, json_mode=False,
     # stdin is closed, not inherited: `run` reads piped stdin as part of the
     # prompt and waits for it to end, which on a launcher- or ssh-started
     # PRISM never happens and looks exactly like a silent stall.
-    proc = subprocess.Popen(
-        cmd, cwd=cwd, env=_env_for_cwd(cwd), stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
-        bufsize=1, **_group_kwargs(),
-    )
+    argv, cleanup = _launch_argv(cmd, emit)
+    try:
+        proc = subprocess.Popen(
+            argv, cwd=cwd, env=_env_for_cwd(cwd), stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
+            bufsize=1, **_group_kwargs(),
+        )
+    except OSError as e:
+        if cleanup:
+            cleanup()
+        emit(f"⛔ Could not start the review engine: {e}")
+        return 1, f"[process error: {e}]\n", None
     if control is not None:
         control.attach(proc)
     out_lines = []
@@ -1233,7 +1291,11 @@ def _run_stream(cmd, cwd, emit, timeout=None, control=None, json_mode=False,
             try:
                 evt = json.loads(stripped)
             except ValueError:
+                # Not an event: the engine (or the shell launching it) said
+                # something in plain text. Show it - it is usually the reason
+                # for a run that otherwise looks like it did nothing.
                 malformed = True
+                emit(stripped[:500])
                 continue
             if not isinstance(evt, dict):
                 malformed = True
@@ -1290,6 +1352,11 @@ def _run_stream(cmd, cwd, emit, timeout=None, control=None, json_mode=False,
         return 1, "".join(out_lines), None
     finally:
         finished.set()
+        if cleanup:
+            try:
+                cleanup()
+            except Exception:  # noqa: BLE001
+                pass
         # Close the pipe explicitly: with many jobs in flight, relying on GC to
         # reclaim these leaks file descriptors (and trips ResourceWarning).
         try:

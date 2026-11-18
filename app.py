@@ -44,6 +44,7 @@ import prism_cli as PC  # noqa: E402
 import jobs as J  # noqa: E402
 import docreview as DR  # noqa: E402
 import updater as U  # noqa: E402
+from pathutil import native_path  # noqa: E402
 from orchestrator import TOOL_DIR  # noqa: E402
 from version import __version__ as APP_VERSION  # noqa: E402
 
@@ -250,6 +251,14 @@ def _spinner(canvas, cx, cy, r, frame, colour):
                       style=tk.ARC, outline=colour, width=2)
 
 
+def _wrap_to_width(label, margin=4):
+    """Make a Label wrap its text to whatever width it is given, so long text
+    grows the label taller instead of pushing its neighbours out of the way."""
+    label.bind("<Configure>",
+               lambda e, w=label: w.config(wraplength=max(80, e.width - margin)),
+               add="+")
+
+
 class RoundedCard(tk.Frame):
     """Card with rounded fill + outline. Set stretch=True when the inner
     content must expand to fill leftover space (log console)."""
@@ -320,6 +329,24 @@ class RoundedCard(tk.Frame):
             self.canvas.itemconfig(self._win, width=max(w - 2 * self._r, 1))
         if self._stretch and h > 4:
             self.canvas.itemconfig(self._win, height=max(h - 2 * self._r, 1))
+
+    def remap(self):
+        """Force the embedded content frame to be re-mapped and repainted.
+
+        On macOS a card can end up showing its outline and an empty fill: the
+        frame inside the canvas has the right size but its children were never
+        painted (after a repack, or after the window was in the background).
+        Resizing or scrolling cured it because that makes Tk re-map the window.
+        Hiding and showing the canvas window does the same, on purpose.
+        """
+        try:
+            self.resize_content()
+            self.canvas.itemconfigure(self._win, state="hidden")
+            self.canvas.itemconfigure(self._win, state="normal")
+            self.inner.update_idletasks()
+            self._draw()
+        except Exception:  # noqa: BLE001 - cosmetic only
+            pass
 
     def _draw(self):
         self.canvas.delete("rr")
@@ -2390,7 +2417,7 @@ class DocReviewForm(tk.Frame):
         """
         self._detect_job = None
         raw = self.proj_var.get().strip()
-        base = Path(raw).expanduser() if raw else None
+        base = Path(native_path(raw)) if raw else None
         self.detected = []
         if base is None or not base.is_dir():
             self.mode = "single"
@@ -2593,6 +2620,16 @@ class App(tk.Tk):
         # silent mode). "Check for updates" in Help still works the same way
         # on demand.
         self.after(1500, lambda: UpdateDialog(self, self, silent=True))
+        # Coming back to the window (or un-minimising it) is when macOS leaves
+        # job rows half-painted; settle the list whenever that happens.
+        for seq in ("<FocusIn>", "<Map>"):
+            self.bind(seq, self._on_window_back, add="+")
+
+    def _on_window_back(self, event=None):
+        if event is not None and event.widget is not self:
+            return
+        if getattr(self, "screen", None) is getattr(self, "jobs_screen", object()):
+            self._settle_jobs_list()
 
     # ----- themed primitives -----
     def _lab(self, parent, text, font=None, fg="muted", bg="card"):
@@ -2708,18 +2745,30 @@ class App(tk.Tk):
         ci = card.inner
         ci.config(padx=12, pady=8)
         ci.columnconfigure(0, weight=1)
+        # Text on top (wrapping to the card), actions on their own line below,
+        # so a long title or status line never squeezes the buttons.
         self.cli_d_title = tk.Label(ci, text="", font=FONT_B, bg=PAL["card"],
-                                    fg=PAL["text"], anchor="w")
-        self.cli_d_title.grid(row=0, column=0, sticky="w")
+                                    fg=PAL["text"], anchor="w", justify="left")
+        self.cli_d_title.grid(row=0, column=0, sticky="ew")
+        _wrap_to_width(self.cli_d_title)
         self.cli_d_sub = tk.Label(ci, text="", font=FONT_XS, bg=PAL["card"],
-                                  fg=PAL["muted"], anchor="w")
-        self.cli_d_sub.grid(row=1, column=0, sticky="w")
+                                  fg=PAL["muted"], anchor="w", justify="left")
+        self.cli_d_sub.grid(row=1, column=0, sticky="ew")
+        _wrap_to_width(self.cli_d_sub)
         self.cli_d_verdict = tk.Label(ci, text="", font=FONT_S, bg=PAL["card"],
-                                      fg=PAL["muted"], anchor="e")
-        self.cli_d_verdict.grid(row=0, column=1, rowspan=2, sticky="e", padx=(10, 10))
-        self.cli_d_btn = RoundedButton(ci, text="Stop", style="outline", height=30,
-                                       width=96, font=FONT_B, command=lambda: None)
-        self.cli_d_btn.grid(row=0, column=2, rowspan=2)
+                                      fg=PAL["muted"], anchor="w", justify="left")
+        self.cli_d_verdict.grid(row=2, column=0, sticky="ew", pady=(4, 0))
+        _wrap_to_width(self.cli_d_verdict)
+        actions = tk.Frame(ci, bg=PAL["card"])
+        actions.grid(row=3, column=0, sticky="w", pady=(6, 0))
+        self.cli_d_btn = RoundedButton(actions, text="Stop", style="outline", height=30,
+                                       width=110, font=FONT_S, command=lambda: None)
+        self.cli_d_btn.pack(side="left")
+        self.cli_d_new_btn = RoundedButton(actions, text="+  New job",
+                                           command=self._new_from_cli_detail,
+                                           style="outline", height=30, width=110,
+                                           font=FONT_S)
+        self.cli_d_new_btn.pack(side="left", padx=(8, 0))
 
         head = tk.Frame(parent, bg=PAL["page"])
         head.pack(fill="x")
@@ -3243,20 +3292,27 @@ class App(tk.Tk):
         top.pack(fill="x", pady=(0, 6))
         ti = top.inner
         ti.config(padx=12, pady=7)
+        ti.columnconfigure(0, weight=1)
+        # The title can be long (a document review lists its targets and file
+        # count), so it gets a row of its own and wraps to the card's width;
+        # the actions sit on the line below and can never be squeezed by it.
         self.detail_title = tk.Label(ti, text="", font=FONT_B, bg=PAL["card"],
-                                     fg=PAL["text"], anchor="w")
-        self.detail_title.pack(side="left")
-        self.stop_btn = RoundedButton(ti, text="■  Stop", command=self._stop,
+                                     fg=PAL["text"], anchor="w", justify="left")
+        self.detail_title.grid(row=0, column=0, sticky="ew")
+        _wrap_to_width(self.detail_title)
+        actions = tk.Frame(ti, bg=PAL["card"])
+        actions.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.stop_btn = RoundedButton(actions, text="■  Stop", command=self._stop,
                                       style="outline", height=30, width=110,
                                       font=FONT_S)
-        self.stop_btn.pack(side="right")
+        self.stop_btn.pack(side="left")
         self.stop_btn.set_enabled(False)
         # Starting another job should not mean backing out to the list first.
-        self.new_job_btn = RoundedButton(ti, text="+  New job",
+        self.new_job_btn = RoundedButton(actions, text="+  New job",
                                          command=self._new_from_detail,
                                          style="outline", height=30, width=110,
                                          font=FONT_S)
-        self.new_job_btn.pack(side="right", padx=(0, 8))
+        self.new_job_btn.pack(side="left", padx=(8, 0))
         # ---- model: what this run used, and what a retry will use. Changing it
         # affects only the next run of this job, never the one in progress. ----
         mrow = RoundedCard(root)
@@ -3817,8 +3873,17 @@ class App(tk.Tk):
         self._new_return = job.id if job is not None else None
         self.show_new(job.spec if job is not None else None)
 
+    def _new_from_cli_detail(self):
+        """New job from a command-line job's page. The form is seeded from
+        the previous desktop job (as "+ New job" on the list is) and Cancel
+        returns here."""
+        self._new_return = ("cli", self.cli_detail_id) if self.cli_detail_id else None
+        self.show_new()
+
     def _cancel_new(self):
         back, self._new_return = self._new_return, None
+        if isinstance(back, tuple):
+            return self.show_cli_detail(back[1])
         if back is not None and back in self.manager.jobs:
             return self.show_detail(back)
         self.show_jobs()
@@ -3907,6 +3972,40 @@ class App(tk.Tk):
             # Newly built rows have never had a <Configure>; draw them now
             # rather than wait for one.
             self._repaint(self.jobs_list.inner)
+        if self.screen is self.jobs_screen:
+            self._settle_jobs_list()
+
+    def _settle_jobs_list(self):
+        """Make sure every row on the jobs list has actually painted its content.
+
+        On macOS rows sometimes show only their outline until the window is
+        resized or scrolled. Re-map each row once things have settled (twice,
+        because the first pass can itself land before Tk has finished laying
+        out), debounced so a burst of job events costs one pass.
+        """
+        pending = getattr(self, "_settle_jobs", None)
+        if pending is not None:
+            try:
+                self.after_cancel(pending)
+            except Exception:  # noqa: BLE001
+                pass
+
+        def _go():
+            if self.screen is not self.jobs_screen:
+                return
+            self.jobs_list.resize_content()
+            for row in list(self.rows.values()):
+                try:
+                    row.remap()
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                self.jobs_list.canvas.yview_scroll(0, "units")
+            except Exception:  # noqa: BLE001
+                pass
+
+        self._settle_jobs = self.after(60, _go)
+        self.after(350, _go)
 
     def _desktop_counts(self):
         """(running, queued, needing input) over this window's own jobs."""
