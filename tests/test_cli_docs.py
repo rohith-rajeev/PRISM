@@ -486,7 +486,8 @@ class Detached(Isolated):
         # separate process rebuilt the document job from the forwarded spec and ran it.
         self.assertIn(rec["status"], (J.ERROR, J.DONE), rec)
         self.assertEqual(rec["spec"]["kind"], "docs")
-        self.assertEqual(rec["spec"]["targets"][0]["files"], ["docs/spec.md"])
+        self.assertEqual(rec["spec"]["targets"][0]["files"],
+                         [os.path.join("docs", "spec.md")])
         self.assertNotEqual(rec["pid"], os.getpid())
         self.assertIn("▸ Documentation review", CJ.read_log(job_id))
 

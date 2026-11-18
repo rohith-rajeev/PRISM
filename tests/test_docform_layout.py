@@ -196,7 +196,8 @@ class DocFormLayout(unittest.TestCase):
         self.form._browse_files("BE")
         self.pump(0.6)
         self.assertEqual(self.form.cards["BE"]["files"].get("1.0", "end").split(),
-                         ["docs/spec.md", "docs/extra/one.md", "docs/extra/two.md"])
+                         [os.path.join("docs", "spec.md"), os.path.join("docs", "extra", "one.md"),
+                          os.path.join("docs", "extra", "two.md")])
         self.assertEqual(self.warnings[-1][0], "Outside the repository")
         self.form._browse_files("BE")          # picking the same files again adds nothing
         self.pump(0.6)
@@ -258,7 +259,8 @@ class DocFormLayout(unittest.TestCase):
         self.assertIsNone(self.form.problem())                              # and that is fine
         self.assertEqual(self.form.build_spec().requirements_path, "")
         self.form.req_var.set("docs/requirements")
-        self.assertEqual(self.form.build_spec().requirements_path, "docs/requirements")
+        self.assertEqual(self.form.build_spec().requirements_path,
+                         os.path.join("docs", "requirements"))
 
     def test_a_previous_job_refills_the_persona_and_the_requirements(self):
         self._ready_form()
@@ -268,7 +270,8 @@ class DocFormLayout(unittest.TestCase):
         self.form.persona_btns["ba"]._click(None)
         self.form.req_var.set("")
         self.form.populate(spec)
-        self.assertEqual((self.form.persona_var.get(), self.form.req_var.get()), ("qa", "docs/reqs"))
+        self.assertEqual((self.form.persona_var.get(), self.form.req_var.get()),
+                         ("qa", os.path.join("docs", "reqs")))
 
 
 if __name__ == "__main__":

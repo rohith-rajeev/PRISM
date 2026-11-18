@@ -6,6 +6,7 @@ stability and scalability are always checked. All of it is built by PRISM into t
 reviewer's brief, so it is tested here as text and end to end (real git, canned
 reviewer), including that each persona's reviews are tracked separately.
 """
+import os
 import io
 import sys
 import tempfile
@@ -316,7 +317,7 @@ class CommandLine(Isolated):
         C.set_cli(requirements="from-config")
         self.assertEqual(self.spec().requirements_path, "from-config")
         self.assertEqual(self.spec(requirements="docs/requirements").requirements_path,
-                         "docs/requirements")
+                         os.path.join("docs", "requirements"))
 
     def test_the_persona_survives_a_record_and_an_old_record_still_loads(self):
         spec = self.spec(persona="architect")
@@ -326,7 +327,7 @@ class CommandLine(Isolated):
                "targets": [{"role": "repo", "repo_name": "clone", "local_repo": str(self.clone),
                             "branch": "feat/x", "files": ["docs/spec.md"]}]}
         loaded = CJ.spec_from_dict(old)                # a v5.1 record: no persona key
-        self.assertEqual((loaded.persona, loaded.requirements_path), ("ba", "docs/requirements"))
+        self.assertEqual((loaded.persona, loaded.requirements_path), ("ba", os.path.join("docs", "requirements")))
         old["persona"] = "from-the-future"
         self.assertEqual(CJ.spec_from_dict(old).persona, "ba")        # unreadable: the default
 
