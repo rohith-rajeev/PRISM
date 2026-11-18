@@ -1158,20 +1158,19 @@ def _announce_engine(exe, emit):
 def _launch_argv(cmd, emit):
     """(argv, cleanup) to actually start `cmd` with.
 
-    On Windows the engine is usually an npm `.cmd` launcher, and a batch file
-    cannot be handed a multi-line (or long) prompt: cmd.exe cuts it at the first
-    line break and at 8191 characters. So the launcher is replaced by what it
-    runs. If that cannot be worked out, the prompt travels in a file attached
-    with --file instead of on the command line.
+    On Windows a multi-line prompt does not survive the command line: through
+    the engine's npm `.cmd` launcher cmd.exe cuts it at the first line break,
+    and even without it the engine has been seen to receive an empty message
+    (it answers by printing its help). So there the prompt travels in a file
+    attached with --file, and the message itself is one plain line. The `.cmd`
+    launcher is also replaced by what it runs, to keep cmd.exe out of it.
     """
-    if not winproc.is_batch_launcher(cmd[0]):
+    if not winproc.windows():
         return list(cmd), None
-    argv = winproc.direct_argv(cmd)
-    if argv[0] != cmd[0]:
-        return argv, None
+    argv = winproc.direct_argv(cmd) if winproc.is_batch_launcher(cmd[0]) else list(cmd)
     prompt = str(cmd[-1]) if len(cmd) > 2 and cmd[1] == "run" else ""
-    if not prompt or (len(prompt) < 900 and not re.search(r'[\r\n%"^&|<>]', prompt)):
-        return list(cmd), None
+    if not prompt or (len(prompt) < 300 and not re.search(r'[\r\n%"^&|<>]', prompt)):
+        return argv, None
     if "--file" in _engine_run_help(cmd[0]):
         try:
             fd, name = tempfile.mkstemp(prefix="prism-prompt-", suffix=".md")
@@ -1179,16 +1178,14 @@ def _launch_argv(cmd, emit):
                 fh.write(prompt)
             note = ("Your full instructions are in the attached file. Read it completely "
                     "and follow it exactly; it is the task.")
-            emit("▸ Sending the instructions as an attached file (this engine launcher "
-                 "cannot take them on its command line).")
-            return list(cmd[:-1]) + ["--file", name, "--", note], \
+            return argv[:-1] + ["--file", name, "--", note], \
                 lambda: os.path.exists(name) and os.remove(name)
         except OSError:
             pass
     flat = re.sub(r"\s*[\r\n]+\s*", " / ", prompt).replace('"', "'").replace("%", "\uff05")
-    emit("⚠ The engine launcher could not be bypassed, so the instructions were flattened "
-         "to one line. If the review is poor, install the engine so `opencode.exe` is on PATH.")
-    return list(cmd[:-1]) + [flat], None
+    emit("⚠ The instructions had to be flattened to one line for this engine launcher. "
+         "If the review is poor, install the engine so `opencode.exe` is on PATH.")
+    return argv[:-1] + [flat], None
 
 
 def _run_stream(cmd, cwd, emit, timeout=None, control=None, json_mode=False,

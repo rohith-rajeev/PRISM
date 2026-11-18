@@ -97,5 +97,32 @@ class LauncherTests(unittest.TestCase):
             self.assertFalse(winproc.install())
 
 
+class PromptDeliveryTests(unittest.TestCase):
+    def setUp(self):
+        import orchestrator as O
+        from unittest import mock
+        self.O = O
+        self.patches = [mock.patch.object(winproc, "windows", return_value=True),
+                        mock.patch.object(O, "_engine_run_help", return_value="--file --dir")]
+        for p in self.patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in self.patches])
+
+    def test_multiline_prompt_goes_in_an_attached_file_on_windows(self):
+        cmd = ["opencode.exe", "run", "--agent", "a", "--auto", "PERSONA: BA.\nline two"]
+        argv, cleanup = self.O._launch_argv(cmd, lambda *_a: None)
+        self.assertIn("--file", argv)
+        name = argv[argv.index("--file") + 1]
+        self.assertEqual(Path(name).read_text(encoding="utf-8"), "PERSONA: BA.\nline two")
+        self.assertNotIn("\n", argv[-1])
+        self.assertEqual(argv[-2], "--")
+        cleanup()
+        self.assertFalse(os.path.exists(name))
+
+    def test_simple_commands_are_untouched(self):
+        cmd = ["opencode.exe", "run", "--help"]
+        self.assertEqual(self.O._launch_argv(cmd, lambda *_a: None), (cmd, None))
+
+
 if __name__ == "__main__":
     unittest.main()
