@@ -4,7 +4,13 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
-## v5.9
+## v6.2
+
+- **Windows: reviews now receive their instructions reliably.** The engine was getting
+  an empty message and printing its help instead of reviewing. PRISM now hands it the
+  instructions as an attached file with a one-line message.
+
+## v5.9 (shipped as v6.1)
 
 - **Windows: document and PR reviews no longer fail with "no review report was
   delivered".** The review engine's `.cmd` launcher cut the instructions off at their

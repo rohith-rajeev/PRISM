@@ -103,3 +103,7 @@ def direct_argv(argv, nt=None):
 
 def is_batch_launcher(exe, nt=None):
     return ((os.name == "nt") if nt is None else nt) and str(exe).lower().endswith((".cmd", ".bat"))
+
+
+def windows():
+    return os.name == "nt"
