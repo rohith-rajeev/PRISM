@@ -64,7 +64,7 @@ class Resolution(Isolated):
     def test_defaults_come_from_where_you_are(self):
         spec = P.build_docs_spec(args(files=["docs/spec.md"]), cwd=self.clone)
         (t,) = spec.targets
-        self.assertEqual((t.role, t.branch, t.files), ("repo", "feat/x", ("docs/spec.md",)))
+        self.assertEqual((t.role, t.branch, t.files), ("repo", "feat/x", (os.path.join("docs", "spec.md"),)))
         self.assertEqual(Path(t.local_repo).resolve(), self.clone.resolve())
         self.assertEqual(spec.requirements_path, "")        # requirements are optional: none assumed
         self.assertEqual(spec.persona, "ba")
@@ -75,14 +75,14 @@ class Resolution(Isolated):
     def test_a_subfolder_works_and_files_are_typed_the_way_a_shell_would(self):
         sub = self.clone / "docs"
         spec = P.build_docs_spec(args(files=["spec.md"]), cwd=sub)   # relative to where you are
-        self.assertEqual(spec.targets[0].files, ("docs/spec.md",))
+        self.assertEqual(spec.targets[0].files, (os.path.join("docs", "spec.md"),))
         spec = P.build_docs_spec(args(files=[str(self.clone / "docs" / "spec.md"), "./docs/spec.md"]),
                                  cwd=self.clone)                      # absolute, ./, duplicates
-        self.assertEqual(spec.targets[0].files, ("docs/spec.md",))
+        self.assertEqual(spec.targets[0].files, (os.path.join("docs", "spec.md"),))
 
     def test_a_file_only_on_the_branch_is_taken_from_the_repository_root(self):
         spec = P.build_docs_spec(args(files=["specs/not-here-yet.md"]), cwd=self.clone)
-        self.assertEqual(spec.targets[0].files, ("specs/not-here-yet.md",))
+        self.assertEqual(spec.targets[0].files, (os.path.join("specs", "not-here-yet.md"),))
 
     def test_an_absolute_path_outside_the_clone_is_refused(self):
         # A path that is absolute on every platform (not "/etc/hosts": no drive on Windows).
@@ -104,7 +104,7 @@ class Resolution(Isolated):
                                       instructions="from flag", branch="main"), cwd=self.clone)
         self.assertEqual((spec.requirements_path, spec.model, spec.do_commit, spec.do_push,
                           spec.custom_instructions, spec.targets[0].branch),
-                         ("docs/requirements", "m-flag", True, False, "from flag", "main"))
+                         (os.path.join("docs", "requirements"), "m-flag", True, False, "from flag", "main"))
 
     def test_push_is_never_on_without_commit(self):
         spec = P.build_docs_spec(args(files=["docs/spec.md"], commit=False, push=True),
@@ -119,7 +119,7 @@ class Resolution(Isolated):
         spec = P.build_docs_spec(args(files=["docs/spec.md"],
                                       requirements=str(self.clone / "docs" / "requirements")),
                                  cwd=self.clone)
-        self.assertEqual(spec.requirements_path, "docs/requirements")
+        self.assertEqual(spec.requirements_path, os.path.join("docs", "requirements"))
 
     def test_instructions_file(self):
         f = self.home / "i.txt"
@@ -183,7 +183,8 @@ class TwoRepositories(Isolated):
         roles = {t.role: t for t in spec.targets}
         self.assertEqual(Path(roles["BE"].local_repo).name, "shop-backend")
         self.assertEqual(Path(roles["FE"].local_repo).name, "shop-frontend")
-        self.assertEqual(roles["FE"].files, ("docs/spec.md", "docs/ui.md"))
+        self.assertEqual(roles["FE"].files,
+                         (os.path.join("docs", "spec.md"), os.path.join("docs", "ui.md")))
         self.assertEqual({t.branch for t in spec.targets}, {"feat/x"})
 
     def test_either_one_alone(self):

@@ -271,7 +271,7 @@ class Browsing(unittest.TestCase):
             rels, skipped = D.repo_relative(
                 [str(a), str(b), str(a), str(outside), str(repo / ".git" / "config"),
                  str(repo)], repo)
-            self.assertEqual(rels, ["docs/a.md", "b.md"])          # deduplicated, ordered
+            self.assertEqual(rels, [os.path.join("docs", "a.md"), "b.md"])          # deduplicated, ordered
             self.assertEqual(len(skipped), 3)                       # outside, .git/config, the repo root
             self.assertIn(str(outside), skipped)
 
@@ -282,7 +282,8 @@ class Browsing(unittest.TestCase):
             (work / "shared").mkdir()
             reqs = clone / "docs" / "requirements"
             # inside a clone: relative to the clone, not to the (larger) working folder
-            self.assertEqual(D.relativise_folder(reqs, [clone, work]), "docs/requirements")
+            self.assertEqual(D.relativise_folder(reqs, [clone, work]),
+                             os.path.join("docs", "requirements"))
             # not in a clone but under the working folder
             self.assertEqual(D.relativise_folder(work / "shared", [clone, work]), "shared")
             # nowhere known: the full path
