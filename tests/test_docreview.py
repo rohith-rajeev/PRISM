@@ -652,8 +652,8 @@ class Pipeline(unittest.TestCase):
             self.run_job(targets=[self.target(("docs/spce.md", "docs/other.md"))])
         msg = str(cm.exception)
         self.assertIn("Pre-flight", msg)
-        self.assertIn("docs/spce.md", msg)
-        self.assertIn("docs/other.md", msg)
+        self.assertIn(os.path.join("docs", "spce.md"), msg)
+        self.assertIn(os.path.join("docs", "other.md"), msg)
         self.assertIn("Did you mean: docs/spec.md", msg)
         self.assertEqual(self.calls, [])
 
