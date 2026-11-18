@@ -112,6 +112,10 @@ codebase's patterns. Without them, it centres on whether the document is consist
 with the codebase's patterns and the design is good to implement without breaking
 anything.
 
+The requirements folder can hold text/Markdown, **Word (.docx), PDF and Excel (.xlsx)**
+files. Every sheet of a workbook is read, each under its own heading. A file that can't
+be read (a scanned or password-protected PDF, say) is reported, never silently skipped.
+
 For each document the `doc-reviewer` agent reads the codebase, the document and
 (when given) the requirements, then PRISM:
 

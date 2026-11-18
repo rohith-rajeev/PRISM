@@ -8,3 +8,7 @@ pyinstaller>=5.13,<8
 # python.org's installer or Homebrew put them, but a PyInstaller build has
 # none of that at run time.
 certifi
+# Optional at run time (pure Python): lets PRISM read requirement PDFs that the
+# built-in reader cannot (compressed fonts, unusual encodings). extract.py falls
+# back to its own reader when this is absent.
+pypdf>=4,<7

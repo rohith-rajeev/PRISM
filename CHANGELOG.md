@@ -4,6 +4,13 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v6.3
+
+- **Requirements can now be Word, PDF and Excel files**, not only text. A workbook is
+  read sheet by sheet - every sheet, hidden ones included, under its own heading. A file
+  that can't be read (a scanned or password-protected PDF) is reported in the log and
+  to the reviewer instead of being skipped silently.
+
 ## v6.2
 
 - **Windows: reviews now receive their instructions reliably.** The engine was getting

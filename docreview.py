@@ -21,13 +21,16 @@ it only borrows engine plumbing from orchestrator.py.
 import difflib
 import json
 import re
+import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+import extract as X
 import orchestrator as O
 from pathutil import native_any, native_path, native_rel, posix_rel
 from orchestrator import Cancelled, _emit_plain
@@ -728,12 +731,54 @@ def find_requirements(requirements_path, roots):
 
 def list_requirement_files(folder, limit=MAX_REQ_FILES):
     """Text-ish files in the folder, sorted; (paths, truncated)."""
-    skip = {".png", ".jpg", ".jpeg", ".gif", ".pdf", ".zip", ".pptx", ".docx",
-            ".xlsx", ".ico", ".svg", ".mp4"}
+    skip = {".png", ".jpg", ".jpeg", ".gif", ".zip", ".pptx", ".ico", ".svg", ".mp4"}
     files = [p for p in sorted(Path(folder).rglob("*"))
              if p.is_file() and p.suffix.lower() not in skip
+             and not p.name.startswith("~$")             # Office's lock files
              and ".git" not in p.relative_to(folder).parts]
     return files[:limit], len(files) > limit
+
+
+def prepare_requirements(files, folder, scratch, emit=_emit_plain):
+    """Turn Word, PDF and Excel requirements into text the reviewer can read.
+
+    Returns (files to give the reviewer, note for the prompt, number converted).
+    Text files pass through untouched. Each .docx/.xlsx/.pdf is extracted into
+    `scratch` (every sheet of a workbook, under its own heading); the originals
+    are never modified. One that cannot be read is reported - in the log and to
+    the reviewer - rather than silently dropped.
+    """
+    ready, notes, unreadable, converted = [], [], [], 0
+    scratch = Path(scratch)
+    for p in files:
+        if p.suffix.lower() not in X.CONVERTIBLE:
+            ready.append(p)
+            continue
+        try:
+            rel = p.relative_to(folder)
+        except ValueError:
+            rel = Path(p.name)
+        try:
+            text = X.extract_text(p)
+        except X.ExtractError as e:
+            unreadable.append(f"{rel} ({e})")
+            emit(f"⚠ Requirement {rel}: {e}; the reviewer is told it could not be read.")
+            continue
+        out = scratch / (re.sub(r"[\\/]+", "__", str(rel)) + ".txt")
+        with open(out, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        ready.append(out)
+        converted += 1
+        notes.append(f"  - {out} is the text of {rel}")
+    parts = []
+    if notes:
+        parts.append("These requirement files are text extracted from the original Word, PDF "
+                     "or Excel files (an Excel workbook lists every sheet under its own "
+                     "heading):\n" + "\n".join(notes))
+    if unreadable:
+        parts.append("These requirement files could NOT be read as text, so say in the "
+                     "review that they were not considered: " + "; ".join(unreadable))
+    return ready, "\n".join(parts), converted
 
 
 # ---- git ---------------------------------------------------------------------
@@ -858,7 +903,7 @@ INCREMENTAL_MODE = (
 
 def build_prompt(target, doc_rel, doc_path, req_folder, req_files, req_truncated,
                  other_docs, worktree, other_worktrees, custom, previous, first_id,
-                 persona=DEFAULT_PERSONA):
+                 persona=DEFAULT_PERSONA, req_note=""):
     """The agent's brief for one document. Pure text, so it can be tested.
 
     `req_folder` None means no requirements were provided: the review is of the
@@ -893,6 +938,8 @@ def build_prompt(target, doc_rel, doc_path, req_folder, req_files, req_truncated
         else:
             lines.append("Requirement files:\n" + "\n".join(f"  - {p}" for p in shown)
                          if shown else "That folder holds no readable files.")
+        if req_note:
+            lines.append(req_note)
         if req_truncated and not incremental:
             lines.append(f"(Only the first {MAX_REQ_FILES} files are listed; look in the "
                          f"folder for the rest.)")
@@ -1194,6 +1241,7 @@ def _pipeline(project_dir, targets, requirements_path="", model=None,
     results, failed = [], []
     committed, pushed = [], []
     session_id = ""
+    scratch_dir = None
     try:
         ck()
         pg(STAGE_DOC_REVIEW, "active")
@@ -1217,7 +1265,7 @@ def _pipeline(project_dir, targets, requirements_path="", model=None,
                                + "\n  - ".join(problems))
         # Requirements are optional. Given, the review is centred on whether the
         # decomposition satisfies all of them; absent, on the document against the codebase.
-        req_folder, req_files, req_trunc = None, [], False
+        req_folder, req_files, req_trunc, req_note = None, [], False, ""
         if (requirements_path or "").strip():
             req_folder = find_requirements(requirements_path,
                                            [wt.path for wt in trees] + [Path(project_dir)])
@@ -1227,8 +1275,12 @@ def _pipeline(project_dir, targets, requirements_path="", model=None,
                     f"branch(es) or the project folder. Fix the path, or leave the "
                     f"requirements empty to review the documents against the codebase alone.")
             req_files, req_trunc = list_requirement_files(req_folder)
+            scratch_dir = tempfile.mkdtemp(prefix="prism-req-")
+            req_files, req_note, n_conv = prepare_requirements(
+                req_files, req_folder, scratch_dir, emit)
             emit(f"▸ Requirements: {req_folder} ({len(req_files)} file"
-                 f"{'' if len(req_files) == 1 else 's'})")
+                 f"{'' if len(req_files) == 1 else 's'}"
+                 + (f"; {n_conv} read from Word/PDF/Excel" if n_conv else "") + ")")
             if not req_files:
                 emit("⚠ The requirement folder holds no readable files; the review will say so.")
         else:
@@ -1294,7 +1346,8 @@ def _pipeline(project_dir, targets, requirements_path="", model=None,
             prompt = build_prompt(
                 t, rel, path, req_folder, req_files, req_trunc,
                 [d for d in all_docs if d != f"{t.label}: {rel}"], wt.path, others,
-                custom_instructions, previous, next_finding_number(runs), persona=persona)
+                custom_instructions, previous, next_finding_number(runs), persona=persona,
+                req_note=req_note)
             emit(f"═══ {t.label} · {rel} ═══")
             res, body, sid, partial = review_document(
                 prompt, project_dir, emit, model, control, meter, ask=ask, get_note=get_note)
@@ -1437,6 +1490,8 @@ def _pipeline(project_dir, targets, requirements_path="", model=None,
                          f"{REMOTE}/{wt.target.branch}")
                 pg(STAGE_DOC_PUSH, "done")
     finally:
+        if scratch_dir:
+            shutil.rmtree(scratch_dir, ignore_errors=True)
         for wt in reversed(stack):
             try:
                 wt.__exit__(None, None, None)
