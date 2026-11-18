@@ -4,6 +4,14 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v6.4
+
+- **Windows: reviews that came back empty are fixed.** The engine was starting but
+  receiving no instructions on some machines and printing its help instead. PRISM now
+  sends the instructions through the engine's standard input, and if the engine still
+  reports it got nothing it tries an attached file, then a one-line form, on its own.
+  The log says which way was used.
+
 ## v6.3
 
 - **Requirements can now be Word, PDF and Excel files**, not only text. A workbook is

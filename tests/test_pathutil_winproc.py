@@ -108,20 +108,51 @@ class PromptDeliveryTests(unittest.TestCase):
             p.start()
         self.addCleanup(lambda: [p.stop() for p in self.patches])
 
-    def test_multiline_prompt_goes_in_an_attached_file_on_windows(self):
+    def test_multiline_prompt_goes_to_stdin_by_default_on_windows(self):
         cmd = ["opencode.exe", "run", "--agent", "a", "--auto", "PERSONA: BA.\nline two"]
-        argv, cleanup = self.O._launch_argv(cmd, lambda *_a: None)
-        self.assertIn("--file", argv)
+        argv, cleanup, stdin = self.O._launch_argv(cmd, lambda *_a: None)
+        self.assertEqual(stdin, "PERSONA: BA.\nline two")
+        self.assertIsNone(cleanup)
+        self.assertNotIn("\n", argv[-1])
+        self.assertNotIn("--file", argv)
+
+    def test_the_file_fallback_attaches_the_prompt(self):
+        cmd = ["opencode.exe", "run", "--agent", "a", "--auto", "PERSONA: BA.\nline two"]
+        argv, cleanup, stdin = self.O._launch_argv(cmd, lambda *_a: None, "file")
+        self.assertIsNone(stdin)
         name = argv[argv.index("--file") + 1]
         self.assertEqual(Path(name).read_text(encoding="utf-8"), "PERSONA: BA.\nline two")
-        self.assertNotIn("\n", argv[-1])
         self.assertEqual(argv[-2], "--")
         cleanup()
         self.assertFalse(os.path.exists(name))
 
+    def test_the_last_resort_flattens_to_one_line(self):
+        cmd = ["opencode.exe", "run", "--auto", "a\nb"]
+        argv, cleanup, stdin = self.O._launch_argv(cmd, lambda *_a: None, "flat")
+        self.assertEqual((argv[-1], cleanup, stdin), ("a / b", None, None))
+
     def test_simple_commands_are_untouched(self):
         cmd = ["opencode.exe", "run", "--help"]
-        self.assertEqual(self.O._launch_argv(cmd, lambda *_a: None), (cmd, None))
+        self.assertEqual(self.O._launch_argv(cmd, lambda *_a: None), (cmd, None, None))
+
+    @unittest.skipIf(os.name == "nt", "uses a shell-script stand-in for the engine")
+    def test_a_real_process_receives_the_prompt_on_stdin(self):
+        import sys
+        import tempfile
+        code = ("import sys; d=sys.stdin.read()\n"
+                "print('GOT '+repr(d)) if d.strip() else print('run [message..] --dangerously-skip-permissions')")
+        with tempfile.TemporaryDirectory() as d:
+            eng = Path(d) / "eng"
+            eng.write_text(f"#!/bin/sh\nexec {sys.executable} -c \"{code}\"\n", encoding="utf-8")
+            eng.chmod(0o755)
+            rc, text, _ = self.O._run_stream([str(eng), "run", "L1\nL2"], cwd=d,
+                                             emit=lambda *_a: None)
+        self.assertIn("GOT 'L1\\nL2'", text)
+
+    def test_help_output_is_recognised_as_no_message(self):
+        self.assertTrue(self.O._engine_showed_help(
+            "opencode run [message..]\n--dangerously-skip-permissions auto-approve"))
+        self.assertFalse(self.O._engine_showed_help("a review"))
 
 
 if __name__ == "__main__":

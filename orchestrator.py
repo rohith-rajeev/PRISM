@@ -1155,41 +1155,67 @@ def _announce_engine(exe, emit):
     threading.Thread(target=_ask, daemon=True).start()
 
 
-def _launch_argv(cmd, emit):
-    """(argv, cleanup) to actually start `cmd` with.
+_DELIVERIES = ("stdin", "file", "flat")
+_NOTE = ("Your full instructions follow in the attached input. Read them completely "
+         "and follow them exactly; they are the task.")
+
+
+def _launch_argv(cmd, emit, delivery="stdin"):
+    """(argv, cleanup, stdin_text) to actually start `cmd` with.
 
     On Windows a multi-line prompt does not survive the command line: through
     the engine's npm `.cmd` launcher cmd.exe cuts it at the first line break,
     and even without it the engine has been seen to receive an empty message
-    (it answers by printing its help). So there the prompt travels in a file
-    attached with --file, and the message itself is one plain line. The `.cmd`
-    launcher is also replaced by what it runs, to keep cmd.exe out of it.
+    (it answers by printing its help). So there the prompt travels another way
+    and the message argument is one plain line:
+      stdin - written to the engine's standard input (which `run` appends to
+              the message); no quoting or length limit applies
+      file  - attached with --file
+      flat  - squashed onto one line (last resort)
+    The `.cmd` launcher is also replaced by what it runs, to keep cmd.exe out of it.
     """
     if not winproc.windows():
-        return list(cmd), None
+        return list(cmd), None, None
     argv = winproc.direct_argv(cmd) if winproc.is_batch_launcher(cmd[0]) else list(cmd)
     prompt = str(cmd[-1]) if len(cmd) > 2 and cmd[1] == "run" else ""
     if not prompt or (len(prompt) < 300 and not re.search(r'[\r\n%"^&|<>]', prompt)):
-        return argv, None
-    if "--file" in _engine_run_help(cmd[0]):
+        return argv, None, None
+    if delivery == "stdin":
+        return argv[:-1] + [_NOTE], None, prompt
+    if delivery == "file" and "--file" in _engine_run_help(cmd[0]):
         try:
             fd, name = tempfile.mkstemp(prefix="prism-prompt-", suffix=".md")
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(prompt)
-            note = ("Your full instructions are in the attached file. Read it completely "
-                    "and follow it exactly; it is the task.")
-            return argv[:-1] + ["--file", name, "--", note], \
-                lambda: os.path.exists(name) and os.remove(name)
+            return argv[:-1] + ["--file", name, "--", _NOTE], \
+                (lambda: os.path.exists(name) and os.remove(name)), None
         except OSError:
             pass
     flat = re.sub(r"\s*[\r\n]+\s*", " / ", prompt).replace('"', "'").replace("%", "\uff05")
-    emit("⚠ The instructions had to be flattened to one line for this engine launcher. "
-         "If the review is poor, install the engine so `opencode.exe` is on PATH.")
-    return argv[:-1] + [flat], None
+    return argv[:-1] + [flat], None, None
+
+
+def _engine_showed_help(text):
+    return "run [message..]" in (text or "") and "--dangerously-skip-permissions" in text
 
 
 def _run_stream(cmd, cwd, emit, timeout=None, control=None, json_mode=False,
                 idle_timeout=None):
+    """_run_stream_once, trying the other ways of handing the prompt to the engine
+    (Windows only) when it answers by printing its help, i.e. got no message."""
+    modes = _DELIVERIES if winproc.windows() else ("stdin",)
+    for i, mode in enumerate(modes):
+        rc, text, sid = _run_stream_once(cmd, cwd, emit, timeout, control, json_mode,
+                                         idle_timeout, mode)
+        if not (winproc.windows() and _engine_showed_help(text)) or i == len(modes) - 1:
+            return rc, text, sid
+        emit(f"⚠ The engine did not receive the instructions by {mode}; "
+             f"trying {modes[i + 1]}.")
+    return rc, text, sid
+
+
+def _run_stream_once(cmd, cwd, emit, timeout=None, control=None, json_mode=False,
+                     idle_timeout=None, delivery="stdin"):
     """Run cmd, streaming output to emit.
 
     Returns (rc, text, session_id). In json_mode the engine speaks a stream of
@@ -1209,10 +1235,13 @@ def _run_stream(cmd, cwd, emit, timeout=None, control=None, json_mode=False,
     # stdin is closed, not inherited: `run` reads piped stdin as part of the
     # prompt and waits for it to end, which on a launcher- or ssh-started
     # PRISM never happens and looks exactly like a silent stall.
-    argv, cleanup = _launch_argv(cmd, emit)
+    argv, cleanup, stdin_text = _launch_argv(cmd, emit, delivery)
+    if winproc.windows() and argv != list(cmd):
+        emit(f"· prompt delivery: {delivery if (stdin_text or cleanup) else 'flattened'}")
     try:
         proc = subprocess.Popen(
-            argv, cwd=cwd, env=_env_for_cwd(cwd), stdin=subprocess.DEVNULL,
+            argv, cwd=cwd, env=_env_for_cwd(cwd),
+            stdin=subprocess.PIPE if stdin_text else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
             bufsize=1, **_group_kwargs(),
@@ -1222,6 +1251,14 @@ def _run_stream(cmd, cwd, emit, timeout=None, control=None, json_mode=False,
             cleanup()
         emit(f"⛔ Could not start the review engine: {e}")
         return 1, f"[process error: {e}]\n", None
+    if stdin_text:
+        def _feed():
+            try:
+                proc.stdin.write(stdin_text)
+                proc.stdin.close()
+            except (OSError, ValueError):
+                pass
+        threading.Thread(target=_feed, daemon=True).start()
     if control is not None:
         control.attach(proc)
     out_lines = []
