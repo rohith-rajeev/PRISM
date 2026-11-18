@@ -4,6 +4,24 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v5.9
+
+- **Windows: document and PR reviews no longer fail with "no review report was
+  delivered".** The review engine's `.cmd` launcher cut the instructions off at their
+  first line break; PRISM now starts the engine directly. Anything the engine prints
+  that PRISM can't read is now shown in the log instead of being silently dropped.
+- **Windows: no more command-prompt windows flashing open and closed** while PRISM
+  starts and works.
+- **Paths work whichever slash you type.** `docs/a/b.md` and `docs\a\b.md` both
+  become the right form for the machine PRISM runs on (folders, repositories, document
+  files and the requirements folder, in the app and on the command line).
+- **Mac: the jobs list no longer shows empty boxes** until you scroll or resize.
+- **Job screens are roomier.** On a document review's job screen the title wraps and
+  Retry / Stop sit on their own line instead of being squeezed. Command-line job screens
+  got the same layout, plus a **New job** button.
+- Reviews are more robust: engine lookup on Windows also checks npm/bun folders, and a
+  failure to start the engine is reported instead of ending the run abruptly.
+
 ## v5.8
 
 - **`prism doctor` checks your setup and says how to fix what is wrong** — git, the

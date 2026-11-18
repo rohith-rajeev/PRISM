@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import orchestrator as O
+from pathutil import native_any, native_path, native_rel, posix_rel
 from orchestrator import Cancelled, _emit_plain
 
 # ---- identifiers -------------------------------------------------------------
@@ -205,6 +206,12 @@ class DocTarget:
     branch: str
     files: tuple              # paths of the documents, relative to the repository
 
+    def __post_init__(self):
+        # Whatever separators were typed, store the ones this OS understands.
+        object.__setattr__(self, "local_repo", native_path(self.local_repo))
+        object.__setattr__(self, "files", tuple(dict.fromkeys(
+            f for f in (native_rel(x) for x in (self.files or ())) if f)))
+
     @property
     def label(self):
         return {"BE": "Backend", "FE": "Frontend"}.get(self.role, self.repo_name)
@@ -232,6 +239,10 @@ class DocJobSpec:
     origin_ref: str = ""
     kind = "docs"
 
+    def __post_init__(self):
+        object.__setattr__(self, "project_dir", native_path(self.project_dir))
+        object.__setattr__(self, "requirements_path", native_any(self.requirements_path))
+
     @property
     def runner(self):
         return full_pipeline
@@ -246,7 +257,7 @@ class DocJobSpec:
     @property
     def dup_key(self):
         return ("docs",) + tuple(sorted(
-            (str(Path(t.local_repo).expanduser()), t.branch, f)
+            (str(Path(t.local_repo)), t.branch, f)
             for t in self.targets for f in t.files))
 
     @property
@@ -609,7 +620,7 @@ def parse_files(raw):
     """File names from free text: separated by commas, semicolons or new lines."""
     out = []
     for part in re.split(r"[\n,;]+", raw or ""):
-        part = part.strip().strip("'\"")
+        part = native_rel(part)
         if part and part not in out:
             out.append(part)
     return tuple(out)
@@ -621,18 +632,18 @@ def repo_relative(paths, repo_root):
     A picked file must lie inside the repository (and not in .git): documents
     are read from the branch, so a path outside the repo means nothing there.
     """
-    root = Path(repo_root).expanduser().resolve()
+    root = Path(native_path(repo_root)).resolve()
     rels, skipped = [], []
     for raw in paths or []:
         try:
-            rel = Path(raw).expanduser().resolve().relative_to(root)
+            rel = Path(native_path(raw)).resolve().relative_to(root)
         except (ValueError, OSError):
             skipped.append(str(raw))
             continue
         if not rel.parts or ".git" in rel.parts:
             skipped.append(str(raw))
-        elif rel.as_posix() not in rels:
-            rels.append(rel.as_posix())
+        elif str(rel) not in rels:
+            rels.append(str(rel))
     return rels, skipped
 
 
@@ -641,18 +652,18 @@ def relativise_folder(path, roots):
     working folder) it lies in so it is found in the reviewed branch's own copy;
     an absolute path when it lies in none of `roots`, or is a root itself."""
     try:
-        target = Path(path).expanduser().resolve()
+        target = Path(native_path(path)).resolve()
     except OSError:
         return str(path)
     best = None
     for root in roots:
         try:
-            rel = target.relative_to(Path(root).expanduser().resolve())
+            rel = target.relative_to(Path(native_path(root)).resolve())
         except (ValueError, OSError):
             continue
         if rel.parts and (best is None or len(rel.parts) < len(best.parts)):
             best = rel               # the deepest root gives the shortest path
-    return best.as_posix() if best is not None else str(target)
+    return str(best) if best is not None else str(target)
 
 
 _BE_RE = re.compile(r"(^|[-_.])be([-_.]|$)|backend", re.IGNORECASE)
@@ -684,9 +695,9 @@ def check_branch(branch):
 
 def resolve_inside(root, rel):
     """`rel` resolved under `root`, or None when it escapes it or targets .git."""
-    root = Path(root).resolve()
+    root = Path(native_path(root)).resolve()
     try:
-        path = (root / rel).resolve()
+        path = (root / native_rel(rel)).resolve()
         parts = path.relative_to(root).parts
     except (ValueError, OSError):
         return None
@@ -702,10 +713,10 @@ def find_requirements(requirements_path, roots):
     worktree root in turn (the requirements may live in only one of the repos),
     then returned as the first that exists. None when nothing matches.
     """
-    raw = (requirements_path or "").strip()
+    raw = native_any(requirements_path)
     if not raw:
         return None
-    p = Path(raw).expanduser()
+    p = Path(raw)
     if p.is_absolute():
         return p if p.is_dir() else None
     for root in roots:
@@ -1271,7 +1282,7 @@ def _pipeline(project_dir, targets, requirements_path="", model=None,
                 last = prior.meta
                 delta = ""
                 if last.get("commit"):
-                    shown = _git(wt.path, "show", f"{last['commit']}:{rel}", check=False)
+                    shown = _git(wt.path, "show", f"{last['commit']}:{posix_rel(rel)}", check=False)
                     if shown.returncode == 0:
                         delta = doc_delta(shown.stdout, old_text)
                 open_list = open_findings(runs, persona)
@@ -1403,7 +1414,7 @@ def _pipeline(project_dir, targets, requirements_path="", model=None,
                          if len(wt.changed) == 1
                          else f"{who} review comments on {len(wt.changed)} documents")
                 msg = commit_message(run_id, f"{brief} ({counts_text(total)})")
-                _git(wt.path, "add", "--", *wt.changed)
+                _git(wt.path, "add", "--", *[posix_rel(c) for c in wt.changed])
                 _git(wt.path, "commit", "-m", msg)
                 wt.commit = _git(wt.path, "rev-parse", "HEAD").stdout.strip()
                 committed.append(wt)

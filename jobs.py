@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import docreview
+from pathutil import native_path
 from orchestrator import (REGION_DEFAULT, Cancelled, RunControl, followup_declined,
                           full_pipeline, run_followup)
 
@@ -65,6 +66,12 @@ class JobSpec:
     origin: str = "manual"
     origin_ref: str = ""
 
+    def __post_init__(self):
+        # Paths typed with either kind of slash are made valid for this OS.
+        object.__setattr__(self, "project_dir", native_path(self.project_dir))
+        if self.local_repo:
+            object.__setattr__(self, "local_repo", native_path(self.local_repo))
+
     # Which kind of job this is. A documentation review (docreview.DocJobSpec)
     # says "docs"; everything that reads `kind` treats a missing one as "pr".
     kind = "pr"
@@ -78,7 +85,7 @@ class JobSpec:
         """Resolved clone path, for spotting two jobs sharing one checkout."""
         target = self.local_repo or self.project_dir
         try:
-            return str(Path(target).expanduser().resolve())
+            return str(Path(native_path(target)).resolve())
         except Exception:  # noqa: BLE001
             return str(target)
 

@@ -38,6 +38,8 @@ import cli_jobs as CJ  # noqa: E402
 import diagnostics as DG  # noqa: E402
 import docreview as DR  # noqa: E402
 import jobs as J  # noqa: E402
+import winproc  # noqa: E402
+from pathutil import native_path, native_rel  # noqa: E402
 from orchestrator import (  # noqa: E402
     REGION_DEFAULT, TOOL_DIR, Cancelled, RunControl, detect_local_repos, followup_declined,
     full_pipeline, list_available_models, normalise_verdict, run_followup,
@@ -148,7 +150,7 @@ def resolve_target(path=None, repo=None, clone=None, cfg=None, cwd=None):
     Raises UsageError with what to do next, never guesses between clones.
     """
     cfg = cfg if cfg is not None else CFG.get_cli()
-    start = Path(path or cfg.get("project_dir") or cwd or os.getcwd()).expanduser()
+    start = Path(native_path(path or cfg.get("project_dir") or cwd or os.getcwd()))
     try:
         start = start.resolve()
     except OSError:
@@ -164,7 +166,7 @@ def resolve_target(path=None, repo=None, clone=None, cfg=None, cwd=None):
 
     name = (repo or cfg.get("repo") or "").strip()
     subs = [(n, p) for n, p in detect_local_repos(str(base)) if Path(p) != base]
-    local = str(Path(clone).expanduser().resolve()) if clone else None
+    local = str(Path(native_path(clone)).resolve()) if clone else None
 
     if not name:
         if is_repo:
@@ -208,7 +210,7 @@ def build_spec(args, cfg=None, cwd=None):
     instructions = args.instructions if args.instructions is not None else cfg["instructions"]
     if args.instructions_file:
         try:
-            instructions = Path(args.instructions_file).expanduser().read_text(encoding="utf-8")
+            instructions = Path(native_path(args.instructions_file)).read_text(encoding="utf-8")
         except OSError as e:
             raise UsageError(f"Cannot read {args.instructions_file}: {e.strerror or e}")
     return J.JobSpec(
@@ -234,18 +236,18 @@ def _doc_path(arg, clone, cwd):
     from a subfolder works), or absolute, or - for a file that only exists on
     the branch - already from the repository root.
     """
-    clone_root = Path(clone).resolve()
-    given = Path(arg).expanduser()
+    clone_root = Path(native_path(clone)).resolve()
+    given = Path(native_path(arg))
     for candidate in ([given] if given.is_absolute() else [Path(cwd) / given, clone_root / given]):
         try:
             rel = candidate.resolve().relative_to(clone_root)
         except (ValueError, OSError):
             continue
         if candidate.exists() and rel.parts:
-            return rel.as_posix()
+            return str(rel)
     if given.is_absolute():
         raise UsageError(f"{arg} is not inside {clone_root}.")
-    return Path(arg).as_posix().lstrip("./") or arg
+    return native_rel(arg) or arg
 
 
 def build_docs_spec(args, cfg=None, cwd=None):
@@ -260,7 +262,7 @@ def build_docs_spec(args, cfg=None, cwd=None):
     """
     cfg = cfg if cfg is not None else CFG.get_cli()
     cwd = Path(cwd or os.getcwd())
-    start = Path(args.path or cfg.get("project_dir") or cwd).expanduser()
+    start = Path(native_path(args.path or cfg.get("project_dir") or cwd))
     try:
         start = start.resolve()
     except OSError:
@@ -296,7 +298,7 @@ def build_docs_spec(args, cfg=None, cwd=None):
 
     def pick_clone(role, explicit):
         if explicit:
-            path = Path(explicit).expanduser()
+            path = Path(native_path(explicit))
             try:
                 path = path.resolve()
             except OSError:
@@ -349,8 +351,8 @@ def build_docs_spec(args, cfg=None, cwd=None):
     # satisfies the requirements; absent, on the documents against the codebase alone.
     requirements = (args.requirements or cfg.get("requirements") or "").strip()
     if requirements:
-        typed = (cwd / Path(requirements).expanduser()) if not Path(requirements).expanduser() \
-            .is_absolute() else Path(requirements).expanduser()
+        typed = (cwd / Path(native_path(requirements))) if not Path(native_path(requirements)) \
+            .is_absolute() else Path(native_path(requirements))
         if typed.is_dir():     # a folder you can see from here: keep it relative to its repo
             requirements = DR.relativise_folder(
                 typed, [t.local_repo for t in targets] + [str(base)])
@@ -365,7 +367,7 @@ def build_docs_spec(args, cfg=None, cwd=None):
     instructions = args.instructions if args.instructions is not None else cfg["instructions"]
     if args.instructions_file:
         try:
-            instructions = Path(args.instructions_file).expanduser().read_text(encoding="utf-8")
+            instructions = Path(native_path(args.instructions_file)).read_text(encoding="utf-8")
         except OSError as e:
             raise UsageError(f"Cannot read {args.instructions_file}: {e.strerror or e}")
     do_commit = flag(args.commit, "commit")
@@ -1091,7 +1093,7 @@ def cmd_export(args):
 
 
 def cmd_repos(args):
-    base = Path(args.path).expanduser()
+    base = Path(native_path(args.path))
     found = detect_local_repos(str(base))
     if not found:
         print(f"No git clones in {base.resolve()}.")
@@ -1146,7 +1148,7 @@ def cmd_config(args):
     elif key in CFG.CLI_FLAG_KEYS:
         CFG.set_cli(**{key: _parse_bool(text)})
     elif key == "project_dir":
-        folder = Path(text).expanduser().resolve()
+        folder = Path(native_path(text)).resolve()
         if not folder.is_dir():
             raise UsageError(f"{folder} is not a folder.")
         CFG.set_cli(project_dir=str(folder))
@@ -1171,7 +1173,7 @@ def cmd_man(args):
     if args.path:
         print(MAN_PAGE)
         return EXIT_OK
-    target = Path(args.dir).expanduser() if args.dir else (
+    target = Path(native_path(args.dir)) if args.dir else (
         Path.home() / ".local" / "share" / "man" / "man1")
     try:
         target.mkdir(parents=True, exist_ok=True)

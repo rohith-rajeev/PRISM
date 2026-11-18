@@ -48,6 +48,7 @@ from pathlib import Path
 
 import config
 import jobs as J
+from pathutil import native_path
 from orchestrator import REGION_DEFAULT
 from version import __version__
 
@@ -184,11 +185,11 @@ def parse_request(data, settings=None):
         raise BridgeError(400, "bad-request", "local_repo (or project_dir) is "
                           "required so the reviewer can read the code.")
     for label, path in (("local_repo", local or project), ("project_dir", project)):
-        p = Path(path).expanduser()
+        p = Path(native_path(path))
         if not p.is_absolute() or not p.is_dir():
             raise BridgeError(400, "bad-request",
                               f"{label} must be an absolute path to an existing directory.")
-    if not (Path(local or project).expanduser() / ".git").exists():
+    if not (Path(native_path(local or project)) / ".git").exists():
         raise BridgeError(400, "bad-request", "local_repo is not a git clone.")
 
     try:
@@ -224,8 +225,8 @@ def parse_request(data, settings=None):
 
     return ReviewRequest(
         request_id=request_id, repo_name=repo, pr_id=pr_id, region=region,
-        local_repo=str(Path(local or project).expanduser()),
-        project_dir=str(Path(project).expanduser()), iteration=iteration,
+        local_repo=str(Path(native_path(local or project))),
+        project_dir=str(Path(native_path(project))), iteration=iteration,
         callback_url=cb_url, callback_token=cb_token, context=context,
         auto_merge=auto_merge, run_ref=_text(data, "run_ref", 200))
 
