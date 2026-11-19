@@ -4,6 +4,17 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v6.4.2
+
+- **Fixes reviews that returned nothing on older review-engine builds (e.g. 1.15).** Those
+  builds don't know the `--auto` option PRISM always passed, so they rejected the whole
+  command and printed only their help. PRISM now checks which name the installed engine
+  uses for it (`--auto` or `--dangerously-skip-permissions`) and passes that one.
+- The reviewer's full instructions still go to the engine untouched: as the normal
+  argument whenever the engine is started directly, and as an attached file or standard
+  input only where Windows would otherwise cut them. The log shows which was used and
+  PRISM moves to the next way by itself if the engine answers with its help screen.
+
 ## v6.4.1
 
 - **Slow or large repositories no longer fail the pre-flight.** Preparing the private copy

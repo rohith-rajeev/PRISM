@@ -108,13 +108,30 @@ class PromptDeliveryTests(unittest.TestCase):
             p.start()
         self.addCleanup(lambda: [p.stop() for p in self.patches])
 
-    def test_multiline_prompt_goes_to_stdin_by_default_on_windows(self):
+    def test_a_directly_started_engine_gets_the_prompt_as_the_argument_exactly(self):
         cmd = ["opencode.exe", "run", "--agent", "a", "--auto", "PERSONA: BA.\nline two"]
-        argv, cleanup, stdin = self.O._launch_argv(cmd, lambda *_a: None)
+        self.assertEqual(self.O._launch_argv(cmd, lambda *_a: None), (cmd, None, None))
+
+    def test_a_batch_launcher_that_cannot_be_bypassed_gets_the_file_not_the_argument(self):
+        cmd = ["opencode.cmd", "run", "--agent", "a", "--auto", "PERSONA: BA.\nline two"]
+        with __import__("unittest").mock.patch.object(winproc, "is_batch_launcher",
+                                                      return_value=True):
+            argv, cleanup, stdin = self.O._launch_argv(cmd, lambda *_a: None)
+        self.assertIn("--file", argv)
+        self.assertIsNone(stdin)
+        cleanup()
+
+    def test_stdin_delivery_keeps_the_prompt_whole(self):
+        cmd = ["opencode.exe", "run", "--auto", "PERSONA: BA.\nline two"]
+        argv, cleanup, stdin = self.O._launch_argv(cmd, lambda *_a: None, "stdin")
         self.assertEqual(stdin, "PERSONA: BA.\nline two")
-        self.assertIsNone(cleanup)
         self.assertNotIn("\n", argv[-1])
-        self.assertNotIn("--file", argv)
+
+    def test_an_oversized_prompt_is_not_forced_through_the_command_line(self):
+        cmd = ["opencode.exe", "run", "--auto", "x\n" * 20000]
+        argv, cleanup, stdin = self.O._launch_argv(cmd, lambda *_a: None)
+        self.assertIn("--file", argv)
+        cleanup()
 
     def test_the_file_fallback_attaches_the_prompt(self):
         cmd = ["opencode.exe", "run", "--agent", "a", "--auto", "PERSONA: BA.\nline two"]
@@ -148,6 +165,18 @@ class PromptDeliveryTests(unittest.TestCase):
             rc, text, _ = self.O._run_stream([str(eng), "run", "L1\nL2"], cwd=d,
                                              emit=lambda *_a: None)
         self.assertIn("GOT 'L1\\nL2'", text)
+
+    def test_the_unattended_flag_follows_the_engine_build(self):
+        O = self.O
+        with __import__("unittest").mock.patch.object(
+                O, "_engine_run_help", return_value="--dir\n--auto  auto-approve"):
+            self.assertEqual(O._approve_args("e"), ["--auto"])
+        with __import__("unittest").mock.patch.object(
+                O, "_engine_run_help",
+                return_value="--dir\n--dangerously-skip-permissions  auto-approve permissions"):
+            self.assertEqual(O._approve_args("e"), ["--dangerously-skip-permissions"])
+        with __import__("unittest").mock.patch.object(O, "_engine_run_help", return_value=""):
+            self.assertEqual(O._approve_args("e"), ["--auto"])
 
     def test_help_output_is_recognised_as_no_message(self):
         self.assertTrue(self.O._engine_showed_help(

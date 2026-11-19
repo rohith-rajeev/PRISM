@@ -301,6 +301,19 @@ def _dir_args(exe, project_dir):
     return []
 
 
+def _approve_args(exe):
+    """The flag that lets the reviewer run unattended, under whatever name this engine
+    build gives it: `--auto` (newer builds) or `--dangerously-skip-permissions` (older
+    ones, e.g. 1.15, which reject `--auto` as unknown and print only their help).
+    Falls back to `--auto` when the help cannot be read, as before."""
+    help_text = _engine_run_help(exe)
+    if re.search(r"--auto\b", help_text):
+        return ["--auto"]
+    if "--dangerously-skip-permissions" in help_text:
+        return ["--dangerously-skip-permissions"]
+    return ["--auto"]
+
+
 class Cancelled(RuntimeError):
     """Raised inside the pipeline when the user hits Stop."""
 
@@ -1155,34 +1168,35 @@ def _announce_engine(exe, emit):
     threading.Thread(target=_ask, daemon=True).start()
 
 
-_DELIVERIES = ("stdin", "file", "flat")
-_NOTE = ("Your full instructions follow in the attached input. Read them completely "
+_DELIVERIES = ("arg", "file", "stdin", "flat")
+_NOTE = ("Your full instructions are in the attached input. Read them completely "
          "and follow them exactly; they are the task.")
+_ARG_LIMIT = 24000       # Windows caps a whole command line at 32767 characters
 
 
-def _launch_argv(cmd, emit, delivery="stdin"):
+def _launch_argv(cmd, emit, delivery="arg"):
     """(argv, cleanup, stdin_text) to actually start `cmd` with.
 
-    On Windows a multi-line prompt does not survive the command line: through
-    the engine's npm `.cmd` launcher cmd.exe cuts it at the first line break,
-    and even without it the engine has been seen to receive an empty message
-    (it answers by printing its help). So there the prompt travels another way
-    and the message argument is one plain line:
-      stdin - written to the engine's standard input (which `run` appends to
-              the message); no quoting or length limit applies
-      file  - attached with --file
+    The full, structured prompt always reaches the engine. How it travels:
+      arg   - as the command-line argument, exactly as on macOS/Linux. Only when the
+              engine is started directly (no cmd.exe in between) and it fits.
+      file  - attached with --file; the message itself is one plain line
+      stdin - written to the engine's standard input
       flat  - squashed onto one line (last resort)
-    The `.cmd` launcher is also replaced by what it runs, to keep cmd.exe out of it.
+    Through an npm `.cmd` launcher cmd.exe cuts a multi-line argument at its first
+    line break, so the launcher is replaced by what it runs where that can be worked out.
     """
     if not winproc.windows():
         return list(cmd), None, None
-    argv = winproc.direct_argv(cmd) if winproc.is_batch_launcher(cmd[0]) else list(cmd)
+    batch = winproc.is_batch_launcher(cmd[0])
+    argv = winproc.direct_argv(cmd) if batch else list(cmd)
     prompt = str(cmd[-1]) if len(cmd) > 2 and cmd[1] == "run" else ""
     if not prompt or (len(prompt) < 300 and not re.search(r'[\r\n%"^&|<>]', prompt)):
         return argv, None, None
-    if delivery == "stdin":
-        return argv[:-1] + [_NOTE], None, prompt
-    if delivery == "file" and "--file" in _engine_run_help(cmd[0]):
+    still_batch = winproc.is_batch_launcher(argv[0])
+    if delivery == "arg" and not still_batch and len(prompt) <= _ARG_LIMIT:
+        return argv, None, None
+    if delivery in ("arg", "file") and "--file" in _engine_run_help(cmd[0]):
         try:
             fd, name = tempfile.mkstemp(prefix="prism-prompt-", suffix=".md")
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -1191,6 +1205,8 @@ def _launch_argv(cmd, emit, delivery="stdin"):
                 (lambda: os.path.exists(name) and os.remove(name)), None
         except OSError:
             pass
+    if delivery in ("arg", "file", "stdin"):
+        return argv[:-1] + [_NOTE], None, prompt
     flat = re.sub(r"\s*[\r\n]+\s*", " / ", prompt).replace('"', "'").replace("%", "\uff05")
     return argv[:-1] + [flat], None, None
 
@@ -1202,20 +1218,30 @@ def _engine_showed_help(text):
 def _run_stream(cmd, cwd, emit, timeout=None, control=None, json_mode=False,
                 idle_timeout=None):
     """_run_stream_once, trying the other ways of handing the prompt to the engine
-    (Windows only) when it answers by printing its help, i.e. got no message."""
-    modes = _DELIVERIES if winproc.windows() else ("stdin",)
-    for i, mode in enumerate(modes):
-        rc, text, sid = _run_stream_once(cmd, cwd, emit, timeout, control, json_mode,
+    (Windows only) when it answers by printing its help, i.e. got no usable message."""
+    if not winproc.windows():
+        return _run_stream_once(cmd, cwd, emit, timeout, control, json_mode,
+                                idle_timeout, "arg")
+    seen = {"help": False}
+
+    def tee(line, *a, **k):
+        if "run [message..]" in str(line):
+            seen["help"] = True
+        return emit(line, *a, **k)
+
+    for i, mode in enumerate(_DELIVERIES):
+        seen["help"] = False
+        rc, text, sid = _run_stream_once(cmd, cwd, tee, timeout, control, json_mode,
                                          idle_timeout, mode)
-        if not (winproc.windows() and _engine_showed_help(text)) or i == len(modes) - 1:
+        if not (seen["help"] or _engine_showed_help(text)) or i == len(_DELIVERIES) - 1:
             return rc, text, sid
-        emit(f"⚠ The engine did not receive the instructions by {mode}; "
-             f"trying {modes[i + 1]}.")
+        emit(f"⚠ The engine did not take the instructions as '{mode}'; "
+             f"trying '{_DELIVERIES[i + 1]}'.")
     return rc, text, sid
 
 
 def _run_stream_once(cmd, cwd, emit, timeout=None, control=None, json_mode=False,
-                     idle_timeout=None, delivery="stdin"):
+                     idle_timeout=None, delivery="arg"):
     """Run cmd, streaming output to emit.
 
     Returns (rc, text, session_id). In json_mode the engine speaks a stream of
@@ -1237,7 +1263,7 @@ def _run_stream_once(cmd, cwd, emit, timeout=None, control=None, json_mode=False
     # PRISM never happens and looks exactly like a silent stall.
     argv, cleanup, stdin_text = _launch_argv(cmd, emit, delivery)
     if winproc.windows() and argv != list(cmd):
-        emit(f"· prompt delivery: {delivery if (stdin_text or cleanup) else 'flattened'}")
+        emit(f"· prompt delivery: {'stdin' if stdin_text else 'file' if cleanup else 'argument'}")
     try:
         proc = subprocess.Popen(
             argv, cwd=cwd, env=_env_for_cwd(cwd),
@@ -1473,7 +1499,7 @@ def run_agent(agent, prompt, project_dir, emit=_emit_plain, model=None,
     ensure_bundled_agents(project_dir, emit=emit)
     json_mode = engine_supports_json(exe)
     emit(f"\n▸ {label or agent} …")
-    cmd = [exe, "run", "--agent", agent, *_dir_args(exe, project_dir), "--auto"]
+    cmd = [exe, "run", "--agent", agent, *_dir_args(exe, project_dir), *_approve_args(exe)]
     if json_mode:
         cmd += ["--format", "json"]
     if model:
@@ -2488,7 +2514,7 @@ def run_opencode_review(pr_id, repo_name, local_repo, project_dir,
     # No --session/--continue: a plain run always creates a fresh session, and
     # --format json is what lets us capture its id for the follow-up turns.
     json_mode = engine_supports_json(exe)
-    cmd = [exe, "run", "--agent", agent, *_dir_args(exe, project_dir), "--auto"]
+    cmd = [exe, "run", "--agent", agent, *_dir_args(exe, project_dir), *_approve_args(exe)]
     if json_mode:
         cmd += ["--format", "json"]
     if model:
@@ -2595,7 +2621,7 @@ def run_followup(request, project_dir, repo_name, pr_id, local_repo=None,
         return text, (sid or session_id)
     exe = require_engine()
     json_mode = engine_supports_json(exe)
-    cmd = [exe, "run", "--agent", AGENT_NAME, *_dir_args(exe, project_dir), "--auto"]
+    cmd = [exe, "run", "--agent", AGENT_NAME, *_dir_args(exe, project_dir), *_approve_args(exe)]
     if json_mode:
         cmd += ["--format", "json"]
     if model:
@@ -2628,7 +2654,7 @@ def _continue_turn(prompt, project_dir, session_id, emit, model, control, what,
     """
     exe = require_engine()
     json_mode = engine_supports_json(exe)
-    cmd = [exe, "run", "--agent", agent or AGENT_NAME, *_dir_args(exe, project_dir), "--auto"]
+    cmd = [exe, "run", "--agent", agent or AGENT_NAME, *_dir_args(exe, project_dir), *_approve_args(exe)]
     if json_mode:
         cmd += ["--format", "json"]
     if model:
