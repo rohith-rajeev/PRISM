@@ -1121,7 +1121,7 @@ def _run_agent(prompt, project_dir, emit, model, control, meter):
     exe = O.require_engine()
     O.ensure_bundled_agents(project_dir, emit=emit)
     json_mode = O.engine_supports_json(exe)
-    cmd = [exe, "run", "--agent", AGENT_DOC_REVIEWER, *O._dir_args(exe, project_dir), "--auto"]
+    cmd = [exe, "run", "--agent", AGENT_DOC_REVIEWER, *O._dir_args(exe, project_dir), *O._approve_args(exe)]
     if json_mode:
         cmd += ["--format", "json"]
     if model:
