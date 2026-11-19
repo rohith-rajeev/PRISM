@@ -4,6 +4,16 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v6.4.1
+
+- **Slow or large repositories no longer fail the pre-flight.** Preparing the private copy
+  of each branch used to be cut off after five minutes with no sign of life. It now gets up
+  to twenty minutes, says it is still working every 30 seconds, never waits on a hidden
+  password or download prompt, accepts long Windows paths, and is cleared and retried once
+  if it overruns. Reviews themselves are unchanged: the reviewer still gets the full,
+  structured instructions.
+- Fix-up releases can carry a third number (6.4.1); the update check understands them.
+
 ## v6.4
 
 - **Windows: reviews that came back empty are fixed.** The engine was starting but

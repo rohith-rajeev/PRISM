@@ -20,6 +20,7 @@ it only borrows engine plumbing from orchestrator.py.
 
 import difflib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -161,6 +162,11 @@ MAX_REQ_FILES = 200
 MAX_DELTA_CHARS = 20000
 MAX_REVIEW_CHARS = 300000
 GIT_TIMEOUT = 300
+# Checking a whole repository out can legitimately take many minutes on a slow disk
+# with a virus scanner watching it, so that one step gets far longer than a query
+# does - and says it is alive, so a slow machine is not mistaken for a stuck one.
+CHECKOUT_TIMEOUT = 1200
+CHECKOUT_BEAT = 30
 
 SEVERITIES = ("Blocker", "Major", "Minor", "Suggestion")
 
@@ -792,6 +798,40 @@ def _git(cwd, *args, timeout=GIT_TIMEOUT, check=True):
     return r
 
 
+def _git_patient(cwd, emit, what, *args, timeout=CHECKOUT_TIMEOUT, env_extra=None):
+    """Run a slow git command, reporting progress, and stop its whole process tree
+    if it overruns. Returns (returncode, output); returncode is None on a timeout.
+
+    Output goes to a temp file rather than a pipe so a chatty child can never fill
+    a pipe and stall the command, and a helper git started (a filter, a credential
+    prompt) that outlives `git` itself cannot keep us waiting on a closed pipe.
+    """
+    env = dict(os.environ)
+    env.update(env_extra or {})
+    with tempfile.TemporaryFile() as out:
+        proc = subprocess.Popen(["git", *args], cwd=str(cwd), stdin=subprocess.DEVNULL,
+                                stdout=out, stderr=subprocess.STDOUT, env=env)
+        started = time.monotonic()
+        while True:
+            try:
+                proc.wait(timeout=CHECKOUT_BEAT)
+                break
+            except subprocess.TimeoutExpired:
+                spent = time.monotonic() - started
+                if spent >= timeout:
+                    O.kill_tree(proc, force=True)
+                    try:
+                        proc.wait(timeout=15)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    return None, ""
+                emit(f"⏳ {what} - still working ({int(spent) // 60}m{int(spent) % 60:02d}s). "
+                     f"Large repositories can take a while on this disk.")
+        out.seek(0)
+        text = out.read().decode("utf-8", "replace").strip()
+    return proc.returncode, text
+
+
 class _Worktree:
     """A private, throwaway checkout of one branch.
 
@@ -841,13 +881,43 @@ class _Worktree:
             raise RuntimeError(
                 f"Branch '{t.branch}' was not found in {t.repo_name}, locally or on "
                 f"{REMOTE}. Check the branch name.")
-        with O._lock_for(f"{self.clone}#docs-worktree"):
-            _git(self.clone, "worktree", "prune", check=False, timeout=60)
-            _git(self.clone, "worktree", "add", "--detach", str(self.path), self.ref)
+        self._add_worktree()
         self.base_commit = _git(self.path, "rev-parse", "HEAD").stdout.strip()
         self.emit(f"▸ {t.label}: reading {t.branch} at {self.base_commit[:8]} "
                   f"in an isolated worktree.")
         return self
+
+    def _add_worktree(self):
+        """`git worktree add`, patiently, and once more if the first try overran.
+
+        Nothing here needs the network or a person, so git is told never to ask
+        (a hidden credential or LFS prompt is the classic silent hang on Windows),
+        to accept long paths, and to skip LFS downloads: the review reads text
+        documents, and a pointer file stands in for a binary it could not read anyway.
+        """
+        t = self.target
+        env = {"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never",
+               "GIT_LFS_SKIP_SMUDGE": "1"}
+        args = ("-c", "core.longpaths=true", "-c", "core.fsmonitor=false",
+                "worktree", "add", "--detach", str(self.path), self.ref)
+        last = ""
+        for attempt in (1, 2):
+            with O._lock_for(f"{self.clone}#docs-worktree"):
+                _git(self.clone, "worktree", "prune", check=False, timeout=60)
+                self.emit(f"▸ {t.label}: preparing an isolated copy of {t.branch}"
+                          + ("" if attempt == 1 else " (second try)") + ".")
+                rc, text = _git_patient(self.clone, self.emit, f"{t.label}: checking out",
+                                        *args, env_extra=env)
+                if rc == 0:
+                    return
+                last = (f"it ran past {CHECKOUT_TIMEOUT // 60} minutes" if rc is None
+                        else text[:800])
+                O._remove_worktree(self.clone, self.path, self.root)
+                if self.path.exists():
+                    shutil.rmtree(self.path, ignore_errors=True)
+            if attempt == 1:
+                self.emit(f"⚠ {t.label}: the checkout did not finish ({last}). Clearing it and trying again.")
+        raise RuntimeError(f"git worktree add failed: {last}")
 
     def __exit__(self, *exc):
         O._remove_worktree(self.clone, self.path, self.root)
