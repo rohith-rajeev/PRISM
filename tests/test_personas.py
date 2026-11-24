@@ -358,7 +358,10 @@ class CommandLine(Isolated):
         self.assertEqual(code, 0, out.getvalue())
         self.assertIn("PERSONA: QA.", prompts[0])
         self.assertIn("NO REQUIREMENTS WERE PROVIDED", prompts[0])
-        self.assertIn("Review v1 · QA · run", sh(self.origin, "show", "feat/x:docs/spec.md"))
+        # The header also names who ran it ("by <login>") when a name is known.
+        document = sh(self.origin, "show", "feat/x:docs/spec.md")
+        self.assertIn("Review v1 · QA · ", document)
+        self.assertIn(" · run `", document)
         self.assertIn("Docs · QA ·", out.getvalue())
 
 

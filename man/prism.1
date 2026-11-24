@@ -315,7 +315,26 @@ A flag always beats a saved default.
 Include finished jobs.
 .TP
 .B jobs \-\-json
-Machine\-readable output.
+Machine\-readable output: one object per job, with the usual state plus
+.B reviewer
+(who ran it) and
+.B findings
+(an array, empty until a review has been delivered). Every finding has the keys
+.BR id ,
+.BR kind ,
+.BR category
+(the severity, lower case: critical, high, medium, low, nit for a pull request; blocker,
+major, minor, suggestion for a document),
+.BR type ,
+.BR description ,
+.BR late_find ,
+.B persona
+and
+.BR traceability
+(repo, pull_request, branch, target_branch, commit, path, line, line_end, section, role);
+a value that does not apply is null. See
+.I docs/MANUAL.md
+for an example.
 .TP
 .B logs \-f, \-\-follow
 Keep following until the job ends.
@@ -387,7 +406,9 @@ key:
     "commit": true,
     "push": true
   },
-  "google_chat_webhook_url": "https://chat.googleapis.com/..."
+  "google_chat_webhook_url": "https://chat.googleapis.com/...",
+  "google_chat_docs_webhook_url": "https://chat.googleapis.com/...",
+  "username": "Alex"
 }
 .fi
 .RE
@@ -443,9 +464,20 @@ Edit the file by hand or use:
 .B prism config path
 .RE
 .PP
-The extra key
+Three extra keys are shared with the desktop application.
 .B webhook
-sets the Google Chat webhook shared with the desktop application.
+sets the Google Chat webhook for pull\-request reviews,
+.B docs_webhook
+(also written
+.BR docs\-webhook )
+the one for document\-review alerts, and
+.B username
+the name that signs every review (the PR description, the chat cards, the review comments
+in a document). PRISM asks for the name once, at a terminal, the first time you run
+.B prism run
+or
+.BR "prism docs" ;
+a background job is never held up by it and uses the computer's login name until one is saved.
 .SH QUESTIONS
 In a terminal, PRISM asks you directly when it needs an answer (merge conflicts,
 the confirmation for a high\-impact merge). A detached or non\-interactive job

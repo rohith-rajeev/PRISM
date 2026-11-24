@@ -63,7 +63,7 @@ def preflight():
              f"    {sys.executable} -m pip install -r {Path('desktop') / 'requirements-build.txt'}")
     for rel in ("app.py", "orchestrator.py", "jobs.py", "updater.py",
                 "prism_cli.py", "cli_jobs.py", "folderpicker.py", "docreview.py", "bundle.py",
-                "pathutil.py", "winproc.py", "diagnostics.py", "extract.py",
+                "pathutil.py", "winproc.py", "diagnostics.py", "extract.py", "findings.py",
                 "version.py", Path("agents") / "pr-reviewer.md",
                 Path("agents") / "doc-reviewer.md",
                 Path("docs") / "MANUAL.md"):
@@ -186,6 +186,7 @@ def main():
         "--hidden-import", "bundle",
         "--hidden-import", "pathutil",
         "--hidden-import", "extract",
+        "--hidden-import", "findings",
         "--collect-submodules", "pypdf",
         "--hidden-import", "winproc",
         "--hidden-import", "diagnostics",

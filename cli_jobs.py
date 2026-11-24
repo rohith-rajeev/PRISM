@@ -51,7 +51,7 @@ KEEP_FINISHED = 40
 # in a record's "spec" is ignored, so an older or newer PRISM can read it.
 _SPEC_FIELDS = ("project_dir", "repo_name", "pr_id", "local_repo", "region", "model",
                 "do_review", "do_update_desc", "do_merge", "do_sync", "dry_run",
-                "webhook_url", "custom_instructions")
+                "webhook_url", "custom_instructions", "reviewer")
 
 
 def jobs_dir(create=False):
@@ -89,7 +89,10 @@ def spec_to_dict(spec):
                 "requirements_path": spec.requirements_path, "persona": spec.persona,
                 "model": spec.model,
                 "do_commit": spec.do_commit, "do_push": spec.do_push,
-                "dry_run": spec.dry_run, "custom_instructions": spec.custom_instructions}
+                "dry_run": spec.dry_run, "custom_instructions": spec.custom_instructions,
+                # Not the webhook: its URL is a secret, and a detached run reads the saved
+                # one itself (prism_cli.with_identity) rather than receiving it on a command line.
+                "reviewer": spec.reviewer}
     data = asdict(spec)
     return {k: data.get(k) for k in _SPEC_FIELDS}
 
@@ -119,7 +122,8 @@ def _docs_spec_from_dict(data):
         do_commit=data.get("do_commit") is not False,
         do_push=data.get("do_push") is not False,
         dry_run=data.get("dry_run") is True,
-        custom_instructions=str(data.get("custom_instructions") or ""), origin="cli")
+        custom_instructions=str(data.get("custom_instructions") or ""), origin="cli",
+        reviewer=config.clean_username(data.get("reviewer")))
 
 
 def spec_from_dict(data):
@@ -132,6 +136,7 @@ def spec_from_dict(data):
     if data.get("kind") == "docs":
         return _docs_spec_from_dict(data)
     kwargs = {k: data[k] for k in _SPEC_FIELDS if k in data}
+    kwargs["reviewer"] = config.clean_username(kwargs.get("reviewer"))
     for required in ("project_dir", "repo_name", "pr_id"):
         if not str(kwargs.get(required) or "").strip():
             raise ValueError(f"saved job has no {required}")
@@ -172,6 +177,10 @@ def create(spec, job_id=None, cwd=None):
         "branches": getattr(spec, "branches_text", "") or "", "author": "",
         "tokens": None, "merged": None,
         "stopped": "", "error": "", "session_id": "",
+        # Who ran it, and what the review found as data (see findings.py). "findings" is
+        # always present - an empty list until the run delivers a review - so a script
+        # reading `prism jobs --json` never has to test for the key.
+        "reviewer": getattr(spec, "reviewer", "") or "", "findings": [],
     }
     for ext in ("stop", "log"):          # a reused id must not inherit either
         try:

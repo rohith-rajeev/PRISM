@@ -28,6 +28,7 @@ from pathlib import Path
 
 import bundle
 import config
+import findings as findings_mod
 import notifier
 import winproc
 from pathutil import native_path
@@ -469,6 +470,12 @@ class ReviewResult:
     # Something the report said that reads like "not reviewed", from a report that
     # nonetheless delivered a review. A note for the person, not a failure.
     caveat: str = ""
+    # What the review was of, filled in by the pipeline once it has looked the pull
+    # request up - the traceability of each structured finding (see findings.py).
+    repo: str = ""
+    source_ref: str = ""
+    dest_ref: str = ""
+    source_commit: str = ""
 
     def merge_allowed(self) -> bool:
         v = self.verdict_key
@@ -2780,7 +2787,7 @@ def _emit_pr_meta(pr_id, region, emit):
 
 
 def update_description_direct(pr_id, verdict_text, impact, findings, region=REGION_DEFAULT,
-                              verdict_key=None, source_commit=None, late=0):
+                              verdict_key=None, source_commit=None, late=0, reviewer=""):
     """Step 2: write the review's findings onto the PR description via AWS CLI.
 
     No agent call — the findings are already one-line bullets straight from
@@ -2790,6 +2797,9 @@ def update_description_direct(pr_id, verdict_text, impact, findings, region=REGI
     should see everything the reviewer found, not PRISM's guess at which
     ones mattered. The only thing allowed to cut this down is CodeCommit's
     own hard length limit below, and only when the content actually needs it.
+
+    `reviewer` is the name of the person who ran the review; it is written under
+    the verdict so the findings have someone accountable for them.
     """
     pr = get_pr(pr_id, region=region)
     desc = DESC_BLOCK_RE.sub("", pr["description"] or "").strip()  # drop stale block
@@ -2799,7 +2809,8 @@ def update_description_direct(pr_id, verdict_text, impact, findings, region=REGI
     header = (
         "\n\n<!-- prism:start -->\n" + stamp + "---\n"
         f"**PRISM review — {verdict_text} (impact {impact}/10)**\n"
-    ) + ((f"⚠ {late} late finding(s) — defects in code an earlier review had already "
+    ) + (f"Reviewed by: {config.clean_username(reviewer)}\n" if config.clean_username(reviewer)
+         else "") + ((f"⚠ {late} late finding(s) — defects in code an earlier review had already "
           f"covered. A fix made now has not been through whatever testing followed that "
           f"review; test it again before relying on it.\n") if late else "")
     footer = "\n<!-- prism:end -->"
@@ -3277,7 +3288,8 @@ def _run_pipeline(project_dir, repo_name, pr_id, local_repo=None,
                   region=REGION_DEFAULT, do_review=True,
                   do_update_desc=True, do_merge=True, do_sync=True,
                   dry_run=False, model=None, progress=None, emit=_emit_plain,
-                  control=None, ask=None, custom_instructions="", get_note=None):
+                  control=None, ask=None, custom_instructions="", get_note=None,
+                  reviewer=""):
     """Run the whole review → describe → merge pipeline. Returns dict summary.
 
     Project-agnostic: works with any CodeCommit repo + local clone.
@@ -3471,6 +3483,9 @@ def _run_pipeline(project_dir, repo_name, pr_id, local_repo=None,
             dest_ref_at_review = pr_at_review.get("destinationReference", "") or ""
         except Exception:  # noqa: BLE001
             source_commit_at_review = ""
+        # What this review was of, for the traceability of its structured findings.
+        review.repo, review.source_ref = repo_name, source_ref_at_review
+        review.dest_ref, review.source_commit = dest_ref_at_review, source_commit_at_review
         # PRISM's own record of what it actually reviewed — the only thing
         # _incremental_context trusts when deciding whether a later run can
         # go incremental (see _REVIEWED_STORE_PATH). Recorded here, not only
@@ -3508,7 +3523,8 @@ def _run_pipeline(project_dir, repo_name, pr_id, local_repo=None,
                     pr_id, review.verdict_raw or review.verdict_key,
                     review.impact_score or "?", review.findings, region=region,
                     verdict_key=review.verdict_key,
-                    source_commit=source_commit_at_review, late=late_count)
+                    source_commit=source_commit_at_review, late=late_count,
+                    reviewer=reviewer)
                 emit(f"◆ Description updated directly from the review ({len(merged)} chars).")
                 pg(STAGE_DESCRIBE, "done")
             except Exception as e:  # noqa: BLE001
@@ -3763,12 +3779,33 @@ _NOTIFIABLE_VERDICTS = {"approve", "approve-with-comments", "request-changes",
                         "block", "skipped"}
 
 
+def structured_findings(review, repo_name="", pr_id=""):
+    """The review's findings as records of a fixed shape (see findings.py).
+
+    Never raises: a finding that cannot be read costs that record, not the run.
+    """
+    try:
+        return findings_mod.parse_pr_findings(
+            getattr(review, "findings", None) or [],
+            repo=getattr(review, "repo", "") or repo_name, pull_request=str(pr_id),
+            branch=getattr(review, "source_ref", ""),
+            target_branch=getattr(review, "dest_ref", ""),
+            commit=getattr(review, "source_commit", ""))
+    except Exception:  # noqa: BLE001
+        return []
+
+
+# Summary keys that are data for the program reading them (the job record, the
+# chat card), not text for the transcript: left out of the "finished: {...}" line.
+INTERNAL_SUMMARY_KEYS = ("review", "tokens", "findings", "results")
+
+
 def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
                   region=REGION_DEFAULT, do_review=True,
                   do_update_desc=True, do_merge=True, do_sync=True,
                   dry_run=False, model=None, webhook_url=None, progress=None,
                   emit=_emit_plain, control=None, ask=None,
-                  custom_instructions="", get_note=None):
+                  custom_instructions="", get_note=None, reviewer=""):
     """Run the pipeline (see _run_pipeline), then post a brief outcome
     summary to Google Chat if a webhook is configured.
 
@@ -3795,8 +3832,10 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
         do_review=do_review, do_update_desc=do_update_desc, do_merge=do_merge,
         do_sync=do_sync, dry_run=dry_run, model=model, progress=progress,
         emit=emit, control=control, ask=ask,
-        custom_instructions=custom_instructions, get_note=get_note)
+        custom_instructions=custom_instructions, get_note=get_note, reviewer=reviewer)
     review = result.get("review")
+    # What the review found, as data: read by `prism jobs --json`.
+    result["findings"] = structured_findings(review, repo_name, pr_id)
     if webhook_url and getattr(review, "verdict_key", None) in _NOTIFIABLE_VERDICTS:
         pr_info = get_pr_info(pr_id, region=region)
         notifier.post_summary(
@@ -3809,5 +3848,6 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
             reason=_stopped_reason(result.get("stopped")),
             author=pr_info.get("authorArn"),
             source=pr_info.get("sourceReference"),
-            dest=pr_info.get("destinationReference"))
+            dest=pr_info.get("destinationReference"),
+            reviewer=config.clean_username(reviewer) or None)
     return result

@@ -400,7 +400,7 @@ carries on without an answer.
 | Command | Does |
 |---|---|
 | `prism docs FILE…` | review spec / requirement documents (above) |
-| `prism jobs [-a] [--json]` | list running jobs (`-a`: finished too) |
+| `prism jobs [-a] [--json]` | list running jobs (`-a`: finished too); `--json` includes each job's `reviewer` and its structured `findings` (below) |
 | `prism logs ID [-f] [-n N]` | show a job's transcript; `-f` follows until it ends |
 | `prism stop ID` / `stop --all` | stop a running job |
 | `prism retry ID [-d] [-q]` | run a finished job again with the same settings (a document review again is incremental) |
@@ -441,7 +441,9 @@ under a `cli` key. Edit it by hand, or use `prism config`:
     "commit": true,
     "push": true
   },
-  "google_chat_webhook_url": "https://chat.googleapis.com/…"
+  "google_chat_webhook_url": "https://chat.googleapis.com/…",
+  "google_chat_docs_webhook_url": "https://chat.googleapis.com/…",
+  "username": "Alex"
 }
 ```
 
@@ -465,7 +467,9 @@ prism config                              # show
 prism config set region eu-west-1
 prism config set merge no                 # review only unless --merge is given
 prism config set push no                  # docs: commit, but do not push
-prism config set webhook https://chat.googleapis.com/…   # Google Chat webhook
+prism config set webhook https://chat.googleapis.com/…   # Google Chat webhook (pull requests)
+prism config set docs-webhook https://chat.googleapis.com/…   # ... for document reviews
+prism config set username "Alex"          # who reviews are signed as
 prism config unset model
 prism config path                         # where the file is
 ```
@@ -547,6 +551,52 @@ outcomes. Posting is entirely PRISM's own HTTP call, no agent involved, and
 it never affects the job it's reporting on: a slow, misconfigured, or
 unreachable webhook is swallowed and logged as a warning, not a failure.
 Leave the field empty to turn it off — nothing else about PRISM changes.
+
+## Document-review alerts
+The same, for document reviews, with a **separate webhook** in the same **Help** card
+(`google_chat_docs_webhook_url`; `prism config set docs-webhook …`). When a document
+review finishes PRISM posts one card: the reviewer **persona** (Business Analyst,
+Architect or QA), who ran it, the verdict, impact and comment counts by severity, the
+**branch(es)** reviewed, the **path of each document** from the repository root with its
+own verdict, and whether the comments were committed and pushed. A run that fails outright
+posts nothing; a failed post never affects the review.
+
+## Your name
+The first time PRISM starts it asks for your name or username, once. It names the window
+(`PRISM — Alex`) and signs what you run: the PR description (*Reviewed by: …*), the Google
+Chat cards, and the heading of each review in a document (*Review v2 · Architect · by Alex*),
+so every review is accountable to someone. It is stored as `username` in
+`~/.prism/config.json`, which an upgrade never touches; change it under **Help** or with
+`prism config set username`. Closing the box unanswered asks again next start, and reviews
+carry the computer's login name meanwhile.
+
+## Findings as data
+`prism jobs --json` returns, per job, the usual state plus `reviewer` and `findings`: one
+object per finding, with the same keys for a pull request and a document (a value that does
+not apply is `null`). `findings` is `[]` until a review has been delivered.
+
+```json
+{
+  "id": "F1",
+  "kind": "pr",
+  "category": "high",
+  "type": "Security",
+  "description": "token written to the log in clear",
+  "late_find": false,
+  "persona": null,
+  "traceability": {
+    "repo": "my-service", "pull_request": "214",
+    "branch": "feature/x", "target_branch": "main", "commit": "9f2c…",
+    "path": "src/auth.py", "line": 42, "line_end": null,
+    "section": null, "role": null
+  }
+}
+```
+
+`category` is the severity, lower case: `critical`, `high`, `medium`, `low`, `nit` for a pull
+request; `blocker`, `major`, `minor`, `suggestion` for a document (`id` is then `DR-n`,
+`persona` is `ba`, `architect` or `qa`, `path` is the document and `section` the heading in
+it, `role` is `BE`, `FE` or `repo`). `type` is the reviewer's own label (`Security`, `Gap`, …).
 
 ## Updating
 `?  Help` → `Check for updates` asks GitHub for the latest release. If it is

@@ -18,8 +18,8 @@ from pathlib import Path
 
 import docreview
 from pathutil import native_path
-from orchestrator import (REGION_DEFAULT, Cancelled, RunControl, followup_declined,
-                          full_pipeline, run_followup)
+from orchestrator import (INTERNAL_SUMMARY_KEYS, REGION_DEFAULT, Cancelled, RunControl,
+                          followup_declined, full_pipeline, run_followup)
 
 # Each job is a full agent run — model calls, AWS, git. Running an unbounded
 # number at once invites provider rate limits and spawns unbounded child
@@ -65,6 +65,10 @@ class JobSpec:
     # behaves identically whoever asked for it.
     origin: str = "manual"
     origin_ref: str = ""
+    # The person who started the review (config.get_username at creation). It is
+    # written onto the PR description and the chat card so the review can be
+    # traced to someone; "" leaves both exactly as they were before it existed.
+    reviewer: str = ""
 
     def __post_init__(self):
         # Paths typed with either kind of slash are made valid for this OS.
@@ -109,7 +113,8 @@ class JobSpec:
                     do_review=self.do_review, do_update_desc=self.do_update_desc,
                     do_merge=self.do_merge, do_sync=self.do_sync, dry_run=self.dry_run,
                     webhook_url=self.webhook_url,
-                    custom_instructions=self.custom_instructions)
+                    custom_instructions=self.custom_instructions,
+                    reviewer=self.reviewer)
 
 
 class AskBridge:
@@ -414,9 +419,10 @@ class JobManager:
                 control=job.control, ask=job.ask.ask, get_note=job.pop_note,
                 **job.spec.pipeline_kwargs())
             # "tokens" is a small dict for the UI to render directly; every
-            # other field is a short display string, same as before.
+            # other field is a short display string, same as before. The
+            # structured findings are data for `prism jobs --json`, not text.
             payload = {k: v if isinstance(v, bool) else str(v)[:160]
-                      for k, v in summary.items() if k not in ("review", "tokens")}
+                      for k, v in summary.items() if k not in INTERNAL_SUMMARY_KEYS}
             payload["tokens"] = summary.get("tokens")
             job.emit_event("done", payload)
             self._notify(job, summary=summary)

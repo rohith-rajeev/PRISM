@@ -31,7 +31,10 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+import config
 import extract as X
+import findings as findings_mod
+import notifier
 import orchestrator as O
 from pathutil import native_any, native_path, native_rel, posix_rel
 from orchestrator import Cancelled, _emit_plain
@@ -246,6 +249,11 @@ class DocJobSpec:
     custom_instructions: str = ""
     origin: str = "manual"
     origin_ref: str = ""
+    # Where to post the alert for a finished review ("" = nowhere) and the name of
+    # the person who ran it; both are read from the saved settings when the job is
+    # created, like a pull-request job's webhook.
+    webhook_url: str = None
+    reviewer: str = ""
     kind = "docs"
 
     def __post_init__(self):
@@ -297,7 +305,8 @@ class DocJobSpec:
                     requirements_path=self.requirements_path, persona=self.persona,
                     model=self.model,
                     do_commit=self.do_commit, do_push=self.do_push,
-                    dry_run=self.dry_run, custom_instructions=self.custom_instructions)
+                    dry_run=self.dry_run, custom_instructions=self.custom_instructions,
+                    webhook_url=self.webhook_url, reviewer=self.reviewer)
 
 
 def relevant_stages(spec):
@@ -392,6 +401,10 @@ def _render_run(run, newest):
     m = run.meta
     verdict = m.get("verdict") or "no verdict"
     who = f" · {m['persona_label']}" if m.get("persona_label") else ""
+    # Written into the document so the review can be traced to the person who ran it.
+    by = config.clean_username(m.get("reviewer"))
+    if by:
+        who += f" · by {by}"
     title = (f"Review v{m.get('v', '?')}{who} · run `{m.get('id', '?')}` · {m.get('date', '')}"
              + (f" · commit `{m['commit'][:8]}`" if m.get("commit") else ""))
     head = f"{_RUN_OPEN}{_meta_json(m)} -->"
@@ -1274,10 +1287,17 @@ def check_spec(spec):
 def _pipeline(project_dir, targets, requirements_path="", model=None,
               do_commit=True, do_push=True, dry_run=False, custom_instructions="",
               progress=None, emit=_emit_plain, control=None, ask=None, get_note=None,
-              persona=DEFAULT_PERSONA):
-    """Review -> write -> commit -> push, for every document of every target."""
+              persona=DEFAULT_PERSONA, reviewer="", webhook_url=None):
+    """Review -> write -> commit -> push, for every document of every target.
+
+    Then, when `webhook_url` is given, one alert to the document-review Google Chat
+    webhook. The alert is a courtesy: whether it arrives never changes what the review
+    did or returned, and a run that fails outright posts nothing (there is no outcome
+    to report) - the same rule as for a pull request.
+    """
     targets = tuple(targets)
     persona = normalise_persona(persona)
+    reviewer = config.clean_username(reviewer)
     spec = DocJobSpec(project_dir=project_dir, targets=targets)
 
     def pg(stage, state):
@@ -1300,6 +1320,7 @@ def _pipeline(project_dir, targets, requirements_path="", model=None,
 
     run_id = new_run_id()
     emit(f"▸ Documentation review  |  run {run_id}  |  {persona_label(persona)}  |  "
+         + (f"reviewer {reviewer}  |  " if reviewer else "")
          + "  |  ".join(f"{t.label} {t.branch}: {', '.join(t.files)}" for t in targets)
          + (f"  |  model {model}" if model else "  |  model (default)"))
     if dry_run:
@@ -1309,6 +1330,7 @@ def _pipeline(project_dir, targets, requirements_path="", model=None,
     meter = O.TokenMeter()
     stack, trees = [], []
     results, failed = [], []
+    all_findings = []
     committed, pushed = [], []
     session_id = ""
     scratch_dir = None
@@ -1492,6 +1514,8 @@ def _pipeline(project_dir, targets, requirements_path="", model=None,
                     "counts": counts_text(counts)}
             if earlier:
                 meta["earlier"] = earlier
+            if reviewer:
+                meta["reviewer"] = reviewer
             new_text = with_review(old_text, Run(meta, body))
             if not outside_unchanged(old_text, new_text):
                 raise RuntimeError(f"Refusing to write {rel}: the review would have changed "
@@ -1499,6 +1523,11 @@ def _pipeline(project_dir, targets, requirements_path="", model=None,
             results.append({"role": t.label, "file": rel, "verdict_key": key,
                             "impact": res.impact_score, "impact_reason": res.impact_reason,
                             "counts": counts, "version": version})
+            # The comments as data: the same ones the counts above were taken from, each
+            # with where it is (repository, branch, document, heading) - see findings.py.
+            all_findings.extend(findings_mod.parse_doc_findings(
+                _without_previous_block(body), path=posix_rel(rel), repo=t.repo_name,
+                branch=t.branch, commit=wt.base_commit or "", role=t.role, persona=persona))
             emit(f"▸ {rel}: {verdict_label(key)}  ·  {counts_text(counts)}  ·  review v{version}")
             if dry_run:
                 emit(f"▸ Dry run - would add review v{version} to {rel}.")
@@ -1580,11 +1609,51 @@ def _pipeline(project_dir, targets, requirements_path="", model=None,
     emit(f"▸ {len(results)} document(s) reviewed, {comments} comment(s), {blockers} blocker(s)"
          f" - run {run_id}." + (f" Find it later with: git log --grep 'PRISM-{run_id}'"
                                if committed else ""))
+    all_pushed = bool(committed) and len(pushed) == len(committed)
+    if webhook_url:
+        notifier.post_doc_summary(
+            webhook_url, emit=emit,
+            **_notice(persona, reviewer, run_id, trees, results, worst, impact, len(failed),
+                      dry_run, do_commit, bool(committed), all_pushed))
     return {"run_id": run_id, "documents": len(results), "not_reviewed": len(failed),
             "comments": comments, "blockers": blockers, "committed": bool(committed),
-            "pushed": bool(committed) and len(pushed) == len(committed),
+            "pushed": all_pushed,
             "stopped": None, "review": None, "tokens": meter.total(),
-            "session_id": session_id}
+            "session_id": session_id,
+            # Data for whoever reads the run, not text for the transcript (see
+            # orchestrator.INTERNAL_SUMMARY_KEYS).
+            "findings": all_findings, "results": results}
+
+
+def _notice(persona, reviewer, run_id, trees, results, worst, impact, not_reviewed,
+            dry_run, do_commit, committed, pushed):
+    """What the document-review alert says, as plain data for notifier.build_doc_card."""
+    if dry_run:
+        outcome = "Dry run - nothing written, committed or pushed"
+    elif pushed:
+        outcome = "Comments committed and pushed"
+    elif committed:
+        outcome = "Comments committed, not pushed"
+    elif not do_commit:
+        outcome = "Not committed - the comments were not kept"
+    else:
+        outcome = "Not pushed"
+    total = {sev: sum(r["counts"][sev] for r in results) for sev in SEVERITIES}
+    targets = []
+    for wt in trees:
+        t = wt.target
+        docs = [{"file": posix_rel(r["file"]), "verdict_key": r["verdict_key"],
+                 "verdict_label": verdict_label(r["verdict_key"]),
+                 "counts_text": counts_text(r["counts"])}
+                for r in results if r["role"] == t.label]
+        if docs:
+            targets.append({"label": t.label, "repo": t.repo_name, "branch": t.branch,
+                            "documents": docs})
+    return {"persona": persona_label(persona), "verdict_key": worst,
+            "verdict_label": verdict_label(worst), "impact": impact,
+            "comments": counts_text(total), "targets": targets, "reviewer": reviewer,
+            "run_id": run_id, "outcome": outcome, "not_reviewed": not_reviewed,
+            "project": " + ".join(dict.fromkeys(x["repo"] for x in targets if x["repo"]))}
 
 
 def _push(wt, run_id, emit):

@@ -127,6 +127,10 @@ say where else in the PR the same mistake repeats, so one fix covers them all:
 The reviewer's closing summary has a **Coverage** line saying what it checked and
 anything it could not verify.
 
+**Who ran it.** The PR description names the person who ran the review
+(*Reviewed by: …*), using the name you gave PRISM the first time it started
+(see **Your name**, under Settings).
+
 ---
 
 ## When the reviewer asks you something
@@ -243,6 +247,11 @@ the reviewer first reports whether every earlier comment is resolved, partly
 resolved, still open or withdrawn. You can also ask the reviewer questions from
 the job page once it has finished.
 
+**Who ran it.** Each review's heading in the document says who ran it
+(*Review v2 · Architect · by Alex · run …*), so the comments can be traced to a
+person. **Document-review alerts** (see Settings) post a card to Google Chat when
+a review finishes.
+
 **Your work is safe.** PRISM works in a temporary copy of the branch. It never
 changes the branch checked out in your clone, your files or your uncommitted
 work. The one thing it leaves in the project folder is `.opencode/agents/` — the
@@ -337,6 +346,17 @@ The **Model** picker is optional — leave it alone to use the default.
 empty by default. Anything you write there is handed to the reviewer
 alongside its usual workflow, for that job only.
 
+**Your name.** The first time PRISM starts it asks for your name or username,
+once. It names the PRISM window (*PRISM — Alex*) and signs every review you run:
+the PR description, the Google Chat cards and the document review comments all say
+who ran it, so there is a person accountable for what was reviewed. It is a
+machine-wide setting kept in `~/.prism/config.json`, so it survives upgrades; change it
+any time under **Help**. If you close the box without answering, PRISM asks again
+next time, and reviews run meanwhile carry this computer's login name. On the
+command line, `prism config set username "Alex"` does the same, and PRISM asks at a
+terminal the first time you run `prism run` / `prism docs` without a saved name
+(background jobs are never held up by it).
+
 **Google Chat notifications**, on the Help screen, are also optional and off
 by default. Paste in a webhook URL and click Save once — it applies to
 every job from then on, not just the one you're about to run. A card is
@@ -345,8 +365,17 @@ Approve, Approve with comments, Request changes, or Block — with the PR
 author, verdict, impact, and whether it merged. A skipped review, a run
 whose verdict PRISM couldn't parse, or an internal error never posts —
 those aren't review outcomes, and the group chat doesn't need to see them
-next to real ones. Leave the webhook field empty to turn notifications off
-entirely.
+next to real ones. The card also says who ran the review. Leave the webhook field
+empty to turn notifications off entirely.
+
+**Document-review alerts** work the same way and sit in the same Help card, with
+their **own webhook** (so document reviews can go to a different space from pull
+requests). When a document review finishes, PRISM posts a card with the reviewer
+persona (Business Analyst, Architect or QA), who ran it, the verdict, impact and
+number of comments by severity, the branch (or the backend and frontend branches)
+that were reviewed, the path of every document reviewed from the repository root with
+its own verdict, and whether the comments were committed and pushed. A review that
+failed outright posts nothing. Leave the field empty to turn the alerts off.
 
 **Code-generation integration**, also on the Help screen, is optional and off by default.
 Tick **Accept reviews from a code-generation tool** and PRISM listens (on this machine
@@ -430,6 +459,35 @@ list of flags is in `man prism`.
     prism config                show them
 
 A flag on the command always wins over a saved default.
+`prism config set username "Alex"` sets the name reviews are signed with, and
+`prism config set docs-webhook <url>` the document-review alert webhook (`webhook` is
+the pull-request one).
+
+**Reading results from a script.** `prism jobs --all --json` prints one object per
+job. Besides its state it has a `reviewer` (who ran it) and a `findings` array - the
+review's findings as data, `[]` until a review has been delivered. Every finding has
+the same keys:
+
+    {
+      "id": "F1",                      "DR-3" for a document
+      "kind": "pr",                    "pr" or "document"
+      "category": "high",              critical | high | medium | low | nit  (pull request)
+                                       blocker | major | minor | suggestion (document)
+      "type": "Security",              the reviewer's own label, "" if none
+      "description": "…",
+      "late_find": false,              true for a PR finding missed by an earlier review
+      "persona": null,                 ba | architect | qa for a document
+      "traceability": {
+        "repo": "my-service",          "pull_request": "214",
+        "branch": "feature/x",         "target_branch": "main",
+        "commit": "9f2c…",             "path": "src/auth.py",   relative to the repo root
+        "line": 42,                    "line_end": null,
+        "section": null,               heading inside a document
+        "role": null                   "BE" | "FE" | "repo" for a document
+      }
+    }
+
+A value that does not apply is `null`, so no key is ever missing.
 
 **Questions.** In a terminal, PRISM asks you where the desktop app would show
 its question box. A detached job has nobody to ask, so it takes the cautious
@@ -522,8 +580,8 @@ PRISM is deliberately cautious:
 
 - **No job history survives a restart** — closing PRISM discards every job's
   conversation and verdict, same as always. Two small things do persist
-  between sessions, both under `~/.prism/`: your settings (the Google Chat
-  webhook and the code-generation integration), and a local record of which
+  between sessions, both under `~/.prism/`: your settings (your name, the two Google Chat
+  webhooks and the code-generation integration), and a local record of which
   commit PRISM last reviewed on each PR (what makes retrying a job — see
   **Retrying a job**, above — faster instead of starting over). A third, short-lived
   thing lives in your system's temporary folder, not under `~/.prism/`: PRISM's

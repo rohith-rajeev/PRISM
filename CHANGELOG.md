@@ -4,6 +4,26 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v6.5
+
+- **PRISM now knows who is reviewing.** The first time it starts it asks for your name or
+  username, once. The window is named after you (*PRISM — Alex*), and every review you run is
+  signed with it: the PR description (*Reviewed by: …*), the Google Chat cards, and the heading
+  of each review written into a document (*Review v2 · Architect · by Alex*). Change it under
+  Help or with `prism config set username`. It lives in your settings, so upgrading never asks
+  again.
+- **Document reviews can alert Google Chat.** Next to the pull-request webhook, Help has a
+  second one for document reviews. When a review finishes the card says which persona
+  reviewed (Business Analyst, Architect or QA), who ran it, the verdict and comment counts,
+  the branch(es) reviewed, and the path of every document with its own verdict. On the command
+  line: `prism config set docs-webhook <url>`.
+- **`prism jobs --json` now includes the findings.** Each job has a `findings` array, and a
+  `reviewer`. Every finding has the same keys, for pull requests and documents alike: `id`,
+  `kind`, `category` (the severity: critical, high, medium, low, nit - or blocker, major, minor,
+  suggestion for a document), `type`, `description`, `late_find`, `persona` and a `traceability`
+  object (repo, pull request, branch, commit, file path, line, document section). Nothing that
+  was in the output before has changed.
+
 ## v6.4.2
 
 - **Fixes reviews that returned nothing on older review-engine builds (e.g. 1.15).** Those
