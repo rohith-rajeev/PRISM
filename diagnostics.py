@@ -273,6 +273,14 @@ def _check_files():
     except Exception:  # noqa: BLE001
         hooked = False
     checks.append(Check("Google Chat webhook", INFO, "configured" if hooked else "not set"))
+    try:
+        docs_hooked = bool(config.get_docs_webhook_url())
+        name = config.get_username()
+    except Exception:  # noqa: BLE001
+        docs_hooked, name = False, ""
+    checks.append(Check("Google Chat document-review webhook", INFO,
+                        "configured" if docs_hooked else "not set"))
+    checks.append(Check("reviewer name", INFO, name or "not set (the machine login is used)"))
     return checks
 
 

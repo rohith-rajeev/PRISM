@@ -572,6 +572,7 @@ class CodegenBridge:
             do_review=True, do_update_desc=True, do_merge=req.auto_merge,
             do_sync=True, dry_run=False,
             webhook_url=config.get_webhook_url() or None,
+            reviewer=config.effective_username(),
             custom_instructions=instructions_for(req),
             origin="codegen", origin_ref=req.request_id)
         try:

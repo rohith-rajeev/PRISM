@@ -1,12 +1,14 @@
-"""Small persistent app-level settings — currently just the Google Chat
-webhook URL. One JSON file, stdlib only.
+"""Small persistent app-level settings — the person's name and the Google Chat
+webhook URLs. One JSON file, stdlib only.
 
 Deliberately separate from a Job: a Job snapshots its settings once, at
 creation, and never changes again once running, but this is the opposite —
 a machine-wide setting the user configures once and expects every future
 job to just pick up, including ones from a session that hasn't started yet.
 """
+import getpass
 import json
+import re
 from pathlib import Path
 
 CONFIG_DIR = Path.home() / ".prism"
@@ -33,6 +35,68 @@ def set_webhook_url(url):
     cfg = load()
     cfg["google_chat_webhook_url"] = (url or "").strip()
     save(cfg)
+
+
+# The webhook for document-review alerts is separate from the one above: a team
+# usually wants pull-request outcomes and document reviews in different spaces.
+# Empty means "no alerts" - nothing else changes.
+def get_docs_webhook_url():
+    return (load().get("google_chat_docs_webhook_url") or "").strip()
+
+
+def set_docs_webhook_url(url):
+    cfg = load()
+    cfg["google_chat_docs_webhook_url"] = (url or "").strip()
+    save(cfg)
+
+
+# ---- who is reviewing ----------------------------------------------------------
+# One machine-wide name, asked for the first time PRISM starts and kept in this
+# file from then on - an upgrade never touches ~/.prism, so it survives every
+# release. It labels the window and is written onto what a review produces (the
+# PR description, the Chat cards, the comments in a reviewed document), so a
+# review can always be traced to the person who ran it.
+MAX_USERNAME = 60
+# Anything that could break out of the places the name is written: markup (it ends
+# up inside an HTML comment in a document and Markdown in a PR description) and
+# control characters (a newline would start a new line of the description).
+_USERNAME_STRIP = re.compile(r"[<>`\x00-\x1f\x7f]")
+
+
+def clean_username(text):
+    """The name as it will be stored and shown: one line, no markup, bounded."""
+    text = _USERNAME_STRIP.sub(" ", text if isinstance(text, str) else "")
+    return " ".join(text.split())[:MAX_USERNAME].strip()
+
+
+def get_username():
+    """The saved name, or "" when the person has not given one yet."""
+    value = load().get("username")
+    return clean_username(value) if isinstance(value, str) else ""
+
+
+def set_username(name):
+    cfg = load()
+    cfg["username"] = clean_username(name)
+    save(cfg)
+
+
+def system_username():
+    """The operating-system login, as a suggestion. "" when it cannot be read."""
+    try:
+        return clean_username(getpass.getuser())
+    except Exception:  # noqa: BLE001 - no login name is a normal state in a container
+        return ""
+
+
+def effective_username():
+    """The name to put on a review: the saved one, else the machine login.
+
+    A run that starts before anyone has answered the first-start question (a
+    command-line job over ssh, say) is still attributed to somebody rather than
+    to no one. The desktop app asks on first start, so there it is always saved.
+    """
+    return get_username() or system_username()
 
 
 # ---- codegen integration -------------------------------------------------------

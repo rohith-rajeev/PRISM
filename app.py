@@ -879,6 +879,78 @@ class Dialog(tk.Toplevel):
         self.destroy()
 
 
+class NamePrompt(tk.Toplevel):
+    """The one-time "what is your name" box, in PRISM's own palette.
+
+    `result` is the cleaned name, or "" when the box was closed without one.
+    """
+
+    def __init__(self, parent, suggestion=""):
+        super().__init__(parent)
+        self.withdraw()
+        self.title("Welcome to PRISM")
+        self.configure(bg=PAL["page"])
+        self.resizable(False, False)
+        self.transient(parent)
+        self.result = ""
+
+        card = RoundedCard(self, outline_key="accent")
+        card.pack(fill="both", expand=True, padx=10, pady=10)
+        inner = card.inner
+        inner.config(padx=16, pady=12)
+        tk.Label(inner, text="What is your name?", font=(_FAMILY, _pt(12), "bold"),
+                 bg=PAL["card"], fg=PAL["text"], anchor="w").pack(fill="x", pady=(0, 8))
+        tk.Label(inner, text="PRISM names this window after you and signs every review you "
+                             "run with it - on the PR description, the Google Chat cards and "
+                             "the document review comments - so a review can be traced to "
+                             "who ran it.\n\nEnter your name or username. You are asked "
+                             "once; change it any time under Help.",
+                 font=FONT_S, bg=PAL["card"], fg=PAL["text"], justify="left", anchor="w",
+                 wraplength=430).pack(fill="x")
+        self.var = tk.StringVar(value=suggestion)
+        self.entry = tk.Entry(inner, textvariable=self.var, font=FONT, bg=PAL["field"],
+                              fg=PAL["text"], insertbackground=PAL["text"], relief="flat",
+                              highlightthickness=1, highlightbackground=PAL["border"],
+                              highlightcolor=PAL["accent"])
+        self.entry.pack(fill="x", pady=(12, 0), ipady=4)
+        self.note = tk.Label(inner, text="", font=FONT_XS, bg=PAL["card"], fg=PAL["warn"],
+                             anchor="w")
+        self.note.pack(fill="x", pady=(4, 0))
+        row = tk.Frame(inner, bg=PAL["card"])
+        row.pack(fill="x", pady=(10, 0))
+        RoundedButton(row, text="Later", height=32, width=100, font=FONT_B,
+                      command=self._later).pack(side="right")
+        RoundedButton(row, text="Continue", height=32, width=130, font=FONT_B,
+                      style="primary", command=self._ok).pack(side="right", padx=(0, 8))
+        self.bind("<Return>", lambda _e: self._ok())
+        self.bind("<Escape>", lambda _e: self._later())
+        self.protocol("WM_DELETE_WINDOW", self._later)
+        self.update_idletasks()
+        try:
+            x = parent.winfo_rootx() + (parent.winfo_width() - self.winfo_reqwidth()) // 2
+            y = parent.winfo_rooty() + (parent.winfo_height() - self.winfo_reqheight()) // 3
+        except Exception:  # noqa: BLE001
+            x = y = 200
+        self.geometry(f"+{max(0, x)}+{max(0, y)}")
+        self.deiconify()
+        self.entry.focus_set()
+        self.entry.select_range(0, "end")
+        self.grab_set()
+        self.wait_window(self)
+
+    def _ok(self):
+        name = CFG.clean_username(self.var.get())
+        if not name:
+            self.note.config(text="Please enter a name.")
+            return
+        self.result = name
+        self.destroy()
+
+    def _later(self):
+        self.result = ""
+        self.destroy()
+
+
 def ask_confirm(parent, title, message, confirm="Continue", cancel="Cancel",
                 tone="warn"):
     """Themed yes/no. Returns True only on the explicit confirm button."""
@@ -2536,6 +2608,10 @@ class DocReviewForm(tk.Frame):
             model=self.model_picker.get() or None,
             do_commit=self.commit_var.get(), do_push=self.push_var.get(),
             dry_run=self.dry_var.get(),
+            # Read now, like the pull-request webhook: saving either in Help takes
+            # effect on the next job without a restart.
+            webhook_url=CFG.get_docs_webhook_url() or None,
+            reviewer=CFG.effective_username(),
             custom_instructions=self.instr_text.get("1.0", "end").strip())
 
     def populate(self, spec):
@@ -2607,6 +2683,7 @@ class App(tk.Tk):
         self._verdict_key = ""
         self._drain_job = None
         self._build()
+        self._apply_window_title()
         self._apply_codegen_settings()
         self._drain_job = self.after(80, self._drain_logs)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -2620,6 +2697,10 @@ class App(tk.Tk):
         # silent mode). "Check for updates" in Help still works the same way
         # on demand.
         self.after(1500, lambda: UpdateDialog(self, self, silent=True))
+        # The first time this version starts there is no name yet: ask for it once
+        # the window has painted. Never asked again once answered, and it survives
+        # upgrades (see config.set_username).
+        self.after(250, self._ask_username_first_time)
         # Coming back to the window (or un-minimising it) is when macOS leaves
         # job rows half-painted; settle the list whenever that happens.
         for seq in ("<FocusIn>", "<Map>"):
@@ -2951,27 +3032,46 @@ class App(tk.Tk):
         tk.Label(head, text=f"Version {APP_VERSION}", font=FONT_XS,
                  bg=PAL["page"], fg=PAL["muted"]).pack(side="right", padx=(0, 12))
 
-        # A machine-wide setting, not a per-job one — saved once here, read
-        # fresh into every job's own frozen spec when it's created.
+        # Who is reviewing, and where the two kinds of finished-review cards go. Machine-wide
+        # settings, not per-job ones: saved once here and read fresh into every job's own
+        # frozen spec when it is created. One compact card with a row each, so the manual
+        # below keeps its room on a small window.
         notif = RoundedCard(parent)
         notif.pack(fill="x", pady=(0, 6))
         ni = notif.inner
         ni.config(padx=12, pady=8)
-        self._lab(ni, "Google Chat notifications", font=FONT_B, fg="text").pack(anchor="w")
-        self._lab(ni, "Posts a brief verdict / impact / merged card to this "
-                      "webhook when a job finishes. Leave empty to turn it "
-                      "off — nothing else changes.").pack(anchor="w", pady=(0, 6))
-        wrow = tk.Frame(ni, bg=PAL["card"])
-        wrow.pack(fill="x")
+        self._lab(ni, "Your name and Google Chat notifications", font=FONT_B,
+                  fg="text").pack(anchor="w")
+        self._lab(ni, "Your name signs every review you run (the PR description, the chat "
+                      "cards, the document comments). Each webhook gets a brief card when "
+                      "a job finishes; leave one empty to turn it off - nothing else "
+                      "changes.").pack(anchor="w", pady=(0, 6))
+        grid = tk.Frame(ni, bg=PAL["card"])
+        grid.pack(fill="x")
+        grid.columnconfigure(1, weight=1)
+        self.username_var = tk.StringVar(value=CFG.get_username())
         self.webhook_var = tk.StringVar(value=CFG.get_webhook_url())
-        self.webhook_entry = self._entry(wrow, self.webhook_var)
-        self.webhook_entry.pack(side="left", fill="x", expand=True, ipady=3)
-        RoundedButton(wrow, text="Save", command=self._save_webhook,
-                     style="outline", height=30, width=70,
-                     font=FONT_S).pack(side="left", padx=(8, 0))
-        self.webhook_status = self._lab(ni, "", font=FONT_XS)
-        self.webhook_status.pack(anchor="w", pady=(6, 0))
+        self.docs_webhook_var = tk.StringVar(value=CFG.get_docs_webhook_url())
+        rows = (("Your name", self.username_var, self._save_username, "username"),
+                ("PR review webhook", self.webhook_var, self._save_webhook, "webhook"),
+                ("Document review webhook", self.docs_webhook_var, self._save_docs_webhook,
+                 "docs_webhook"))
+        for r, (label, var, save, key) in enumerate(rows):
+            self._lab(grid, label, font=FONT_S, fg="text").grid(
+                row=r, column=0, sticky="w", padx=(0, 10), pady=3)
+            entry = self._entry(grid, var)
+            entry.grid(row=r, column=1, sticky="ew", ipady=3, pady=3)
+            RoundedButton(grid, text="Save", command=save, style="outline", height=30,
+                          width=70, font=FONT_S).grid(row=r, column=2, padx=(8, 8), pady=3)
+            status = self._lab(grid, "", font=FONT_XS)
+            status.grid(row=r, column=3, sticky="w", pady=3)
+            setattr(self, f"{key}_entry", entry)
+            setattr(self, f"{key}_status", status)
+        self.username_entry.bind("<Return>", lambda _e: self._save_username())
+        grid.columnconfigure(3, minsize=170)
+        self._refresh_username_status()
         self._refresh_webhook_status()
+        self._refresh_docs_webhook_status()
 
         # Optional link to codegen (the code-generation tool): when on, PRISM
         # listens on loopback for PRs codegen opens and reports verdicts back.
@@ -3032,8 +3132,55 @@ class App(tk.Tk):
     def _refresh_webhook_status(self):
         configured = bool(CFG.get_webhook_url())
         self.webhook_status.config(
-            text="✓ Notifications on" if configured else "Notifications off — nothing saved yet",
+            text="✓ Notifications on" if configured else "Off — not set",
             fg=PAL["good"] if configured else PAL["muted"])
+
+    def _save_docs_webhook(self):
+        CFG.set_docs_webhook_url(self.docs_webhook_var.get())
+        self._refresh_docs_webhook_status()
+
+    def _refresh_docs_webhook_status(self):
+        configured = bool(CFG.get_docs_webhook_url())
+        self.docs_webhook_status.config(
+            text="✓ Alerts on" if configured else "Off — not set",
+            fg=PAL["good"] if configured else PAL["muted"])
+
+    # ---------------- who is reviewing ----------------
+    def _apply_window_title(self):
+        """The window is named after the person using it: "PRISM — <name>"."""
+        name = CFG.get_username()
+        self.title(f"PRISM — {name}" if name else "PRISM")
+
+    def _save_username(self):
+        name = CFG.clean_username(self.username_var.get())
+        if not name:
+            self.username_status.config(text="Enter a name", fg=PAL["warn"])
+            return
+        CFG.set_username(name)
+        self.username_var.set(name)
+        self._apply_window_title()
+        self._refresh_username_status()
+
+    def _refresh_username_status(self):
+        name = CFG.get_username()
+        self.username_status.config(
+            text="✓ Saved" if name else "Not set — login used",
+            fg=PAL["good"] if name else PAL["muted"])
+
+    def _ask_username_first_time(self):
+        """Ask for the name once, the first time this version runs with none saved.
+
+        Closing the box without answering saves nothing: reviews carry the machine
+        login meanwhile (config.effective_username) and it is asked again next start.
+        """
+        if CFG.get_username():
+            return
+        name = NamePrompt(self, CFG.system_username()).result
+        if name:
+            CFG.set_username(name)
+            self.username_var.set(CFG.get_username())
+            self._apply_window_title()
+            self._refresh_username_status()
 
     # ---------------- codegen integration ----------------
     def _toggle_codegen(self):
@@ -4326,6 +4473,7 @@ class App(tk.Tk):
             # into this one job's own spec once created, same as everything
             # else here.
             webhook_url=CFG.get_webhook_url() or None,
+            reviewer=CFG.effective_username(),
             custom_instructions=self.instr_text.get("1.0", "end").strip())
 
     def _populate_form(self, spec):

@@ -41,7 +41,7 @@ import jobs as J  # noqa: E402
 import winproc  # noqa: E402
 from pathutil import native_path, native_rel  # noqa: E402
 from orchestrator import (  # noqa: E402
-    REGION_DEFAULT, TOOL_DIR, Cancelled, RunControl, detect_local_repos, followup_declined,
+    INTERNAL_SUMMARY_KEYS, REGION_DEFAULT, TOOL_DIR, Cancelled, RunControl, detect_local_repos, followup_declined,
     full_pipeline, list_available_models, normalise_verdict, run_followup,
     STAGE_REVIEW, STAGE_DESCRIBE, STAGE_MERGE_CHECK, STAGE_SYNC, STAGE_MERGE,
 )
@@ -220,8 +220,22 @@ def build_spec(args, cfg=None, cwd=None):
         do_review=do_review, do_update_desc=do_describe,
         do_merge=flag(args.merge, "merge"), do_sync=flag(args.sync, "sync"),
         dry_run=flag(args.dry_run, "dry_run"),
-        webhook_url=CFG.get_webhook_url() or None,
+        webhook_url=CFG.get_webhook_url() or None, reviewer=CFG.effective_username(),
         custom_instructions=(instructions or "").strip(), origin="cli")
+
+
+def with_identity(spec):
+    """`spec` with the saved name and webhook, read now.
+
+    These are machine-wide settings, not part of what a job is: a retry, or a
+    background run that received its spec as text, picks up whatever is saved
+    today - and the webhook URL (a secret) never has to travel on a command line.
+    """
+    if getattr(spec, "kind", "pr") == "docs":
+        return dataclasses.replace(spec, reviewer=CFG.effective_username(),
+                                   webhook_url=CFG.get_docs_webhook_url() or None)
+    return dataclasses.replace(spec, reviewer=CFG.effective_username(),
+                               webhook_url=CFG.get_webhook_url() or None)
 
 
 def _current_branch(clone):
@@ -375,7 +389,8 @@ def build_docs_spec(args, cfg=None, cwd=None):
         project_dir=str(base), targets=tuple(targets), requirements_path=requirements,
         persona=persona, model=args.model or cfg["model"] or None, do_commit=do_commit,
         do_push=flag(args.push, "push") and do_commit, dry_run=flag(args.dry_run, "dry_run"),
-        custom_instructions=(instructions or "").strip(), origin="cli")
+        custom_instructions=(instructions or "").strip(), origin="cli",
+        webhook_url=CFG.get_docs_webhook_url() or None, reviewer=CFG.effective_username())
 
 
 # ----------------------------------------------------------------- input --
@@ -601,7 +616,10 @@ def execute(spec, job_id=None, quiet=False, runner=None, interactive=None):
                           pushed=summary.get("pushed") is True)
         if not fields["tokens"]:
             fields.pop("tokens")
-        shown = {k: v for k, v in summary.items() if k not in ("review", "tokens")}
+        # What the review found, as data (see findings.py) - read by `prism jobs --json`.
+        fields["findings"] = summary.get("findings") if isinstance(summary.get("findings"),
+                                                                    list) else []
+        shown = {k: v for k, v in summary.items() if k not in INTERNAL_SUMMARY_KEYS}
         reporter.line(f"\n—— finished: {shown} ——", "ok")
     except KeyboardInterrupt:
         status, code = J.STOPPED, EXIT_STOPPED
@@ -788,7 +806,8 @@ def build_parser():
     return p
 
 
-CONFIG_KEYS_HELP = list(CFG.CLI_TEXT_KEYS) + list(CFG.CLI_FLAG_KEYS) + ["webhook"]
+CONFIG_KEYS_HELP = list(CFG.CLI_TEXT_KEYS) + list(CFG.CLI_FLAG_KEYS) + [
+    "webhook", "docs_webhook", "username"]
 
 
 def cmd_run(args):
@@ -805,7 +824,7 @@ def cmd_run(args):
 def cmd_docs(args):
     if args.spec_json:                       # a detached run: the spec was resolved already
         try:
-            spec = CJ.spec_from_dict(json.loads(args.spec_json))
+            spec = with_identity(CJ.spec_from_dict(json.loads(args.spec_json)))
         except (ValueError, TypeError) as e:
             raise UsageError(f"Bad --spec-json: {e}")
     else:
@@ -874,6 +893,11 @@ def cmd_jobs(args):
     if args.json:
         for r in records:
             r["status"] = CJ.status_of(r)
+            # Always present, so a reader never has to test for them: a record written
+            # before they existed (or by a job that has not delivered a review) has none.
+            if not isinstance(r.get("findings"), list):
+                r["findings"] = []
+            r.setdefault("reviewer", "")
         print(json.dumps(records, indent=1))
         return EXIT_OK
     if not records:
@@ -973,10 +997,12 @@ def cmd_retry(args):
         spec = CJ.spec_from_dict(record.get("spec"))
     except ValueError as e:
         raise UsageError(f"Cannot retry {args.job_id}: {e}")
+    # The webhook and the reviewer's name are machine-wide settings, read fresh as the
+    # desktop does.
     if getattr(spec, "kind", "pr") != "docs":
-        # The webhook is a machine-wide setting, read fresh as the desktop does.
         spec = J.JobSpec(**dict(CJ.spec_to_dict(spec), webhook_url=CFG.get_webhook_url() or None,
                                 origin="cli"))
+    spec = with_identity(spec)
     if args.model:
         spec = dataclasses.replace(spec, model=None if args.model == "default" else args.model)
     dup = CJ.find_duplicate(spec)
@@ -1129,6 +1155,9 @@ def cmd_config(args):
             print(f"{key:<13} {'yes' if cfg[key] else 'no'}")
         hook = CFG.get_webhook_url()
         print(f"{'webhook':<13} {_mask(hook) if hook else '-'}")
+        docs_hook = CFG.get_docs_webhook_url()
+        print(f"{'docs_webhook':<13} {_mask(docs_hook) if docs_hook else '-'}")
+        print(f"{'username':<13} {CFG.get_username() or '-'}")
         return EXIT_OK
     key = (args.key or "").replace("-", "_")
     if key not in CONFIG_KEYS_HELP:
@@ -1136,6 +1165,10 @@ def cmd_config(args):
     if args.action == "unset":
         if key == "webhook":
             CFG.set_webhook_url("")
+        elif key == "docs_webhook":
+            CFG.set_docs_webhook_url("")
+        elif key == "username":
+            CFG.set_username("")
         else:
             CFG.unset_cli(key)
         print(f"{key} unset.")
@@ -1145,6 +1178,14 @@ def cmd_config(args):
     text = " ".join(args.value)
     if key == "webhook":
         CFG.set_webhook_url(text)
+    elif key == "docs_webhook":
+        CFG.set_docs_webhook_url(text)
+    elif key == "username":
+        name = CFG.clean_username(text)
+        if not name:
+            raise UsageError("The name is empty once markup and control characters are removed.")
+        CFG.set_username(name)
+        text = name
     elif key in CFG.CLI_FLAG_KEYS:
         CFG.set_cli(**{key: _parse_bool(text)})
     elif key == "project_dir":
@@ -1226,6 +1267,35 @@ HANDLERS = {"run": cmd_run, "jobs": cmd_jobs, "logs": cmd_logs, "stop": cmd_stop
             "update": cmd_update}
 
 
+def ensure_username():
+    """Ask once, at a terminal, whose name reviews are to carry.
+
+    The desktop app asks the same question the first time it starts. Here it is
+    asked only when a person is actually there to answer: a background job, a
+    script or a pipe is never held up by it (such a run is signed with the
+    machine login instead - see config.effective_username). Enter accepts the
+    suggestion; an interrupted or empty answer saves nothing, so it is asked
+    again next time.
+    """
+    if CFG.get_username():
+        return
+    try:
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            return
+        suggestion = CFG.system_username()
+        print("PRISM signs every review it produces - the PR description, the chat card, "
+              "the document comments - with your name, so a review can be traced to who "
+              "ran it. Asked once; change it any time with: "
+              f"{PROG} config set username <name>")
+        shown = f" [{suggestion}]" if suggestion else ""
+        name = CFG.clean_username(input(f"Your name or username{shown}: ")) or suggestion
+        if name:
+            CFG.set_username(name)
+            print(f"Saved: reviews will be signed {name}.\n")
+    except (EOFError, KeyboardInterrupt, OSError):
+        print()
+
+
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1236,6 +1306,8 @@ def main(argv=None):
         print(f"PRISM {__version__}")
         return EXIT_OK
     try:
+        if args.command in ("run", "docs", "retry") and not getattr(args, "quiet", False):
+            ensure_username()
         return HANDLERS[args.command](args)
     except UsageError as e:
         print(f"{PROG}: {e}", file=sys.stderr)
