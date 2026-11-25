@@ -162,6 +162,23 @@ class Findings(unittest.TestCase):
         runs = [D.Run({"v": 2}, self.BODY), D.Run({"v": 1}, "- **[Major] DR-9** · Gap · x — y")]
         self.assertEqual([i for _s, i, _l in D.open_findings(runs)], ["DR-2", "DR-5"])
 
+    def test_wrapped_comment_is_kept_whole(self):
+        # A reviewer may wrap a long bullet over indented lines; the next review must be
+        # shown the whole comment, not its first line (it said "fragments" and left
+        # every comment open).
+        body = ("### Blockers\n"
+                "- **[Blocker] DR-1** · Gap · Sec 4 — the problem\n"
+                "  continues here. Evidence: REQ-12.\n"
+                "    Suggested fix: add it.\n"
+                "- **[Major] DR-2** · Gap · Sec 5 — short.\n"
+                "\n### Coverage\n- **Reviewed:** x\n")
+        got = D.findings(body)
+        self.assertEqual([i for _s, i, _l in got], ["DR-1", "DR-2"])
+        self.assertEqual(got[0][2], "- **[Blocker] DR-1** · Gap · Sec 4 — the problem "
+                                    "continues here. Evidence: REQ-12. Suggested fix: add it.")
+        self.assertEqual(got[1][2], "- **[Major] DR-2** · Gap · Sec 5 — short.")
+        self.assertNotIn("\n", got[0][2])
+
     def test_counts_text(self):
         self.assertEqual(D.counts_text({"Blocker": 2, "Major": 1, "Minor": 0, "Suggestion": 1}),
                          "2 blockers, 1 major, 1 suggestion")

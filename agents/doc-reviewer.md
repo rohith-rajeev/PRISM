@@ -236,9 +236,7 @@ values PRISM uses everywhere:
     - **Priority items:** <DR ids the human reviewer must look at first, and why, in one line>
 
     ### Blockers
-    - **[Blocker] DR-1** · Gap · <section or heading of the document> — <the
-      problem in one or two sentences>. Evidence: <requirement quote + file, or
-      code path>. Suggested fix: <one line>.
+    - **[Blocker] DR-1** · Gap · <section or heading of the document> — <the problem in one or two sentences>. Evidence: <requirement quote + file, or code path>. Suggested fix: <one line>.
 
     ### Major
     - **[Major] DR-2** · Feasibility · <section> — ...

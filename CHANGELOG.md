@@ -4,6 +4,16 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v6.5.1
+
+- **Follow-up document reviews no longer lose the earlier comments' text.** A comment the
+  reviewer had wrapped over several lines was shown to the next review as its first line
+  only, so the reviewer could not match it, reported "truncated" and every such comment
+  stayed open. PRISM now passes (and keeps) each comment whole, and the report template asks
+  for one line per comment. Comments already written in the cut-off form are not repaired:
+  re-run that review once to write them afresh.
+- The Google Chat document card's label reads **Reviewer role** (it was "Reviewer persona").
+
 ## v6.5
 
 - **PRISM now knows who is reviewing.** The first time it starts it asks for your name or

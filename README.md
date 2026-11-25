@@ -87,7 +87,7 @@ document for a person to read, challenge and decide on.
 
 You give it the same working folder and clone selectors as a PR review, but
 instead of a PR id: the **branch** and the **document file name(s)** for the
-backend, the frontend, or both (either is optional), the **reviewer persona**, an
+backend, the frontend, or both (either is optional), the **reviewer role**, an
 optional **requirements folder** (**Browse** to choose it, kept relative to the
 repository when it is inside one), the model and optional custom instructions.
 Document file names can be typed as paths from the repository root, or picked with

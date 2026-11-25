@@ -160,7 +160,7 @@ def build_doc_card(persona, verdict_key=None, verdict_label=None, impact=None,
     `targets` is a list of dicts: {"label", "repo", "branch", "documents": [
     {"file", "verdict_key", "verdict_label", "counts_text"}]}.
     """
-    widgets = [{"decoratedText": {"topLabel": "Reviewer persona", "text": _esc(persona or "?")}}]
+    widgets = [{"decoratedText": {"topLabel": "Reviewer role", "text": _esc(persona or "?")}}]
     if reviewer:
         widgets.append({"decoratedText": {"topLabel": "Reviewed by", "text": _esc(reviewer)}})
     widgets.append({"decoratedText": {
