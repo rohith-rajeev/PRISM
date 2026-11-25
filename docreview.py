@@ -483,13 +483,35 @@ def _without_previous_block(body):
     return body[:m.start()] + (body[nxt.start():] if nxt else "")
 
 
+_CONTINUES_RE = re.compile(r"^\s+\S")          # an indented line continues the bullet above
+_BULLET_RE = re.compile(r"^\s*[-*]\s")
+
+
 def findings(body):
-    """[(severity, id, line)] for every comment in a review body, in order."""
+    """[(severity, id, line)] for every comment in a review body, in order.
+
+    `line` is the whole comment as ONE line. A reviewer sometimes wraps a long bullet
+    over several indented lines (the report template itself shows one wrapped); those
+    continuation lines belong to the comment and are joined on, so the text a later
+    review is shown, and the text PRISM puts back when it keeps a comment open, is
+    never cut off after its first line.
+    """
+    text = _without_previous_block(body)
+    lines = text.split("\n")
+    starts, pos = [], 0
+    for ln in lines:
+        starts.append(pos)
+        pos += len(ln) + 1
     out = []
-    for m in _FINDING_RE.finditer(_without_previous_block(body)):
-        line_end = body.find("\n", m.start())
-        text = body[m.start(): line_end if line_end != -1 else len(body)]
-        out.append((m.group(1).capitalize(), m.group(2).upper(), text.strip()))
+    for m in _FINDING_RE.finditer(text):
+        i = max(k for k, st in enumerate(starts) if st <= m.start())
+        parts = [lines[i].strip()]
+        for nxt in lines[i + 1:]:
+            if (not nxt.strip() or _BULLET_RE.match(nxt) or _NEXT_HEAD_RE.match(nxt)
+                    or nxt.lstrip().startswith("<<<") or not _CONTINUES_RE.match(nxt)):
+                break
+            parts.append(nxt.strip())
+        out.append((m.group(1).capitalize(), m.group(2).upper(), " ".join(parts)))
     return out
 
 

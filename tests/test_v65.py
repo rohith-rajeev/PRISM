@@ -328,7 +328,7 @@ class DocCard(unittest.TestCase):
     def test_it_says_who_reviewed_what_where_and_with_what_result(self):
         body = self.card()
         t = card_texts(body)
-        self.assertEqual(t["Reviewer persona"], "Architect")
+        self.assertEqual(t["Reviewer role"], "Architect")
         self.assertEqual(t["Reviewed by"], "Alex")
         self.assertEqual(t["Verdict"], "🔴 Request changes")
         self.assertEqual(t["Impact"], "6/10")
@@ -553,7 +553,7 @@ class DocumentReviewEndToEnd(Isolated):
         # one alert, to the DOCUMENT webhook only
         self.assertEqual(cap.urls, ["https://chat.googleapis.com/v1/spaces/D/messages?key=k"])
         t = card_texts(cap.bodies[0])
-        self.assertEqual(t["Reviewer persona"], "Architect")
+        self.assertEqual(t["Reviewer role"], "Architect")
         self.assertEqual(t["Reviewed by"], "Alex Rivera")
         self.assertIn("Approve with comments", t["Verdict"])
         self.assertEqual(t["Impact"], "4/10")
