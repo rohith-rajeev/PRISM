@@ -1399,11 +1399,18 @@ def review_document(prompt, project_dir, emit, model, control, meter, ask=None, 
         emit("\n⚠ The report has no Scale line — asking the reviewer for it once.")
         if control is not None:
             control.check()
-        _rc, raw, sid2 = O._continue_turn(_SCALE_PROMPT, project_dir, sid, emit, model,
-                                          control, what="scale classification", meter=meter,
-                                          agent=AGENT_DOC_REVIEWER)
-        sid = sid2 or sid
-        res.scale, res.scale_reason = O.parse_scale(raw)
+        try:
+            _rc, raw, sid2 = O._continue_turn(_SCALE_PROMPT, project_dir, sid, emit, model,
+                                              control, what="scale classification",
+                                              meter=meter, agent=AGENT_DOC_REVIEWER)
+            sid = sid2 or sid
+            res.scale, res.scale_reason = O.parse_scale(raw)
+        except Cancelled:
+            raise
+        except Exception as e:  # noqa: BLE001
+            # Only a nudge: PRISM's rule decides the scale without it (resolve_scale).
+            emit(f"⚠ Could not ask for the Scale line ({str(e)[:200]}); PRISM's rule "
+                 f"decides it.")
     return res, body, sid, partial
 
 

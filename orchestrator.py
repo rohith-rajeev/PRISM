@@ -3775,10 +3775,19 @@ def _run_pipeline(project_dir, repo_name, pr_id, local_repo=None,
                 and session_id and not review.incomplete_reason):
             emit("\n⚠ The report has no Scale line — asking the reviewer for it once.")
             ck()
-            _rc, raw3, session_id = _continue_turn(_SCALE_PROMPT, project_dir, session_id,
-                                                   emit, model, control,
-                                                   what="scale classification", meter=meter)
-            review.scale, review.scale_reason = parse_scale(raw3)
+            try:
+                _rc, raw3, sid3 = _continue_turn(_SCALE_PROMPT, project_dir, session_id,
+                                                 emit, model, control,
+                                                 what="scale classification", meter=meter)
+                session_id = sid3 or session_id
+                review.scale, review.scale_reason = parse_scale(raw3)
+            except Cancelled:
+                raise
+            except Exception as e:  # noqa: BLE001
+                # Only a nudge: a failed turn must not cost a finished review. PRISM's
+                # rule (resolve_scale, below) decides the scale without it.
+                emit(f"⚠ Could not ask for the Scale line ({str(e)[:200]}); PRISM's rule "
+                     f"decides it.")
 
         if review.incomplete_reason:
             # No verdict line is printed and nothing below runs: the description is
