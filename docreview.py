@@ -1993,6 +1993,7 @@ def _pipeline(project_dir, targets, requirements_path="", model=None,
                       "impact": res.impact_score, "impact_reason": res.impact_reason,
                       "counts": counts, "version": version, "scale": res.scale,
                       "scale_reason": res.scale_reason, "uploaded": d.upload is not None,
+                      "partial": bool(partial),
                       "path": where, "repo": t.repo_name if t.has_repo else "",
                       "branch": t.branch if t.has_repo else "",
                       "folder": (Path(posix_rel(where)).parent.name if "/" in posix_rel(where)
@@ -2168,6 +2169,29 @@ def _pipeline(project_dir, targets, requirements_path="", model=None,
             "findings": all_findings, "results": results}
 
 
+def decision_reason(results, not_reviewed=0):
+    """Why the run's decision is what it is, in a few words, for the chat card's note."""
+    total = {sev: sum(r["counts"].get(sev, 0) for r in results) for sev in SEVERITIES}
+    why = []
+    if total["Blocker"] or total["Major"]:
+        bits = [f"{total['Blocker']} blocker{'' if total['Blocker'] == 1 else 's'}"
+                if total["Blocker"] else "",
+                f"{total['Major']} major comment{'' if total['Major'] == 1 else 's'}"
+                if total["Major"] else ""]
+        bits = [b for b in bits if b]
+        why.append(" and ".join(bits) + " open")
+    if any(r.get("scale") == O.SCALE_LARGE for r in results):
+        why.append("large or expensive change")
+    if any(r.get("partial") for r in results):
+        why.append("review cut short")
+    if not_reviewed:
+        why.append(f"{not_reviewed} document{'' if not_reviewed == 1 else 's'} not reviewed")
+    if not why:
+        return "No blocker or major comment open"
+    text = "; ".join(why)
+    return text[0].upper() + text[1:]
+
+
 def _notice(persona, reviewer, owner, run_id, targets, results, worst, impact, impact_reason,
             not_reviewed, do_commit, committed, pushed, copies):
     """What the document-review alert says, as plain data for notifier.build_doc_card."""
@@ -2195,6 +2219,7 @@ def _notice(persona, reviewer, owner, run_id, targets, results, worst, impact, i
                            "documents": docs})
     return {"persona": persona_label(persona), "owner": owner, "reviewer": reviewer,
             "decision": worst, "impact": impact, "impact_reason": impact_reason,
+            "decision_reason": decision_reason(results, not_reviewed),
             "counts": total, "targets": blocks, "run_id": run_id, "outcome": outcome,
             "not_reviewed": not_reviewed}
 

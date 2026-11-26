@@ -435,7 +435,7 @@ by default. Paste in a webhook URL and click Save once — it applies to
 every job from then on, not just the one you're about to run. A card is
 posted **only when the reviewer produced a real, parseable verdict** —
 Approve, Approve with comments, Request changes, or Block — with the PR
-author, verdict, impact, and whether it merged. A skipped review, a run
+author, verdict, impact, and whether it merged, each marked with a flat icon. A skipped review, a run
 whose verdict PRISM couldn't parse, or an internal error never posts —
 those aren't review outcomes, and the group chat doesn't need to see them
 next to real ones. The card also says who ran the review. Leave the webhook field
@@ -443,12 +443,13 @@ empty to turn notifications off entirely.
 
 **Document-review alerts** work the same way and sit in the same Help card, with
 their **own webhook** (so document reviews can go to a different space from pull
-requests). When a document review finishes, PRISM posts a card with the reviewer
-persona (Business Analyst, Architect or QA), who ran it, the verdict, impact and
-number of comments by severity, the branch (or the backend and frontend branches)
-that were reviewed, the path of every document reviewed from the repository root with
-its own verdict, and whether the comments were committed and pushed. A review that
-failed outright posts nothing. Leave the field empty to turn the alerts off.
+requests). When a document review finishes, PRISM posts a compact card: the owner,
+the decision as an icon (a tick: work may start; a cross: work may not start), the
+reviewer persona (Business Analyst, Architect or QA), who ran it, the comment counts
+and the impact (for example `6/10`), the branch (or the backend and frontend branches)
+reviewed with each document's own decision icon, a one-sentence note on why, and
+whether the comments were committed and pushed. A review that failed outright, or a dry
+run, posts nothing. Leave the field empty to turn the alerts off.
 
 **Code-generation integration**, also on the Help screen, is optional and off by default.
 Tick **Accept reviews from a code-generation tool** and PRISM listens (on this machine

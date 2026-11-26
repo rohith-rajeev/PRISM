@@ -114,6 +114,9 @@ def card_texts(body):
                 for col in w["columns"]["columnItems"]:
                     walk(col["widgets"])
             elif "textParagraph" in w:
+                # The last paragraph is the footer; one before it is the short note.
+                if "_footer" in out:
+                    out["_note"] = out["_footer"]
                 out["_footer"] = w["textParagraph"]["text"]
     for section in card["sections"]:
         walk(section["widgets"])
@@ -345,15 +348,15 @@ class DocCard(unittest.TestCase):
         t = card_texts(body)
         self.assertEqual(t["Reviewer role"], "Architect")
         self.assertEqual(t["Reviewed by"], "Alex")
-        self.assertEqual(t["Owner"], "Priya")
-        self.assertEqual(t["_subtitle"], "Request changes — work may not start · Owner: Priya")
+        self.assertEqual(t["_subtitle"], "Owner: Priya")
+        self.assertIn("Work may not start", json.dumps(body, ensure_ascii=False))
         self.assertEqual(t["Impact"], "6/10")
         self.assertEqual(t["Comments"], "1 blocker, 1 major")
         self.assertIn("committed and pushed", t["_footer"])
         self.assertIn("20261124-1200-abc123", t["_footer"])
         text = json.dumps(body, ensure_ascii=False)
         for expected in ("Backend · shop-be · feat/x", "Frontend · shop-fe · feat/y",
-                         "spec.md — Request changes", "ui.md — Request changes"):
+                         '"text": "spec.md"', '"text": "ui.md"', '"name": "cancel"'):
             self.assertIn(expected, text)
         self.assertEqual(body["cardsV2"][0]["card"]["header"]["title"], "Document review")
 
@@ -572,14 +575,14 @@ class DocumentReviewEndToEnd(Isolated):
         self.assertEqual(t["Reviewer role"], "Architect")
         self.assertEqual(t["Reviewed by"], "Alex Rivera")
         # v7.0: a Major is open, so the decision is Request changes (FR-VER-4).
-        self.assertTrue(t["_subtitle"].startswith("Request changes — work may not start"))
-        self.assertEqual(t["Owner"], "Priya")
-        self.assertTrue(t["Impact"].startswith("4/10"))
+        self.assertEqual(t["_subtitle"], "Owner: Priya")
+        self.assertIn("Work may not start", json.dumps(cap.bodies[0], ensure_ascii=False))
+        self.assertEqual(t["Impact"], "4/10")
         self.assertEqual(t["Comments"], "1 major, 1 minor")
         self.assertIn("committed and pushed", t["_footer"])
         text = json.dumps(cap.bodies[0], ensure_ascii=False)
         self.assertIn("feat/x", text)
-        self.assertIn("spec.md — Request changes", text)
+        self.assertIn('"text": "spec.md"', text)
         self.assertIn("Posted document review summary to Google Chat.", out)
 
         # and the record carries the findings
