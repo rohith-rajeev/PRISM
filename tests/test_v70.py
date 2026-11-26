@@ -689,7 +689,9 @@ class FrDocInCommandLine(Isolated):
         spec = P.build_docs_spec(args(files=[str(a), str(b)],
                                       dest=["a.md=docs/a.md", f"{b}=docs/b.pdf"]), cwd=clone)
         ups = {Path(u.path).name: u.dest for u in spec.targets[0].uploads}
-        self.assertEqual(ups, {"a.md": "docs/a.md", "b.pdf": "docs/b.pdf"})
+        # Stored with this OS's separators, like every path typed on the command line.
+        self.assertEqual(ups, {"a.md": os.path.join("docs", "a.md"),
+                               "b.pdf": os.path.join("docs", "b.pdf")})
         png = self.home / "c.png"
         png.write_bytes(b"x")
         with self.assertRaises(P.UsageError) as cm:
