@@ -53,3 +53,14 @@ thousands of tokens, and narration between tool calls is pure overhead on
 every single run, paid whether or not anyone reads it. Depth of
 investigation is the job; prose describing that investigation as it happens
 is not.
+
+**Every review states its scale.** `pr-reviewer` and `doc-reviewer` add
+`**Scale:** normal | large — <why>` beside the verdict and impact lines. PRISM reads it
+and enforces it after parsing (`orchestrator.resolve_scale` / `enforce_scale`): a large
+change is impact 8 or more and is never an approval, and a large pull request is never
+merged. A document review's decision is PRISM's, never the reviewer's: Approve or Request
+changes, computed from the open comments (`docreview.decide`).
+
+**Live chat turns are not reviews.** A prompt that starts `LIVE CHAT` (see `chat.py`)
+asks one question about one job; the reply is shown to the person as-is and nothing
+parses it for a verdict, so it can never approve, merge or change anything.

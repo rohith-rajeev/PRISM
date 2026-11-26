@@ -38,7 +38,7 @@ def args(**kw):
     """The Namespace `prism docs` would parse, with every option unset."""
     base = dict(files=[], path=None, clone=None, branch=None, be=None, be_clone=None,
                 be_branch=None, fe=None, fe_clone=None, fe_branch=None, requirements=None,
-                persona=None,
+                persona=None, owner="Priya", dest=None,
                 model=None, commit=None, push=None, dry_run=None, instructions=None,
                 instructions_file=None, detach=False, quiet=False, job_id=None, spec_json=None)
     base.update(kw)
@@ -84,13 +84,19 @@ class Resolution(Isolated):
         spec = P.build_docs_spec(args(files=["specs/not-here-yet.md"]), cwd=self.clone)
         self.assertEqual(spec.targets[0].files, (os.path.join("specs", "not-here-yet.md"),))
 
-    def test_an_absolute_path_outside_the_clone_is_refused(self):
-        # A path that is absolute on every platform (not "/etc/hosts": no drive on Windows).
+    def test_a_file_outside_the_clone_is_an_uploaded_document(self):
+        """v7.0 (FR-DOC-IN-5): a path outside the repository is an uploaded document; a
+        path inside it stays a repository document."""
         outside = self.home / "elsewhere.md"
         outside.write_text("x", encoding="utf-8")
-        with self.assertRaises(P.UsageError) as cm:
-            P.build_docs_spec(args(files=[str(outside)]), cwd=self.clone)
-        self.assertIn("not inside", str(cm.exception))
+        spec = P.build_docs_spec(args(files=[str(outside), "docs/spec.md"]), cwd=self.clone)
+        (t,) = spec.targets
+        self.assertEqual(t.files, (os.path.join("docs", "spec.md"),))
+        self.assertEqual([u.path for u in t.uploads], [str(outside.resolve())])
+        self.assertEqual(t.uploads[0].dest, "")            # never guessed
+        missing = self.home / "nope.md"
+        with self.assertRaises(P.UsageError):
+            P.build_docs_spec(args(files=[str(missing)]), cwd=self.clone)
 
     def test_flags_beat_saved_defaults_which_beat_built_ins(self):
         C.set_cli(requirements="reqs-from-config", model="m-config", commit=False,
@@ -155,10 +161,20 @@ class Resolution(Isolated):
             P.build_docs_spec(args(files=["docs/spec.md"], branch="-rf"), cwd=self.clone)
 
     def test_not_in_a_clone(self):
+        """v7.0 (FR-DOC-IN-7): with no repository the documents are files on this machine,
+        reviewed without a codebase; a name that is not a file is an error."""
         empty = self.home / "empty"
         empty.mkdir()
         with self.assertRaises(P.UsageError) as cm:
             P.build_docs_spec(args(files=["a.md"]), cwd=empty)
+        self.assertIn("not a file", str(cm.exception))
+        (empty / "a.md").write_text("# A\n", encoding="utf-8")
+        spec = P.build_docs_spec(args(files=["a.md"]), cwd=empty)
+        (t,) = spec.targets
+        self.assertFalse(t.has_repo)
+        self.assertEqual(spec.project_dir, "")
+        with self.assertRaises(P.UsageError) as cm:
+            P.build_docs_spec(args(files=["a.md"], branch="main"), cwd=empty)
         self.assertIn("No git clone", str(cm.exception))
 
     def test_a_missing_path_or_clone(self):
@@ -316,7 +332,10 @@ class Running(Isolated):
         try:
             with mock.patch.object(sys, "stdout", out), mock.patch.object(sys, "stderr", err), \
                     mock.patch.object(sys.stdin, "isatty", return_value=False):
-                code = P.main(list(argv))
+                argv = list(argv)
+                if argv[:1] == ["docs"] and "--owner" not in argv:
+                    argv += ["--owner", "Priya"]
+                code = P.main(argv)
         finally:
             os.chdir(old)
         return code, out.getvalue(), err.getvalue()
@@ -332,7 +351,7 @@ class Running(Isolated):
         self.assertTrue(subject.startswith("PRISM-") and "review comments v1" in subject, subject)
         (rec,) = CJ.list_jobs()
         self.assertEqual((rec["status"], rec["committed"], rec["pushed"]), ("done", True, True))
-        self.assertIn("Request changes", rec["verdict"])
+        self.assertEqual(rec["verdict"], "request-changes")      # FR-X-6
         self.assertEqual(rec["session_id"], "sess-9")
         self.assertEqual(rec["spec"]["kind"], "docs")
         self.assertIn("PRISM job", CJ.read_log(rec["id"]))
@@ -469,7 +488,7 @@ class Detached(Isolated):
             # --branch given explicitly: the stripped-down PATH below is only reliable for
             # git on POSIX, and this test is about the detached plumbing, not branch lookup.
             [sys.executable, str(ROOT / "prism_cli.py"), "docs", "docs/spec.md", "--path",
-             str(clone), "--branch", "feat/x", "--detach", "--dry-run"],
+             str(clone), "--branch", "feat/x", "--detach", "--dry-run", "--owner", "Priya"],
             env=env, cwd=str(clone), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             universal_newlines=True, timeout=60)
         self.assertEqual(run.returncode, 0, run.stderr)

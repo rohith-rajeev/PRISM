@@ -43,6 +43,18 @@ sets itself up accordingly:
 > The repository name box is editable on purpose: the name in AWS can differ
 > from your local folder name.
 
+**CodeCommit or GitLab.** Under the folder, *Host* shows what the chosen clone's
+remote is. A CodeCommit remote works as described here. A GitLab remote (gitlab.com
+or your own server) is reviewed as a **merge request**: *Host* shows the GitLab
+project, which you can correct when the server's path differs, and the id is the
+merge request number (`!214` works too). It goes through the same review,
+description, sync and merge steps, merging by **fast-forward only** — a project set
+to merge commits or squashing is reviewed and described, then stops before merging.
+GitLab needs an access token with the *api* scope: save it under Help (*GitLab
+token*) or set `GITLAB_TOKEN`. A remote that is neither CodeCommit nor GitLab is
+refused. (A self-managed GitLab whose name doesn't contain "gitlab": `prism config
+set gitlab_hosts <host>`.)
+
 **3. Enter the PR id** — just the number, e.g. `214`. That's the only thing
 PRISM needs to find the PR: it looks up the source and destination branches
 itself from the PR id and repository, so you never have to type a branch name.
@@ -111,7 +123,17 @@ radius, not how big the diff is:
 | 7–8 | 🔴 | High risk |
 | 9–10 | ⛔ | Critical |
 
-The reviewer's reasoning is in the conversation panel.
+A **normal** change with an impact of 7 or more pauses before merging and asks you to
+confirm.
+
+**Scale** — every review also says whether the change is **normal** or **large**.
+Large means very large or expensive to build, roll back or review safely: it cuts
+across many modules, migrates data or schema, changes infrastructure or a pipeline,
+or moves a security boundary (line count alone never decides it). A large change is
+scored at least 8/10, is **Request changes**, and is **never merged** — there is no
+"proceed" for it, whoever asks. Split it, or take it through by hand.
+
+The reviewer's reasoning is in the **OUTPUT** panel.
 
 **Findings** are one line each, most severe first, and they are written to the PR
 description too. A finding is about the lines **this PR** changes. It can also
@@ -193,7 +215,12 @@ reviewer is an aid to your own review of the document, not a replacement for it.
 a PR. One repository gives a single *Repository* card; several give a *Backend*
 and a *Frontend* card, pre-filled from the folder names.
 
-**3. For each repository you want reviewed, enter the branch and the document
+**3. Enter the owner.** *Owner of this review request* is the person responsible
+for the document and for answering the review — not you, the reviewer. It is
+required, shown on the chat card and in the document, and remembered for the next
+form.
+
+**4. For each repository you want reviewed, enter the branch and the document
 file name(s).** Click `Browse…` beside the file names to pick one or several
 documents at once in your desktop's file chooser — they are added as paths
 relative to the repository, next to anything you have already typed. You can also
@@ -201,7 +228,20 @@ type paths from the repository root yourself, one per line or comma separated.
 Fill in either card or both; an empty card is skipped. (Select the clone first:
 picked files must lie inside it.)
 
-**4. Choose who reviews.** Under *Reviewer*, pick one of three, each reading the
+**Documents that aren't on the branch.** Click `Upload…`, or drop files onto the
+card (drag-and-drop needs the *tkdnd* Tk extension; Upload always works). Text,
+Markdown, Word, PDF and Excel are accepted; anything else is named on the card and
+not added. Each uploaded file is listed by name with an ✕ to remove it. It is
+reviewed against the selected branch's code even though it isn't committed, and
+the review is written into a **copy next to it** (`spec.prism-review.md`; a PDF gets
+`spec.pdf.prism-review.md` and is never changed). It goes onto the branch only if
+you fill in its *commit to* path (inside the repository, same extension, not an
+existing file) and *Commit* is on — PRISM never picks a path. With no clone or
+working folder at all, upload the document on its own: it is reviewed against
+itself and any requirements you give, and the review says no codebase was
+available.
+
+**5. Choose who reviews.** Under *Reviewer*, pick one of three, each reading the
 document through its own lens:
 
 - **Business Analyst** (the default) — the functional side: do the document's
@@ -218,7 +258,7 @@ and the review states a conclusion on each. Run the document again with another
 persona to see it from another side; each persona's reviews are kept apart, so
 an Architect re-review follows up the Architect's comments.
 
-**5. (Optional) Add the requirements.** Click `Browse` to pick the folder holding
+**6. (Optional) Add the requirements.** Click `Browse` to pick the folder holding
 the requirements the document was decomposed from, as you did for the working
 folder. **With** requirements, the review centres on whether the decomposition
 satisfies all of them and is consistent with the codebase's patterns. **Without**
@@ -227,19 +267,31 @@ and the design is good to implement without breaking anything. Inside a reposito
 the folder is stored relative to it and read from the reviewed branch; elsewhere the
 full path is used. A path you give that isn't found is an error, not ignored.
 
-**6. Choose the stages.** *Commit* and *Push* are on by default; *Push* needs
-*Commit*. *Dry run* reviews but writes, commits and pushes nothing — the
-comments are only in the conversation.
+**7. Choose the stages.** *Commit* and *Push* are on by default; *Push* needs
+*Commit*. *Dry run* reviews but writes, commits, pushes and posts nothing — the
+comments are only in the OUTPUT log.
 
-**7. Click `▶ Start Prisming`** (or `Ctrl+Enter`). Custom instructions work as
+**8. Click `▶ Start Prisming`** (or `Ctrl+Enter`). Custom instructions work as
 they do for a PR.
 
 **What you get.** A **PRISM review comments** section is added at the end of each
 document: a summary, then comments grouped by severity (Blocker, Major, Minor,
 Suggestion), each with a category and an id like `DR-3`, and what the reviewer
 read and did not reach. It is committed as `PRISM-<run id>: …` and pushed to the
-branch. The verdict and impact in the job header cover all documents in the run
-(the worst verdict, the highest impact).
+branch.
+
+**The decision** is one of two, set by PRISM from the open comments — the
+reviewer's own wording cannot change it:
+
+| Decision | Meaning |
+|---|---|
+| ✅ Approve | Work may start. Only Minor comments, Suggestions, or none. |
+| 🔴 Request changes | Work may not start until the open comments are addressed and the document is reviewed again. Any open Blocker or Major, a large change, or a review cut short. |
+
+Minor comments and suggestions are still written when the decision is Approve.
+The decision in the job header covers all documents in the run (Request changes if
+any document's is), with the highest impact. Older reviews written before v7.0
+keep their own wording (for example *Approve with comments*).
 
 **Reviewing again.** Run it again on the same documents after they change. Each
 run is a new numbered version in the section (older ones are folded away), and
@@ -247,8 +299,8 @@ the reviewer first reports whether every earlier comment is resolved, partly
 resolved, still open or withdrawn. You can also ask the reviewer questions from
 the job page once it has finished.
 
-**Who ran it.** Each review's heading in the document says who ran it
-(*Review v2 · Architect · by Alex · run …*), so the comments can be traced to a
+**Who ran it.** Each review's heading in the document says who owns it and who ran
+it (*Review v2 · Architect · owner Priya · by Alex · run …*), so the comments can be traced to a
 person. **Document-review alerts** (see Settings) post a card to Google Chat when
 a review finishes.
 
@@ -258,6 +310,27 @@ work. The one thing it leaves in the project folder is `.opencode/agents/` — t
 reviewer's own agent files, installed there for every review, pull request or
 document — which you may want in your `.gitignore`. If the push fails the commit
 is kept as `refs/prism/docs/<run id>-<role>` in your clone.
+
+---
+
+## Asking about a job — the live chat
+
+Every job's page has an **OUTPUT** section: the reviewer's own log. Click **Chat ▸**
+in its corner to open the live chat beside it (OUTPUT keeps 70% of the width, CHAT
+gets 30%); click **◂ Hide chat** to close it again — what you asked is kept until
+the job is removed or PRISM closes.
+
+Ask anything about *this* job, in any state — queued, running, waiting for you,
+held, failed or finished, pull request or document: *what is it doing now?*, *which
+finding blocks it?*, *why is DR-2 a Major?* The answer comes from the job's details
+as they are at that moment (status, settings, verdict or decision, impact, scale,
+findings, comments and what OUTPUT has shown). If the details don't say, it tells
+you so; while a review is still running it won't guess the outcome.
+
+The chat is read-only and stays on topic: it won't approve, merge or edit anything
+(use a steering note while the job runs, or Retry), and it declines questions that
+aren't about this job. Asking never interrupts the review and never uses up a
+steering note. On the command line: `prism chat <job id> <question>`.
 
 ---
 

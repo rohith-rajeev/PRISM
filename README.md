@@ -1,8 +1,8 @@
 # PRISM
 
 Lightweight, project-agnostic desktop UI (Python **stdlib only** — Tkinter,
-no pip packages) that reviews AWS CodeCommit pull requests end-to-end for
-**any** repository, and reviews requirement and spec documents before work
+no pip packages) that reviews AWS CodeCommit pull requests and GitLab merge
+requests end-to-end for **any** repository, and reviews requirement and spec documents before work
 starts on them (see [Document review](#document-review)).
 
 ## Jobs
@@ -91,7 +91,22 @@ backend, the frontend, or both (either is optional), the **reviewer role**, an
 optional **requirements folder** (**Browse** to choose it, kept relative to the
 repository when it is inside one), the model and optional custom instructions.
 Document file names can be typed as paths from the repository root, or picked with
-**Browse…**, which lets you select several files at once.
+**Browse…**, which lets you select several files at once. Every document review also
+names its **owner** — the person who answers it, separate from the reviewer who ran
+PRISM — which is required and remembered for the next form.
+
+**Documents that are not on the branch.** Drop files on the document list (needs the
+*tkdnd* Tk extension) or click **Upload…** — text, Markdown, Word, PDF or Excel. An
+uploaded file is reviewed against the selected branch's code even though it isn't
+committed; its comments go into a copy next to it (`spec.prism-review.md`; a PDF gets
+a Markdown sidecar and is never changed), and it reaches the branch only at a
+destination path you type, with Commit on. With no repository at all, it is reviewed
+against itself and the requirements, and says no codebase was available.
+
+**The decision is binary.** PRISM, not the reviewer, decides: any open Blocker or
+Major comment, a large change, or a review cut short is **Request changes** (work may
+not start); otherwise **Approve** (work may start; Minor comments and suggestions are
+still written). Reviews written before v7.0 keep their own wording.
 
 **Who reviews.** Pick one persona; each reads the document through its own lens:
 
@@ -147,6 +162,39 @@ agent, writes the section, and refuses to write if anything outside the section
 would change. If the push is rejected because the branch moved, PRISM replays
 its one commit on top and pushes again; if that fails, the commit is kept under
 `refs/prism/docs/<run id>-<role>` in your clone and nothing is lost.
+
+## GitLab merge requests
+A pull-request job reads the host from the clone's `origin` remote. CodeCommit works as
+it always has; a GitLab remote (gitlab.com, or a self-managed server — add one whose
+name lacks "gitlab" with `prism config set gitlab_hosts <host>`) is reviewed as a merge
+request through the same stages and gates: review, findings written into the MR
+description (the author's text kept, a stale PRISM block replaced), merge check, sync
+(the target merged into the source with an ordinary merge commit, pushed without
+force; conflicts go through the usual per-hunk choices), then a **fast-forward merge
+only**, of exactly the commit that was reviewed (or the sync commit on top of it). A
+project whose merge method is not fast-forward — or an MR that is a draft, unapproved
+or waiting on a pipeline — is reviewed and described, and the job stops before
+merging. Access uses a token with the `api` scope from `GITLAB_TOKEN` or `prism config
+set gitlab_token` (also under Help); it is never written to a job record, a log, a card
+or a command line. An authentication or permission error stops the job with GitLab's
+own message. Merge requests from forks are refused. The AWS CLI is not needed for
+GitLab (`prism doctor --repo <clone> --pr <id>` checks the token, project and MR).
+
+## Large changes are never approved
+Every review — pull request or document — classifies the change as `normal` or
+`large` (very large or expensive to build, roll back or review safely). PRISM enforces
+the rules in code after reading the report: a large change scores at least 8/10, is
+Request changes (Block stays Block), and is never merged or offered for confirmation,
+whoever is asking — a person, the command line or a code-generation client. A report
+without a Scale line is asked once; still without one, an impact of 8 or more counts as
+large. A normal change with impact 7 or more still pauses for a person to confirm.
+
+## Live chat
+Each job's page shows the reviewer's log as **OUTPUT**. **Chat ▸** opens a live chat
+beside it (70/30) for questions about that job in any state; answers come from the
+job's details only, in a colleague's plain words, and it declines anything else. It is
+read-only and never steers the review or uses a steering round. Command line:
+`prism chat <job id> <question>`.
 
 ## Consistent reviews of the same change
 A change is often reviewed more than once — a retry, another PR, another branch,
@@ -317,6 +365,8 @@ cd ~/work/my-service        # a clone of the CodeCommit repository
 prism run 214               # review PR 214 here; Ctrl-C stops it cleanly
 prism run 214 -d            # same, in the background; survives logout
 prism run 214 --dry-run --no-merge -i "check the migration"
+cd ~/work/gitlab-app && prism run '!12'   # a GitLab clone: merge request !12
+prism chat 7f3a9c "which finding blocks it?"   # ask about a job, in any state
 ```
 
 `prism run` works out what it needs from where you are: the git repository you
@@ -328,9 +378,15 @@ Precedence is always: flag → saved default → inferred from the clone → bui
 
 ### Review documents
 
+Every `prism docs` run needs `--owner <name>` (who answers the review); it is left out
+of the examples below for brevity.
+
 ```bash
 cd ~/work/my-service                       # a clone, on the branch the documents are on
-prism docs docs/spec.md                    # review it; Ctrl-C stops it cleanly
+prism docs docs/spec.md --owner Priya      # review it; Ctrl-C stops it cleanly
+prism docs ~/Desktop/new-spec.md --owner Priya          # a file not on the branch
+prism docs ~/Desktop/new-spec.md --dest docs/specs/new-spec.md --owner Priya
+cd ~ && prism docs ~/Desktop/idea.docx --owner Priya     # no repository: no codebase
 prism docs docs/spec.md docs/decomp.md --branch feat/specs
 prism docs --be docs/spec.md --fe docs/ui-spec.md      # backend and frontend, one run
 prism docs docs/spec.md --persona architect          # as the Architect, no requirements

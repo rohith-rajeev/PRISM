@@ -480,7 +480,8 @@ else:                                         # a healthy review
     ev(type="text", sessionID=sid, part={{"type": "text", "id": "p1", "sessionID": sid,
        "text": {report!r}}})
 """
-    REPORT = ("**Verdict:** ✅ Approve\n**Impact score:** 2/10 — small\n\n### Findings\n"
+    REPORT = ("**Verdict:** ✅ Approve\n**Impact score:** 2/10 — small\n"
+              "**Scale:** normal — one file\n\n### Findings\n"
               "- **[Low] x — `app.py:6`** y\n\n### Summary\nCoverage: app.py.\n")
 
     def setUp(self):

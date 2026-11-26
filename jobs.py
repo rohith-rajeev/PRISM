@@ -16,6 +16,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+import chat as chat_mod
 import docreview
 from pathutil import native_path
 from orchestrator import (INTERNAL_SUMMARY_KEYS, REGION_DEFAULT, Cancelled, RunControl,
@@ -69,6 +70,12 @@ class JobSpec:
     # written onto the PR description and the chat card so the review can be
     # traced to someone; "" leaves both exactly as they were before it existed.
     reviewer: str = ""
+    # Where the request lives, fixed when the job is created (FR-GL-1, FR-X-1): a
+    # CodeCommit pull request, or a GitLab merge request - then `repo_name` is the
+    # GitLab project path ("group/sub/project"), `pr_id` the merge request's number
+    # and `host_url` the GitLab address. Never the token: that is read when used.
+    host: str = "codecommit"
+    host_url: str = ""
 
     def __post_init__(self):
         # Paths typed with either kind of slash are made valid for this OS.
@@ -81,8 +88,22 @@ class JobSpec:
     kind = "pr"
 
     @property
+    def is_gitlab(self):
+        return self.host == "gitlab"
+
+    @property
     def label(self):
+        if self.is_gitlab:
+            return f"{self.repo_name} !{self.pr_id}"
         return f"{self.repo_name} #{self.pr_id}"
+
+    @property
+    def dup_key(self):
+        """Two jobs on the same request would both write its description."""
+        # GitLab project paths are case-insensitive; CodeCommit names are not.
+        name = self.repo_name.lower() if self.is_gitlab else self.repo_name
+        return (self.host or "codecommit", (self.host_url or "").rstrip("/").lower(),
+                name, str(self.pr_id))
 
     @property
     def clone_key(self):
@@ -95,7 +116,7 @@ class JobSpec:
 
     def summary_bits(self):
         """Short descriptor for a jobs-list row."""
-        bits = [self.region]
+        bits = ["GitLab" if self.is_gitlab else self.region]
         if self.origin == "codegen":
             bits.insert(0, "via codegen")
         if not self.do_review:
@@ -114,7 +135,7 @@ class JobSpec:
                     do_merge=self.do_merge, do_sync=self.do_sync, dry_run=self.dry_run,
                     webhook_url=self.webhook_url,
                     custom_instructions=self.custom_instructions,
-                    reviewer=self.reviewer)
+                    reviewer=self.reviewer, host=self.host, host_url=self.host_url)
 
 
 class AskBridge:
@@ -184,6 +205,15 @@ class Job:
         self.session_id = ""
         self.followup_busy = False
         self.followup_control = None
+        # The live chat (FR-CHAT): its thread lives as long as the job does - kept across
+        # a retry, dropped with the job - and is never part of the OUTPUT log.
+        self.chat = []                  # [(role, text)]: role is "you" or "chat"
+        self.chat_open = False
+        self.chat_busy = False
+        self.chat_control = None
+        # What the finished run reported, as data (findings, per-document results,
+        # scale...): what the chat answers from, next to the status and the log.
+        self.data = {}
 
     # ----- plumbing -----
     def emit_event(self, kind, payload):
@@ -231,6 +261,45 @@ class Job:
     def label(self):
         return self.spec.label
 
+    def chat_details(self):
+        """The job's details right now, as chat.snapshot() reads them. UI thread only."""
+        spec, data = self.spec, self.data or {}
+        docs = getattr(spec, "kind", "pr") == "docs"
+        result = self.result if isinstance(self.result, dict) else {}
+        if docs:
+            settings = spec.summary_bits()
+            target = "; ".join(
+                (f"{t.label}: {t.repo_name} @ {t.branch}" if t.has_repo else t.label)
+                + " — " + ", ".join(list(t.files) + [f"{u.name} (uploaded"
+                                                     + (f", to {u.dest}" if u.dest else "")
+                                                     + ")" for u in t.uploads])
+                for t in spec.targets)
+            host = None
+        else:
+            settings = spec.summary_bits()
+            target = spec.label
+            host = "GitLab " + spec.host_url if getattr(spec, "is_gitlab", False) \
+                else f"CodeCommit ({spec.region})"
+        return {
+            "label": spec.label, "kind": "docs" if docs else "pr",
+            "status": self.status + (f" (waiting for the person: {self.pending_question}"
+                                     f")" if self.pending_question and
+                                     isinstance(self.pending_question, str) else ""),
+            "stages": dict(self.stages), "settings": settings, "host": host,
+            "target": target, "branches": self.branches,
+            "owner": getattr(spec, "owner", "") or None,
+            "reviewer": getattr(spec, "reviewer", "") or None,
+            "verdict": data.get("verdict") or self.verdict_raw,
+            "impact": self.impact or data.get("impact"),
+            "impact_reason": data.get("impact_reason"),
+            "scale": data.get("scale"), "scale_reason": data.get("scale_reason"),
+            "merged": result.get("merged") if "merged" in result else None,
+            "stopped": result.get("stopped") or None, "error": self.error,
+            "findings": data.get("findings") if data else None,
+            "documents": data.get("documents"),
+            "output": [t for t, tag in self.log if tag not in ("tool",)],
+        }
+
     @property
     def branches(self):
         """"source → dest", or "" until the pipeline has looked the PR up."""
@@ -243,7 +312,7 @@ class Job:
         if getattr(self.spec, "kind", "pr") == "docs":
             return "  ·  ".join([self.spec.label, self.spec.branches_text,
                                  self.spec.summary_bits()])
-        bits = [self.spec.label, self.spec.region]
+        bits = [self.spec.label, "GitLab" if self.spec.is_gitlab else self.spec.region]
         if self.spec.origin == "codegen":
             bits.append("via codegen")
         if self.branches:
@@ -257,6 +326,39 @@ class Job:
         if not self.spec.do_merge:
             bits.append("no auto-merge")
         return "  ·  ".join(bits)
+
+
+# The key of the "done" payload that carries run_data(): data for the job, not text.
+RUN_DATA_KEY = "_data"
+
+
+def run_data(summary):
+    """What a finished run reported, as plain JSON-safe data for the job (the live chat
+    reads it): findings, per-document results, and the review's verdict, impact and
+    scale. Never raises."""
+    try:
+        review = summary.get("review")
+        out = {"findings": list(summary.get("findings") or [])}
+        if review is not None:
+            out.update(verdict=getattr(review, "verdict_raw", "") or "",
+                       impact=getattr(review, "impact_score", "") or "",
+                       impact_reason=getattr(review, "impact_reason", "") or "",
+                       scale=getattr(review, "scale", "") or "",
+                       scale_reason=getattr(review, "scale_reason", "") or "")
+        results = summary.get("results")
+        if isinstance(results, list):
+            out["documents"] = [{
+                "file": r.get("path") or r.get("file"), "decision":
+                docreview.decision_words(r.get("verdict_key")),
+                "counts": docreview.counts_text(r.get("counts") or {}),
+                "impact": r.get("impact"), "scale": r.get("scale"), "copy": r.get("copy"),
+            } for r in results if isinstance(r, dict)]
+            if summary.get("decision"):
+                out["verdict"] = docreview.verdict_label(summary["decision"])
+            out["scale"] = summary.get("scale") or ""
+        return out
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 # Sentinel for retry(): "leave the job's model as it is" (None means the default model).
@@ -277,7 +379,7 @@ class JobManager:
 
     def __init__(self, out_q, runner=full_pipeline, max_parallel=None,
                  followup_runner=run_followup, on_outcome=None,
-                 doc_followup_runner=docreview.run_followup):
+                 doc_followup_runner=docreview.run_followup, chat_runner=None):
         self.out_q = out_q
         # Optional observer, called on the worker thread as
         # on_outcome(job, summary=..., error=..., stopped=...) once a run ends.
@@ -286,6 +388,7 @@ class JobManager:
         self._on_outcome = on_outcome
         self._followup_runner = followup_runner
         self._doc_followup_runner = doc_followup_runner
+        self._chat_runner = chat_runner or chat_mod.ask
         self.jobs = {}           # insertion-ordered; doubles as display order
         self._next_id = 1
         self._runner = runner
@@ -312,8 +415,7 @@ class JobManager:
                         job.spec.dup_key == spec.dup_key:
                     return job
                 continue
-            if (job.is_active and job.spec.repo_name == spec.repo_name
-                    and str(job.spec.pr_id) == str(spec.pr_id)):
+            if job.is_active and job.spec.dup_key == spec.dup_key:
                 return job
         return None
 
@@ -383,6 +485,7 @@ class JobManager:
         job.ask = AskBridge(job)
         job.thread = None
         job.pop_note()   # drop any note left over from the previous run
+        job.data = {}    # the chat thread itself is kept: it lives as long as the job
         return job
 
     # ----- scheduling -----
@@ -424,6 +527,8 @@ class JobManager:
             payload = {k: v if isinstance(v, bool) else str(v)[:160]
                       for k, v in summary.items() if k not in INTERNAL_SUMMARY_KEYS}
             payload["tokens"] = summary.get("tokens")
+            # What the run reported, as data for the live chat - not display text.
+            payload[RUN_DATA_KEY] = run_data(summary)
             job.emit_event("done", payload)
             self._notify(job, summary=summary)
         except Exception as e:  # noqa: BLE001
@@ -456,7 +561,10 @@ class JobManager:
         """
         job = self.jobs.get(job_id)
         text = (text or "").strip()
-        if job is None or not job.is_terminal or job.followup_busy or not text:
+        # A live-chat answer may be continuing the same reviewer session: never run two
+        # turns on one session at once.
+        if job is None or not job.is_terminal or job.followup_busy or job.chat_busy \
+                or not text:
             return None
         job.followup_busy = True
         job.followup_control = RunControl()
@@ -493,7 +601,9 @@ class JobManager:
                     text, spec.project_dir, spec.repo_name, spec.pr_id,
                     local_repo=spec.local_repo, region=spec.region, model=spec.model,
                     session_id=job.session_id or None, outcome=outcome,
-                    emit=emit, control=control)
+                    emit=emit, control=control,
+                    **({"host": spec.host, "host_url": spec.host_url}
+                       if spec.is_gitlab else {}))
             if sid:
                 emit(sid, "session")
             reason = followup_declined(reply)
@@ -508,6 +618,50 @@ class JobManager:
         finally:
             if not control.cancelled():
                 job.emit_event("followup_done", None)
+
+    # ----- live chat, in any state -----
+    def start_chat(self, job_id, text):
+        """Ask the live chat a question about a job, whatever state it is in.
+
+        Returns the job when the question was taken, None when it cannot be (unknown
+        job, empty text, or an answer still on its way). It never queues a steering
+        note, never counts as a steering round and never touches the running review:
+        while the job is active the answer comes from a snapshot of its details in a
+        session of its own. Call from the UI thread (the snapshot reads the Job).
+        """
+        job = self.jobs.get(job_id)
+        text = (text or "").strip()
+        if job is None or not text or job.chat_busy:
+            return None
+        job.chat.append(("you", text))
+        job.chat_busy = True
+        job.chat_control = RunControl()
+        details = chat_mod.snapshot(job.chat_details())
+        # The reviewer's own session only once it is finished with and free.
+        session = job.session_id if (job.is_terminal and not job.followup_busy) else None
+        threading.Thread(target=self._chat_work,
+                         args=(job, text, details, session, job.chat_control),
+                         daemon=True).start()
+        return job
+
+    def _chat_work(self, job, text, details, session, control):
+        spec = job.spec
+        try:
+            reply, _how = self._chat_runner(
+                text, details, spec.label, getattr(spec, "kind", "pr"), spec.project_dir,
+                model=spec.model, session_id=session or None, control=control)
+        except Cancelled:
+            reply = None
+        except Exception as e:  # noqa: BLE001
+            reply = f"I couldn't answer that just now ({str(e)[:300]})."
+        if not control.cancelled():
+            job.emit_event("chat", reply)
+
+    def _cancel_chat(self, job):
+        ctl, job.chat_control = job.chat_control, None
+        job.chat_busy = False
+        if ctl is not None:
+            ctl.cancel()
 
     # ----- control -----
     def stop(self, job_id):
@@ -527,6 +681,7 @@ class JobManager:
             self.stop(job_id)
         for job in self.jobs.values():
             self._cancel_followup(job)
+            self._cancel_chat(job)
 
     def remove(self, job_id):
         """Drop a finished job. Active jobs are stopped first."""
@@ -536,6 +691,7 @@ class JobManager:
         if job.is_active:
             self.stop(job_id)
         self._cancel_followup(job)
+        self._cancel_chat(job)
         self.jobs.pop(job_id, None)
 
     def active_jobs(self):

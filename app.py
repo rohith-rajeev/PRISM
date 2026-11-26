@@ -43,6 +43,7 @@ import folderpicker  # noqa: E402
 import prism_cli as PC  # noqa: E402
 import jobs as J  # noqa: E402
 import docreview as DR  # noqa: E402
+import gitlab as GL  # noqa: E402
 import updater as U  # noqa: E402
 from pathutil import native_path  # noqa: E402
 from orchestrator import TOOL_DIR  # noqa: E402
@@ -804,6 +805,113 @@ class AgentPanel(RoundedCard):
         self._on_skip()
 
 
+_DND = {}
+
+
+def _dnd_available(widget):
+    """Whether this Tk can take files dropped from the desktop (the tkdnd extension)."""
+    if "ok" not in _DND:
+        try:
+            widget.tk.call("package", "require", "tkdnd")
+            _DND["ok"] = True
+        except tk.TclError:
+            _DND["ok"] = False
+    return _DND["ok"]
+
+
+class ChatPane(tk.Frame):
+    """The live chat about the open job (FR-CHAT): its own transcript, an input and an
+    Ask button, titled CHAT. It never shows the reviewer's log - that is OUTPUT - and
+    the person's questions and the chat's answers are told apart line by line."""
+
+    HINT = "Ask about this job — its status, verdict or findings…"
+
+    def __init__(self, parent, on_send):
+        super().__init__(parent, bg=PAL["log_bg"])
+        self._on_send = on_send
+        self.title = tk.Label(self, text="CHAT", font=FONT_XS, bg=PAL["log_bg"],
+                              fg=PAL["muted"], anchor="w")
+        self.title.pack(fill="x")
+        row = tk.Frame(self, bg=PAL["log_bg"])
+        row.pack(side="bottom", fill="x", pady=(4, 0))
+        self.entry = tk.Entry(row, font=FONT_S, bg=PAL["field"], fg=PAL["text"],
+                              insertbackground=PAL["text"], relief="flat", width=1,
+                              highlightthickness=1, highlightbackground=PAL["border"],
+                              highlightcolor=PAL["accent"])
+        self.entry.pack(side="left", fill="x", expand=True, ipady=3, padx=(0, 6))
+        _add_placeholder(self.entry, self.HINT)
+        self.entry.bind("<Return>", lambda _e: self._send())
+        self.send_btn = RoundedButton(row, text="Ask", command=self._send, style="outline",
+                                      height=28, width=56, font=FONT_S)
+        self.send_btn.pack(side="left")
+        self.text = tk.Text(self, height=3, width=1, font=FONT_S, bg=PAL["log_bg"],
+                            fg=PAL["log_fg"], relief="flat", wrap="word",
+                            highlightthickness=0, borderwidth=0, state="disabled")
+        self.text.pack(fill="both", expand=True, pady=(4, 0))
+        self.text.tag_config("you", foreground=PAL["accent_text"], font=FONT_B)
+        self.text.tag_config("who", foreground=PAL["muted"], font=FONT_XS)
+        self.text.tag_config("chat", foreground=PAL["log_fg"])
+        self.text.tag_config("ph", foreground=PAL["log_ph"])
+
+    def _send(self):
+        text = _entry_value(self.entry).strip()
+        if not text:
+            return
+        if self._on_send(text):
+            self.entry.delete(0, "end")
+            _restore_placeholder(self.entry)
+
+    def render(self, thread, busy=False):
+        self.text.config(state="normal")
+        self.text.delete("1.0", "end")
+        if not thread and not busy:
+            self.text.insert("end", "Ask anything about this job. Answers come from its "
+                                    "details, in any state; nothing is changed.", "ph")
+        for role, line in thread:
+            if role == "you":
+                self.text.insert("end", "You\n", "who")
+                self.text.insert("end", line + "\n\n", "you")
+            else:
+                self.text.insert("end", "PRISM chat\n", "who")
+                self.text.insert("end", line + "\n\n", "chat")
+        if busy:
+            self.text.insert("end", "Answering…", "ph")
+        self.text.config(state="disabled")
+        self.text.see("end")
+        self.send_btn.set_enabled(not busy)
+
+
+class OutputSplit(tk.Frame):
+    """The job details' output section: OUTPUT alone while the chat is collapsed, and
+    split 70/30 with CHAT when it is expanded - the same ratio at any width, never
+    stacked and never hiding the output (FR-CHAT-1b)."""
+
+    OUTPUT_SHARE = 0.7
+
+    def __init__(self, parent, on_send, bg_key="log_bg"):
+        super().__init__(parent, bg=PAL[bg_key], height=60)
+        self.out = tk.Frame(self, bg=PAL[bg_key])
+        self.chat = ChatPane(self, on_send)
+        self.is_open = None
+        self.set_open(False)
+
+    def set_open(self, is_open):
+        is_open = bool(is_open)
+        if is_open == self.is_open:
+            return
+        self.is_open = is_open
+        if is_open:
+            self.out.place(relx=0, rely=0, relwidth=self.OUTPUT_SHARE, relheight=1,
+                           width=-6)
+            self.chat.place(relx=self.OUTPUT_SHARE, rely=0,
+                            relwidth=1 - self.OUTPUT_SHARE, relheight=1)
+        else:
+            self.chat.place_forget()
+            # width=0 explicitly: place() keeps options from the previous call, and the
+            # gap left for the chat must not survive its closing.
+            self.out.place(relx=0, rely=0, relwidth=1, relheight=1, width=0)
+
+
 class Dialog(tk.Toplevel):
     """Modal in PRISM's own palette.
 
@@ -1356,12 +1464,16 @@ class CliJobRow(RoundedCard):
             bits.append(_since(time.time() - started))
         bits += [record.get("branches") or "", where or ""]
         spec = record.get("spec") or {}
-        bits.append(spec.get("region") or "")
+        if spec.get("kind") == "docs":
+            bits.append(f"owner {spec['owner']}" if spec.get("owner") else "")
+        else:
+            bits.append("GitLab" if spec.get("host") == "gitlab" else (spec.get("region") or ""))
         self.title.config(text=CJ.label(record))
         self.sub.config(text="  ·  ".join(b for b in bits if b))
         if record.get("verdict") and not active:
-            key = _verdict_key_of(record["verdict"])
-            self.verdict.config(text=record["verdict"][:26], fg=PAL[_verdict_colour(key)])
+            shown = _record_verdict_text(record)
+            key = _verdict_key_of(shown)
+            self.verdict.config(text=shown[:26], fg=PAL[_verdict_colour(key)])
         elif status == J.ERROR and record.get("error"):
             self.verdict.config(text=record["error"].splitlines()[0][:26], fg=PAL["bad"])
         else:
@@ -1375,6 +1487,14 @@ class CliJobRow(RoundedCard):
             self.action_btn.set_command(lambda: self._cb_retry(self._id()))
             self.action_btn.set_enabled(True)
         self.del_btn.set_enabled(not active)
+
+
+def _record_verdict_text(record):
+    """A CLI record's verdict as words: a document's is stored as its decision key."""
+    verdict = record.get("verdict") or ""
+    if (record.get("spec") or {}).get("kind") == "docs" and verdict in DR.DECISIONS:
+        return DR.decision_words(verdict)
+    return verdict
 
 
 def _since(seconds):
@@ -2209,6 +2329,14 @@ class DocReviewForm(tk.Frame):
         RoundedButton(frow, text="Browse", command=self._browse, style="outline",
                       height=32, width=110).pack(side="left")
         self.hint = self._hint_label(pi, "", pady=(4, 0))
+        # Who owns the request: the person responsible for the document and for
+        # answering the review - not the reviewer (that is whoever runs PRISM). Required.
+        lab(pi, "Owner of this review request").pack(anchor="w", pady=(8, 2))
+        self.owner_var = tk.StringVar(value=CFG.get_last_owner())
+        entry(pi, self.owner_var).pack(fill="x", ipady=3)
+        self._hint_label(pi, "The person responsible for the document and for answering "
+                             "the review. Shown on the chat card and in the document.",
+                         pady=(2, 0))
 
         # ---- the repositories whose documents are reviewed ----
         self.reporow = tk.Frame(body, bg=PAL["page"])
@@ -2352,10 +2480,25 @@ class DocReviewForm(tk.Frame):
                                command=lambda r=role: self._browse_files(r),
                                style="outline", height=26, width=116, font=FONT_XS)
         browse.pack(side="left", padx=(0, 8))
+        upload = RoundedButton(brow, text="Upload…",
+                               command=lambda r=role: self._upload_files(r),
+                               style="outline", height=26, width=84, font=FONT_XS)
+        upload.pack(side="left", padx=(0, 8))
         self._hint_label(brow, "Pick several, or type paths from the repository root "
-                               "(one per line or comma separated).", inline=True)
-        return {"card": card, "title": title, "sub": sub, "picker": picker,
-                "branch": branch_var, "files": files, "browse": browse, "col": col}
+                               "(one per line or comma separated). Upload, or drop files "
+                               "here, to review files that are not on the branch.",
+                         inline=True)
+        # Uploaded documents: listed by name, each removable, each with an optional
+        # path to commit it to - empty until the person fills it in (FR-DOC-IN-10).
+        ulist = tk.Frame(inner, bg=PAL["card"])
+        ulist.pack(fill="x", pady=(4, 0))
+        uhint = self._hint_label(inner, "", pady=(2, 0))
+        c = {"card": card, "title": title, "sub": sub, "picker": picker,
+             "branch": branch_var, "files": files, "browse": browse, "upload": upload,
+             "col": col, "ulist": ulist, "uhint": uhint, "uploads": []}
+        for widget in (card, inner, files, ulist):
+            self._register_drop(widget, role)
+        return c
 
     PERSONA_HINTS = {
         "ba": "Functional: do the requirements and the document align, with each other and "
@@ -2466,6 +2609,115 @@ class DocReviewForm(tk.Frame):
             return finish(None)
         self._dialog(lambda: folderpicker.pick_files(title, repo), finish)
 
+    # ----- uploaded documents -----
+    def _register_drop(self, widget, role):
+        """Accept files dropped from the desktop, when this Tk has the tkdnd extension.
+
+        Tk has no drag-and-drop of its own; tkdnd is the standard extension for it. Where
+        it is missing the Upload button does the same job.
+        """
+        if not _dnd_available(self):
+            return
+        try:
+            cmd = self.register(lambda data, r=role: self._dropped(r, data))
+            self.tk.call("tkdnd::drop_target", "register", widget._w, "DND_Files")
+            self.tk.call("bind", widget._w, "<<Drop:DND_Files>>", cmd + " %D")
+        except tk.TclError:
+            pass
+
+    def _dropped(self, role, data):
+        try:
+            paths = list(self.tk.splitlist(data))
+        except tk.TclError:
+            paths = []
+        self.add_uploads(role, paths)
+        return "copy"
+
+    def _upload_files(self, role):
+        title = "Upload document(s) to review"
+        start = self.proj_var.get().strip() or str(Path.home())
+
+        def finish(paths):
+            if paths is None:        # no native chooser, or it could not open
+                paths = list(filedialog.askopenfilenames(title=title, initialdir=start))
+            if paths:
+                self.add_uploads(role, paths)
+        if not folderpicker.native_available():
+            return finish(None)
+        self._dialog(lambda: folderpicker.pick_files(title, start), finish)
+
+    def add_uploads(self, role, paths):
+        """Add dropped or uploaded files to a card's list. One drop or upload may hold
+        several files; they join the list, never replace it (FR-DOC-IN-3). A type a
+        review cannot read is named on the form and not added (FR-DOC-IN-4)."""
+        card = self.cards[role]
+        have = {u["path"] for u in card["uploads"]}
+        refused, in_repo = [], []
+        clone = dict(self.detected).get(card["picker"].get().strip())
+        for raw in paths or []:
+            path = native_path(str(raw))
+            if not path:
+                continue
+            p = Path(path)
+            bad = DR.upload_type_problem(p)
+            if bad or not p.is_file():
+                refused.append(bad or f"{p.name}: not a file.")
+                continue
+            path = str(p.resolve())
+            if clone:
+                rels, _skipped = DR.repo_relative([path], clone)
+                if rels:
+                    # Inside the selected repository: a document on the branch, as the
+                    # command line treats it - and never a review copy in your checkout.
+                    in_repo += rels
+                    continue
+            if path in have:
+                continue
+            have.add(path)
+            self._add_upload_row(card, path, "")
+        if in_repo:
+            typed = list(DR.parse_files(card["files"].get("1.0", "end")))
+            merged = typed + [r for r in in_repo if r not in typed]
+            card["files"].delete("1.0", "end")
+            card["files"].insert("1.0", "\n".join(merged))
+        card["uhint"].config(text="Not added — " + " ".join(refused) if refused else "",
+                             fg=PAL["bad"] if refused else PAL["muted"])
+        self.app._repaint(card["card"])
+
+    def _add_upload_row(self, card, path, dest):
+        row = tk.Frame(card["ulist"], bg=PAL["card"])
+        row.pack(fill="x", pady=1)
+        name = tk.Label(row, text="⬆ " + Path(path).name, font=FONT_S, bg=PAL["card"],
+                        fg=PAL["text"], anchor="w")
+        name.pack(side="left")
+        Tooltip(name, lambda p=path: p)
+        dest_var = tk.StringVar()
+        item = {"path": path, "dest": dest_var, "row": row}
+        rm = tk.Label(row, text="✕", font=FONT_S, bg=PAL["card"], fg=PAL["muted"],
+                      cursor="hand2", padx=6)
+        rm.pack(side="right")
+        rm.bind("<Button-1>", lambda _e, c=card, i=item: self._remove_upload(c, i))
+        entry = self.app._entry(row, dest_var, mono=True)
+        entry.pack(side="right", fill="x", expand=True, ipady=1, padx=(8, 0))
+        _add_placeholder(entry, "commit to (optional): path/in/repo" + Path(path).suffix)
+        if dest:
+            entry.delete(0, "end")
+            entry.insert(0, dest)
+            entry._has_ph = False  # noqa: SLF001
+            entry.config(fg=PAL["text"])
+        item["entry"] = entry
+        card["uploads"].append(item)
+
+    def _remove_upload(self, card, item):
+        if item in card["uploads"]:
+            card["uploads"].remove(item)
+        item["row"].destroy()
+        self.app._repaint(card["card"])
+
+    def _uploads_of(self, role):
+        return tuple(DR.Upload(u["path"], _entry_value(u["entry"]).strip())
+                     for u in self.cards[role]["uploads"])
+
     def _canvas_resized(self, _e):
         self.scroll._fit_region()
 
@@ -2511,8 +2763,9 @@ class DocReviewForm(tk.Frame):
                 self.cards["BE"]["picker"].set_custom(name)
                 self._set_hint(f"Single repository: {name}.", "muted")
             else:
-                self._set_hint("No local clones found — a document review needs a clone "
-                               "of the repository to read and commit in.", "warn")
+                self._set_hint("No local clones found. Upload the document(s) to review "
+                               "them without a codebase, or pick a folder with a clone.",
+                               "warn")
         else:
             self.mode = "multi"
             self.detected = subs
@@ -2557,10 +2810,30 @@ class DocReviewForm(tk.Frame):
 
     def _used(self, role):
         c = self.cards[role]
-        return bool(c["branch"].get().strip() or DR.parse_files(c["files"].get("1.0", "end")))
+        return bool(c["branch"].get().strip() or DR.parse_files(c["files"].get("1.0", "end"))
+                    or c["uploads"])
+
+    def _no_repo(self):
+        """True when this is a review of uploaded files with no repository at all
+        (FR-DOC-IN-7): one card, uploads only, no clone, branch or typed path."""
+        if self.mode != "single":
+            return False
+        c = self.cards["BE"]
+        return bool(c["uploads"]) and not (
+            dict(self.detected).get(c["picker"].get().strip())
+            or c["branch"].get().strip() or DR.parse_files(c["files"].get("1.0", "end")))
 
     def problem(self):
         """(title, message) for what is wrong with the form, or None when ready."""
+        if not CFG.clean_username(self.owner_var.get()):
+            return "Owner", ("Enter the owner of this review request - the person responsible "
+                             "for the document and for answering the review.")
+        if self._no_repo():
+            for u in self._uploads_of("BE"):
+                if u.dest:
+                    return "Uploaded documents", (f"{u.name}: a path to commit to needs a "
+                                                  f"repository and a branch.")
+            return None
         if not Path(self.proj_var.get().strip()).is_dir():
             return "Project folder", "Pick a valid root folder first."
         by_name = dict(self.detected)
@@ -2583,8 +2856,8 @@ class DocReviewForm(tk.Frame):
             bad = DR.check_branch(c["branch"].get())
             if bad:
                 return label, f"{bad[0].upper()}{bad[1:]}."
-            if not DR.parse_files(c["files"].get("1.0", "end")):
-                return label, "Enter the document file name(s) to review."
+            if not DR.parse_files(c["files"].get("1.0", "end")) and not c["uploads"]:
+                return label, "Enter or upload the document(s) to review."
             if by_name[name] in seen:
                 return "Mapping", "Backend and Frontend point to the same clone."
             seen[by_name[name]] = role
@@ -2593,7 +2866,10 @@ class DocReviewForm(tk.Frame):
     def build_spec(self):
         by_name = dict(self.detected)
         targets = []
-        for role in self._active():
+        if self._no_repo():
+            targets.append(DR.DocTarget(role=DR.ROLE_NONE, repo_name="", local_repo="",
+                                        branch="", files=(), uploads=self._uploads_of("BE")))
+        for role in (() if targets else self._active()):
             if not self._used(role):
                 continue
             c = self.cards[role]
@@ -2601,9 +2877,12 @@ class DocReviewForm(tk.Frame):
             targets.append(DR.DocTarget(
                 role="repo" if self.mode == "single" else role, repo_name=name,
                 local_repo=by_name[name], branch=c["branch"].get().strip(),
-                files=DR.parse_files(c["files"].get("1.0", "end"))))
+                files=DR.parse_files(c["files"].get("1.0", "end")),
+                uploads=self._uploads_of(role)))
+        proj = self.proj_var.get().strip()
         return DR.DocJobSpec(
-            project_dir=self.proj_var.get().strip(), targets=tuple(targets),
+            owner=self.owner_var.get(),
+            project_dir=proj if Path(proj).is_dir() else "", targets=tuple(targets),
             requirements_path=self.req_var.get().strip(), persona=self.persona_var.get(),
             model=self.model_picker.get() or None,
             do_commit=self.commit_var.get(), do_push=self.push_var.get(),
@@ -2626,17 +2905,25 @@ class DocReviewForm(tk.Frame):
         self._sync_stages()
         self.instr_text.delete("1.0", "end")
         self.instr_text.insert("1.0", spec.custom_instructions or "")
+        if getattr(spec, "owner", ""):
+            self.owner_var.set(spec.owner)
         for c in self.cards.values():
             c["branch"].set("")
             c["files"].delete("1.0", "end")
+            for item in list(c["uploads"]):
+                self._remove_upload(c, item)
         for t in spec.targets:
-            role = "BE" if (t.role == "repo" or self.mode == "single") else t.role
+            role = "BE" if (t.role in ("repo", DR.ROLE_NONE) or self.mode == "single") \
+                else t.role
             c = self.cards.get(role)
             if c is None:
                 continue
-            c["picker"].set_custom(t.repo_name)
+            if t.has_repo:
+                c["picker"].set_custom(t.repo_name)
             c["branch"].set(t.branch)
             c["files"].insert("1.0", "\n".join(t.files))
+            for u in t.uploads:
+                self._add_upload_row(c, u.path, u.dest)
 
     def set_models(self, models, hint=None):
         self.model_picker.set_models(models)
@@ -2853,14 +3140,22 @@ class App(tk.Tk):
 
         head = tk.Frame(parent, bg=PAL["page"])
         head.pack(fill="x")
-        tk.Label(head, text="CONVERSATION", font=FONT_XS, bg=PAL["page"],
+        tk.Label(head, text="OUTPUT", font=FONT_XS, bg=PAL["page"],
                  fg=PAL["muted"]).pack(side="left", padx=(4, 0))
+        self.cli_chat_toggle = tk.Label(head, text="Chat ▸", font=FONT_XS, bg=PAL["page"],
+                                        fg=PAL["accent_text"], cursor="hand2", padx=6)
+        self.cli_chat_toggle.pack(side="right")
+        self.cli_chat_toggle.bind("<Button-1>", lambda _e: self._toggle_cli_chat())
         tk.Label(head, text="Started from the command line - updates live",
                  font=FONT_XS, bg=PAL["page"], fg=PAL["muted"]).pack(side="right")
         self._link(head, "Save log…", lambda: self._save_log_bundle("cli"),
                    bg=PAL["page"]).pack(side="right", padx=(0, 12))
-        body = tk.Frame(parent, bg=PAL["log_bg"])
-        body.pack(fill="both", expand=True, pady=(4, 0))
+        # {job id: {"thread": [(role, text)], "open": bool, "busy": bool}} - in memory
+        # only, like a desktop job's chat.
+        self.cli_chat = {}
+        self.cli_split = OutputSplit(parent, on_send=self._send_cli_chat)
+        self.cli_split.pack(fill="both", expand=True, pady=(4, 0))
+        body = self.cli_split.out
         self.cli_log = tk.Text(body, height=4, font=_mono(), bg=PAL["log_bg"],
                                fg=PAL["log_fg"], relief="flat", wrap="word",
                                highlightthickness=0, borderwidth=0, state="disabled")
@@ -2873,6 +3168,43 @@ class App(tk.Tk):
         self.cli_log.tag_config("ok", foreground=PAL["good"])
         self.cli_log.tag_config("warn", foreground=PAL["warn"])
         self.cli_log.tag_config("err", foreground=PAL["bad"])
+
+    def _cli_chat_state(self, job_id):
+        return self.cli_chat.setdefault(job_id, {"thread": [], "open": False, "busy": False})
+
+    def _render_cli_chat(self):
+        if not self.cli_detail_id:
+            return
+        st = self._cli_chat_state(self.cli_detail_id)
+        self.cli_split.set_open(st["open"])
+        self.cli_chat_toggle.config(text="◂ Hide chat" if st["open"] else "Chat ▸")
+        self.cli_split.chat.render(st["thread"], busy=st["busy"])
+
+    def _toggle_cli_chat(self):
+        if not self.cli_detail_id:
+            return
+        st = self._cli_chat_state(self.cli_detail_id)
+        st["open"] = not st["open"]
+        self._render_cli_chat()
+
+    def _send_cli_chat(self, text):
+        job_id = self.cli_detail_id
+        record = CJ.load(job_id) if job_id else None
+        st = self._cli_chat_state(job_id) if job_id else None
+        if record is None or st is None or st["busy"]:
+            return False
+        st["thread"].append(("you", text))
+        st["busy"] = True
+
+        def work():
+            try:
+                reply, _how = PC.chat_reply(record, text)
+            except Exception as e:  # noqa: BLE001
+                reply = f"I couldn't answer that just now ({str(e)[:300]})."
+            self.log_q.put((None, "cli_chat", (job_id, reply)))
+        threading.Thread(target=work, daemon=True).start()
+        self._render_cli_chat()
+        return True
 
     def show_cli_detail(self, job_id):
         record = next((r for r in self.cli_records if r.get("id") == job_id), None) \
@@ -2889,6 +3221,7 @@ class App(tk.Tk):
         self.cli_log.delete("1.0", "end")
         self.cli_log.config(state="disabled")
         self._render_cli_detail_header()
+        self._render_cli_chat()
         self._poll_cli_log(force=True)
         self._refresh_pill()
 
@@ -2918,9 +3251,9 @@ class App(tk.Tk):
         self.cli_d_title.config(text=CJ.label(record))
         self.cli_d_sub.config(text="  ·  ".join(b for b in bits if b))
         if record.get("verdict") and not active:
-            key = _verdict_key_of(record["verdict"])
-            self.cli_d_verdict.config(text=record["verdict"][:40],
-                                      fg=PAL[_verdict_colour(key)])
+            shown = _record_verdict_text(record)
+            key = _verdict_key_of(shown)
+            self.cli_d_verdict.config(text=shown[:40], fg=PAL[_verdict_colour(key)])
         elif status == J.ERROR and record.get("error"):
             self.cli_d_verdict.config(text=record["error"].splitlines()[0][:60],
                                       fg=PAL["bad"])
@@ -3052,14 +3385,21 @@ class App(tk.Tk):
         self.username_var = tk.StringVar(value=CFG.get_username())
         self.webhook_var = tk.StringVar(value=CFG.get_webhook_url())
         self.docs_webhook_var = tk.StringVar(value=CFG.get_docs_webhook_url())
+        # The token is a secret: the field starts empty and never shows a saved one;
+        # the status beside it says whether one is set (masked). Empty + Save clears it.
+        self.gitlab_token_var = tk.StringVar(value="")
         rows = (("Your name", self.username_var, self._save_username, "username"),
                 ("PR review webhook", self.webhook_var, self._save_webhook, "webhook"),
                 ("Document review webhook", self.docs_webhook_var, self._save_docs_webhook,
-                 "docs_webhook"))
+                 "docs_webhook"),
+                ("GitLab token", self.gitlab_token_var, self._save_gitlab_token,
+                 "gitlab_token"))
         for r, (label, var, save, key) in enumerate(rows):
             self._lab(grid, label, font=FONT_S, fg="text").grid(
                 row=r, column=0, sticky="w", padx=(0, 10), pady=3)
             entry = self._entry(grid, var)
+            if key == "gitlab_token":
+                entry.config(show="•")
             entry.grid(row=r, column=1, sticky="ew", ipady=3, pady=3)
             RoundedButton(grid, text="Save", command=save, style="outline", height=30,
                           width=70, font=FONT_S).grid(row=r, column=2, padx=(8, 8), pady=3)
@@ -3072,6 +3412,7 @@ class App(tk.Tk):
         self._refresh_username_status()
         self._refresh_webhook_status()
         self._refresh_docs_webhook_status()
+        self._refresh_gitlab_token_status()
 
         # Optional link to codegen (the code-generation tool): when on, PRISM
         # listens on loopback for PRs codegen opens and reports verdicts back.
@@ -3138,6 +3479,17 @@ class App(tk.Tk):
     def _save_docs_webhook(self):
         CFG.set_docs_webhook_url(self.docs_webhook_var.get())
         self._refresh_docs_webhook_status()
+
+    def _save_gitlab_token(self):
+        GL.set_token(self.gitlab_token_var.get())
+        self.gitlab_token_var.set("")
+        self._refresh_gitlab_token_status()
+
+    def _refresh_gitlab_token_status(self):
+        token = GL.get_token()
+        self.gitlab_token_status.config(
+            text=f"✓ Set ({GL.mask(token)})" if token else "Not set — needed for GitLab",
+            fg=PAL["good"] if token else PAL["muted"])
 
     def _refresh_docs_webhook_status(self):
         configured = bool(CFG.get_docs_webhook_url())
@@ -3329,6 +3681,16 @@ class App(tk.Tk):
         self._entry(c3, self.region_var, width=14).pack(ipady=3)
         self.clone_hint = self._lab(pi, "", font=FONT_XS, fg="muted")
         self.clone_hint.pack(anchor="w", pady=(4, 0))
+        # The host and project PRISM detected from the chosen clone's remote (FR-GL-2).
+        # The project can be corrected; the host cannot: it is whatever the remote is.
+        self.host_row = tk.Frame(pi, bg=PAL["card"])
+        self.host_row.pack(fill="x", pady=(4, 0))
+        self.host_lab = self._lab(self.host_row, "", font=FONT_XS, fg="muted")
+        self.host_lab.pack(side="left")
+        self.gl_project_var = tk.StringVar()
+        self.gl_project_entry = self._entry(self.host_row, self.gl_project_var, mono=True)
+        self._host_info = GL.classify_remote("")
+        self._host_clone = None
         # detection state — filled by _refresh_detection()
         self.repo_var = tk.StringVar()
         self.target_var = tk.StringVar(value="BE")
@@ -3361,7 +3723,8 @@ class App(tk.Tk):
                           fg=PAL["muted"], anchor="w")
             lb.pack(anchor="w", pady=(0, 2))
             picker = Picker(col, title=title, empty_label=empty_label,
-                            group_key=lambda m: "", empty_hint="No clones detected")
+                            group_key=lambda m: "", empty_hint="No clones detected",
+                            on_change=lambda _v: self._refresh_host())
             picker.pack(fill="x")
             return picker
 
@@ -3532,9 +3895,15 @@ class App(tk.Tk):
         li.config(padx=10, pady=8)
         lhead = tk.Frame(li, bg=PAL["log_bg"])
         lhead.pack(fill="x")
-        lt = tk.Label(lhead, text="CONVERSATION", font=FONT_XS,
+        # OUTPUT is the reviewer's own transcript, whatever the chat is doing; the
+        # title never changes (FR-CHAT-1a).
+        lt = tk.Label(lhead, text="OUTPUT", font=FONT_XS,
                       bg=PAL["log_bg"], fg=PAL["muted"])
         lt.pack(side="left")
+        self.chat_toggle = tk.Label(lhead, text="Chat ▸", font=FONT_XS, bg=PAL["log_bg"],
+                                    fg=PAL["accent_text"], cursor="hand2", padx=6)
+        self.chat_toggle.pack(side="right")
+        self.chat_toggle.bind("<Button-1>", lambda _e: self._toggle_chat())
         # Clearing belongs to the log, not to a full-width button competing
         # with the primary action for attention.
         self.clear_btn = tk.Label(lhead, text="Clear", font=FONT_XS, bg=PAL["log_bg"],
@@ -3545,8 +3914,10 @@ class App(tk.Tk):
         self.clear_btn.bind("<Leave>", lambda e: e.widget.config(fg=PAL["muted"]))
         self._link(lhead, "Save log…", lambda: self._save_log_bundle("job"),
                    bg=PAL["log_bg"]).pack(side="right")
-        lbody = tk.Frame(li, bg=PAL["log_bg"])
-        lbody.pack(fill="both", expand=True, pady=(4, 0))
+        # The output section, shared with the live chat when it is open.
+        self.out_split = OutputSplit(li, on_send=self._send_chat)
+        self.out_split.pack(fill="both", expand=True, pady=(4, 0))
+        lbody = self.out_split.out
         self.log = tk.Text(lbody, height=4, font=_mono(), bg=PAL["log_bg"],
                            fg=PAL["log_fg"], insertbackground=PAL["log_fg"],
                            relief="flat", wrap="word",
@@ -3763,7 +4134,7 @@ class App(tk.Tk):
             self.detected = []
             self.single_path = None
             self._place_midrow()
-            self._rebuild_target_row()
+            self._refresh_host()
             self._set_hint("Select your project folder to begin — "
                            "PRISM scans it for git clones.", "muted")
             return
@@ -3775,7 +4146,7 @@ class App(tk.Tk):
             self.detected = []
             self.single_path = None
             self._place_midrow()
-            self._rebuild_target_row()
+            self._refresh_host()
             self._set_hint("Select a valid root folder.", "bad")
             return
         root_is_repo = (base / ".git").exists()
@@ -3810,6 +4181,7 @@ class App(tk.Tk):
             self._set_hint(f"{len(subs)} clones detected — confirm backend / frontend "
                            f"mapping below.", "muted")
         self._rebuild_target_row()
+        self._refresh_host()
 
     def _auto_guess(self, names):
         """Pre-fill BE/FE mapping from generic folder-name conventions."""
@@ -3843,6 +4215,11 @@ class App(tk.Tk):
             self.tbe_btn.pack(side="left", padx=(0, 6))
             self.tfe_btn.pack(side="left")
             self._set_target(self.target_var.get() or "BE")
+        elif getattr(self, "_host_info", {}).get("host") == GL.HOST_GITLAB:
+            # The project field is on the Host line; the PR id is the MR number.
+            self._lab(self.leftbox, "GitLab merge request").pack(anchor="w", pady=(0, 4))
+            self._lab(self.leftbox, "project is shown below; enter the MR number as the id",
+                      font=FONT_XS).pack(anchor="w", ipady=6)
         else:
             self._lab(self.leftbox, "CodeCommit repo").pack(anchor="w", pady=(0, 4))
             self._entry(self.leftbox, self.repo_var).pack(fill="x", ipady=3)
@@ -3852,6 +4229,43 @@ class App(tk.Tk):
         if self.tbe_btn is not None:
             self.tbe_btn.set_selected(which == "BE")
             self.tfe_btn.set_selected(which == "FE")
+        if getattr(self, "host_lab", None) is not None:
+            self._refresh_host()
+
+    def _form_clone(self):
+        """The clone the PR form would review now, or None (API mode)."""
+        if self.mode == "multi":
+            picked = self._mapping().get(self.target_var.get() or "BE")
+            return picked[1] if picked else None
+        return self.single_path
+
+    def _refresh_host(self):
+        """Show the host and project read from the chosen clone's origin remote."""
+        clone = self._form_clone()
+        info = PC.detect_host(clone) if clone else GL.classify_remote("")
+        changed = clone != self._host_clone
+        self._host_info, self._host_clone = info, clone
+        if info["host"] == GL.HOST_GITLAB:
+            if changed or not self.gl_project_var.get().strip():
+                self.gl_project_var.set(info["project"])
+            self.host_lab.config(text=f"Host: GitLab ({info['base_url']})  ·  project",
+                                 fg=PAL["muted"])
+            if not self.gl_project_entry.winfo_manager():
+                self.gl_project_entry.pack(side="left", fill="x", expand=True, ipady=2,
+                                           padx=(8, 0))
+        else:
+            if self.gl_project_entry.winfo_manager():
+                self.gl_project_entry.pack_forget()
+            if info["host"] == GL.HOST_UNSUPPORTED:
+                self.host_lab.config(text="Host: not supported — this clone's origin is neither "
+                                          "CodeCommit nor GitLab.", fg=PAL["bad"])
+            else:
+                self.host_lab.config(
+                    text="Host: CodeCommit" + (f"  ·  repository {info['project']}"
+                                               if info.get("project") else ""),
+                    fg=PAL["muted"])
+        if self.mode != "multi":
+            self._rebuild_target_row()
 
     def _mapping(self):
         """Return {BE: (name, path), FE: (name, path)} for mapped clones."""
@@ -4367,14 +4781,16 @@ class App(tk.Tk):
         spec = record.get("spec") or {}
         if spec.get("kind") == "docs":
             return self._retry_cli_docs_job(job_id, record)
-        dup = CJ.find_active(spec.get("repo_name"), spec.get("pr_id"))
+        dup = CJ.find_active(spec.get("repo_name"), spec.get("pr_id"),
+                             spec.get("host") or "codecommit", spec.get("host_url") or "")
         if dup is not None and dup.get("id") != job_id:
             show_warning(self, "Already running",
                          f"{CJ.label(record)} is already being reviewed (job {dup['id']}).")
             return
         if self.manager.duplicate_of(J.JobSpec(
                 project_dir="", repo_name=spec.get("repo_name") or "",
-                pr_id=str(spec.get("pr_id") or ""))) is not None:
+                pr_id=str(spec.get("pr_id") or ""), host=spec.get("host") or "codecommit",
+                host_url=spec.get("host_url") or "")) is not None:
             show_warning(self, "Already running",
                          f"{CJ.label(record)} is already being reviewed in this window.")
             return
@@ -4419,13 +4835,26 @@ class App(tk.Tk):
         shows the message, and the Ctrl+Enter shortcut, which must stay quiet
         and simply not start anything while a mandatory field is missing.
         """
-        pr = _entry_value(self.pr_entry).strip()
+        pr = _entry_value(self.pr_entry).strip().lstrip("#!")
         proj = self.proj_var.get().strip()
         if not pr.isdigit():
-            return "PR id", "Enter a numeric CodeCommit PR id."
+            return "PR id", ("Enter a numeric pull request id (CodeCommit) or merge request "
+                             "number (GitLab).")
         if not Path(proj).is_dir():
             return "Project folder", "Pick a valid root folder first."
-        if not self.region_var.get().strip():
+        clone = self._form_clone()
+        info = PC.detect_host(clone) if clone else GL.classify_remote("")
+        if info["host"] == GL.HOST_UNSUPPORTED:
+            return "Host", ("This clone's origin remote is neither AWS CodeCommit nor GitLab. "
+                            "PRISM reviews CodeCommit pull requests and GitLab merge requests "
+                            "only.")
+        if info["host"] == GL.HOST_GITLAB:
+            if not self.gl_project_var.get().strip():
+                return "GitLab project", "Enter the GitLab project path (group/project)."
+            if not GL.get_token(info["base_url"]):
+                return "GitLab token", ("No GitLab token. Save one under Help (it needs the api "
+                                        "scope), or set GITLAB_TOKEN before starting PRISM.")
+        elif not self.region_var.get().strip():
             return "Region", "Enter the AWS region."
         if self.mode == "multi":
             mapping = self._mapping()
@@ -4438,7 +4867,7 @@ class App(tk.Tk):
             other = mapping.get("FE" if target == "BE" else "BE")
             if other and other[1] == picked[1]:
                 return "Mapping", "Backend and Frontend point to the same clone."
-        elif not self.repo_var.get().strip():
+        elif info["host"] != GL.HOST_GITLAB and not self.repo_var.get().strip():
             return "Repository", "Enter the CodeCommit repository name."
         return None
 
@@ -4448,7 +4877,7 @@ class App(tk.Tk):
         if problem is not None:
             show_warning(self, *problem)
             return None
-        pr = _entry_value(self.pr_entry).strip()
+        pr = _entry_value(self.pr_entry).strip().lstrip("#!")
         proj = self.proj_var.get().strip()
         if self.mode == "multi":
             picked = self._mapping()[self.target_var.get() or "BE"]
@@ -4456,7 +4885,14 @@ class App(tk.Tk):
         else:
             repo = self.repo_var.get().strip()
             local_repo = self.single_path
+        # The host is read from the clone itself, now - never from what the form
+        # showed earlier - so a job can only ever be on the host its remote is.
+        info = PC.detect_host(local_repo) if local_repo else GL.classify_remote("")
+        host, host_url = info["host"], ""
+        if host == GL.HOST_GITLAB:
+            host_url, repo = info["base_url"], self.gl_project_var.get().strip()
         return J.JobSpec(
+            host=host, host_url=host_url,
             project_dir=proj, repo_name=repo, pr_id=pr, local_repo=local_repo,
             region=self.region_var.get().strip() or REGION_DEFAULT,
             model=self.model_picker.get() or None,
@@ -4493,7 +4929,9 @@ class App(tk.Tk):
         self.instr_text.delete("1.0", "end")
         self.instr_text.insert("1.0", spec.custom_instructions or "")
         self._refresh_detection()
-        if self.mode != "multi":
+        if getattr(spec, "host", "") == GL.HOST_GITLAB:
+            self.gl_project_var.set(spec.repo_name)
+        elif self.mode != "multi":
             self.repo_var.set(spec.repo_name)
         self.pr_entry.delete(0, "end")
         _restore_placeholder(self.pr_entry)
@@ -4534,6 +4972,7 @@ class App(tk.Tk):
             show_warning(self, "Already running", str(e))
             return
         self.last_spec = spec
+        CFG.set_last_owner(spec.owner)       # pre-fills the next form (FR-OWN-2)
         self.manager.pump()
         self._refresh_jobs_list()
         self._refresh_pill()
@@ -4553,7 +4992,7 @@ class App(tk.Tk):
                 f"serialised — but one may wait for the other.",
                 confirm="Start anyway", cancel="Cancel"):
             return
-        elsewhere = CJ.find_active(spec.repo_name, spec.pr_id)
+        elsewhere = CJ.find_duplicate(spec)
         if elsewhere is not None:
             show_warning(self, "Already running",
                          f"{spec.label} is already being reviewed from the command "
@@ -4662,6 +5101,7 @@ class App(tk.Tk):
             self.stop_btn.set_enabled(job.is_active)
         self._refresh_model_hint(job)
         self._render_log(job)
+        self._render_chat(job)
         self._update_note_controls(job)
         if job.pending_question:
             # The ask event already fired while this job was unselected, so the
@@ -4691,6 +5131,28 @@ class App(tk.Tk):
         if run:
             self.log.insert("end", "\n".join(run) + "\n", run_tag or ())
         self.log.see("end")
+
+    # ---------------- live chat ----------------
+    def _render_chat(self, job):
+        """Show this job's chat, open or collapsed as this job left it."""
+        self.out_split.set_open(job.chat_open)
+        self.chat_toggle.config(text="◂ Hide chat" if job.chat_open else "Chat ▸")
+        self.out_split.chat.render(job.chat, busy=job.chat_busy)
+
+    def _toggle_chat(self):
+        job = self.manager.jobs.get(self.selected_job_id)
+        if job is None:
+            return
+        job.chat_open = not job.chat_open
+        self._render_chat(job)
+
+    def _send_chat(self, text):
+        """Ask the live chat. Any state is fine; it never steers the review."""
+        job = self.manager.jobs.get(self.selected_job_id)
+        if job is None or self.manager.start_chat(job.id, text) is None:
+            return False
+        self._render_chat(job)
+        return True
 
     # ---------------- agent conversation ----------------
     def _present_question(self, payload):
@@ -4855,6 +5317,15 @@ class App(tk.Tk):
                 if kind == "models":
                     self._apply_models(payload)
                     continue
+                if kind == "cli_chat":
+                    cid, reply = payload
+                    st = self._cli_chat_state(cid)
+                    st["busy"] = False
+                    if reply:
+                        st["thread"].append(("chat", reply))
+                    if self.screen is self.cli_detail_screen and self.cli_detail_id == cid:
+                        self._render_cli_chat()
+                    continue
                 job = self.manager.jobs.get(job_id)
                 if job is None:
                     continue          # dismissed while its worker was in flight
@@ -4951,6 +5422,14 @@ class App(tk.Tk):
                     self._paint_impact(job.impact)
                 return True
             return False
+        if kind == "chat":
+            job.chat_busy = False
+            job.chat_control = None
+            if payload:
+                job.chat.append(("chat", payload))
+            if shown:
+                self._render_chat(job)
+            return False
         if kind == "followup_done":
             job.followup_busy = False
             job.followup_control = None
@@ -4976,6 +5455,10 @@ class App(tk.Tk):
         if kind in ("done", "stopped", "error"):
             if kind == "done":
                 job.status = J.DONE
+                if isinstance(payload, dict):
+                    payload = dict(payload)
+                    data = payload.pop(J.RUN_DATA_KEY, None)
+                    job.data = data if isinstance(data, dict) else {}
                 job.result = payload
                 if isinstance(payload, dict) and payload.get("tokens"):
                     job.tokens = payload["tokens"]

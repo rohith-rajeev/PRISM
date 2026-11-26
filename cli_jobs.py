@@ -51,7 +51,7 @@ KEEP_FINISHED = 40
 # in a record's "spec" is ignored, so an older or newer PRISM can read it.
 _SPEC_FIELDS = ("project_dir", "repo_name", "pr_id", "local_repo", "region", "model",
                 "do_review", "do_update_desc", "do_merge", "do_sync", "dry_run",
-                "webhook_url", "custom_instructions", "reviewer")
+                "custom_instructions", "reviewer", "host", "host_url")
 
 
 def jobs_dir(create=False):
@@ -85,14 +85,16 @@ def spec_to_dict(spec):
         return {"kind": "docs", "project_dir": spec.project_dir,
                 "targets": [{"role": t.role, "repo_name": t.repo_name,
                              "local_repo": t.local_repo, "branch": t.branch,
-                             "files": list(t.files)} for t in spec.targets],
+                             "files": list(t.files),
+                             "uploads": [{"path": u.path, "dest": u.dest}
+                                         for u in t.uploads]} for t in spec.targets],
                 "requirements_path": spec.requirements_path, "persona": spec.persona,
                 "model": spec.model,
                 "do_commit": spec.do_commit, "do_push": spec.do_push,
                 "dry_run": spec.dry_run, "custom_instructions": spec.custom_instructions,
                 # Not the webhook: its URL is a secret, and a detached run reads the saved
                 # one itself (prism_cli.with_identity) rather than receiving it on a command line.
-                "reviewer": spec.reviewer}
+                "reviewer": spec.reviewer, "owner": spec.owner}
     data = asdict(spec)
     return {k: data.get(k) for k in _SPEC_FIELDS}
 
@@ -103,27 +105,37 @@ def _docs_spec_from_dict(data):
         if not isinstance(t, dict):
             continue
         files = tuple(str(f) for f in (t.get("files") or []) if str(f).strip())
-        if not (str(t.get("local_repo") or "").strip() and str(t.get("branch") or "").strip()
-                and files):
+        uploads = tuple(
+            docreview.Upload(str(u.get("path") or ""), str(u.get("dest") or ""))
+            for u in (t.get("uploads") or []) if isinstance(u, dict)
+            and str(u.get("path") or "").strip())
+        repo = str(t.get("local_repo") or "").strip()
+        if repo and not str(t.get("branch") or "").strip():
+            raise ValueError("saved document job has an incomplete target")
+        if not (files or uploads) or (files and not repo):
             raise ValueError("saved document job has an incomplete target")
         targets.append(docreview.DocTarget(
-            role=str(t.get("role") or "repo"), repo_name=str(t.get("repo_name") or ""),
-            local_repo=str(t["local_repo"]), branch=str(t["branch"]), files=files))
-    if not targets or not str(data.get("project_dir") or "").strip():
+            role=str(t.get("role") or ("repo" if repo else docreview.ROLE_NONE)),
+            repo_name=str(t.get("repo_name") or ""), local_repo=repo,
+            branch=str(t.get("branch") or ""), files=files, uploads=uploads))
+    # A review with no repository may also have no working folder (FR-DOC-IN-7).
+    if not targets or (not str(data.get("project_dir") or "").strip()
+                       and any(t.has_repo for t in targets)):
         raise ValueError("saved document job has no targets")
     try:
         persona = docreview.normalise_persona(data.get("persona"))
     except ValueError:
         persona = docreview.DEFAULT_PERSONA        # a record from a newer or hand-edited build
     return docreview.DocJobSpec(
-        project_dir=str(data["project_dir"]), targets=tuple(targets),
+        project_dir=str(data.get("project_dir") or ""), targets=tuple(targets),
         requirements_path=str(data.get("requirements_path") or ""), persona=persona,
         model=data.get("model") or None,
         do_commit=data.get("do_commit") is not False,
         do_push=data.get("do_push") is not False,
         dry_run=data.get("dry_run") is True,
         custom_instructions=str(data.get("custom_instructions") or ""), origin="cli",
-        reviewer=config.clean_username(data.get("reviewer")))
+        reviewer=config.clean_username(data.get("reviewer")),
+        owner=config.clean_username(data.get("owner")))
 
 
 def spec_from_dict(data):
@@ -249,7 +261,7 @@ def active_jobs():
     return [r for r in list_jobs() if is_active(r)]
 
 
-def find_active(repo_name, pr_id):
+def find_active(repo_name, pr_id, host="codecommit", host_url=""):
     """A live CLI job for the same pull request, if there is one.
 
     Two jobs on one PR would both rewrite its description (see
@@ -257,7 +269,12 @@ def find_active(repo_name, pr_id):
     """
     for record in active_jobs():
         spec = record.get("spec") or {}
-        if spec.get("repo_name") == repo_name and str(spec.get("pr_id")) == str(pr_id):
+        same = (str(spec.get("repo_name") or "").lower() == str(repo_name or "").lower()
+                if (host or "codecommit") == "gitlab" else spec.get("repo_name") == repo_name)
+        if (same and str(spec.get("pr_id")) == str(pr_id)
+                and (spec.get("host") or "codecommit") == (host or "codecommit")
+                and (spec.get("host_url") or "").rstrip("/").lower()
+                == (host_url or "").rstrip("/").lower()):
             return record
     return None
 
@@ -269,7 +286,8 @@ def find_duplicate(spec):
     review when it covers the same documents on the same branches.
     """
     if getattr(spec, "kind", "pr") != "docs":
-        return find_active(spec.repo_name, spec.pr_id)
+        return find_active(spec.repo_name, spec.pr_id, getattr(spec, "host", "codecommit"),
+                           getattr(spec, "host_url", ""))
     for record in active_jobs():
         data = record.get("spec") or {}
         if data.get("kind") != "docs":
@@ -287,15 +305,17 @@ def label(record):
     spec = record.get("spec") or {}
     if spec.get("kind") == "docs":
         targets = [t for t in spec.get("targets") or [] if isinstance(t, dict)]
-        names = " + ".join({"BE": "Backend", "FE": "Frontend"}.get(t.get("role"),
-                                                                    t.get("repo_name") or "?")
-                           for t in targets) or "?"
-        count = sum(len(t.get("files") or []) for t in targets)
+        names = " + ".join(
+            ({"BE": "Backend", "FE": "Frontend"}.get(t.get("role"), t.get("repo_name") or "?")
+             if t.get("local_repo") else "Uploaded documents") for t in targets) or "?"
+        count = sum(len(t.get("files") or []) + len(t.get("uploads") or []) for t in targets)
         try:
             who = docreview.persona_label(docreview.normalise_persona(spec.get("persona")))
         except ValueError:
             who = docreview.persona_label(docreview.DEFAULT_PERSONA)
         return f"Docs · {who} · {names} · {count} file{'' if count == 1 else 's'}"
+    if spec.get("host") == "gitlab":
+        return f"{spec.get('repo_name', '?')} !{spec.get('pr_id', '?')}"
     return f"{spec.get('repo_name', '?')} #{spec.get('pr_id', '?')}"
 
 

@@ -42,7 +42,7 @@ def _display_author(author_arn):
 
 def build_card(repo_name, pr_id, do_review, verdict_raw=None, verdict_key=None,
               impact_score=None, merged=None, reason=None, author=None,
-              source=None, dest=None, reviewer=None):
+              source=None, dest=None, reviewer=None, ref=None):
     """A small Google Chat card: one header line, a few widget rows.
 
     Kept to this shape deliberately — a card that scrolls off a phone screen
@@ -83,7 +83,8 @@ def build_card(repo_name, pr_id, do_review, verdict_raw=None, verdict_key=None,
             "topLabel": "Review", "text": "No verdict parsed"}})
 
     return {
-        "header": {"title": f"PR #{pr_id}", "subtitle": repo_name},
+        # `ref` names a GitLab merge request ("MR !12"); a pull request is "PR #12".
+        "header": {"title": ref or f"PR #{pr_id}", "subtitle": repo_name},
         "sections": [{"widgets": widgets}],
     }
 
@@ -129,80 +130,148 @@ def post_summary(webhook_url, emit=None, **card_kwargs):
 
 # ---- document reviews ----------------------------------------------------------
 
-# A card that scrolls off a phone screen defeats the point of a brief summary, so
-# a long list of documents is cut with a count of what is not shown.
-DOC_LINES_PER_REPO = 10
+# The card is three parts and nothing else (FR-CARD): the decision and its owner, a
+# short summary, and the documents. A card that fills the chat window defeats the
+# point of an alert, so each repository shows at most this many document lines,
+# followed by "and N more"; the job screen still lists every document.
+DOC_LINES_PER_REPO = 5
+REPO_NAME_MAX = 40          # longer names show their last path segment
+BRANCH_MAX = 60             # longer branches keep their start and end
+REASON_MAX = 90             # the impact reason is clipped to one line
 
-_DOC_GLYPH = dict(_VERDICT_GLYPH)
-
-
-def _doc_verdict_text(key, label):
-    glyph = _DOC_GLYPH.get(key, "")
-    clean = _LEADING_SYMBOL_RE.sub("", label or "") or (key or "").replace("-", " ").capitalize()
-    return f"{glyph} {clean}".strip() or "No verdict"
+_DOC_DECISION = {"approve": ("Approve", "work may start"),
+                 "request-changes": ("Request changes", "work may not start")}
+_SEVERITIES = ("Blocker", "Major", "Minor", "Suggestion")
 
 
 def _esc(text):
-    """Google Chat reads a small HTML subset in card text; file names must not be taken as tags."""
+    """Google Chat reads a small HTML subset in card text; file names, branches and the
+    owner must be shown as text, never taken as tags or entities."""
     return html.escape(str(text), quote=False)
 
 
-def build_doc_card(persona, verdict_key=None, verdict_label=None, impact=None,
-                   comments=None, targets=(), reviewer=None, run_id=None,
-                   outcome=None, not_reviewed=0, project=None):
+def doc_decision_text(key):
+    """"Request changes — work may not start": the decision always says what it means.
+    Anything that is not one of the two decisions reads as Request changes."""
+    words, meaning = _DOC_DECISION.get(key, _DOC_DECISION["request-changes"])
+    return f"{words} — {meaning}"
+
+
+def short_repo(name):
+    """A repository name of more than REPO_NAME_MAX characters, by its last path segment."""
+    name = str(name or "")
+    if len(name) > REPO_NAME_MAX:
+        return name.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] or name
+    return name
+
+
+def short_branch(name):
+    """A branch of more than BRANCH_MAX characters keeps its start and end."""
+    name = str(name or "")
+    if len(name) <= BRANCH_MAX:
+        return name
+    keep = (BRANCH_MAX - 1) // 2
+    return name[:keep] + "…" + name[-keep:]
+
+
+def comment_counts_text(counts):
+    """"1 blocker, 2 major, 1 minor" - zero counts left out."""
+    counts = counts or {}
+    plural = {"Blocker": "blockers", "Suggestion": "suggestions"}
+    bits = [f"{counts[s]} {plural.get(s, s.lower()) if counts[s] != 1 else s.lower()}"
+            for s in _SEVERITIES if counts.get(s)]
+    return ", ".join(bits) or "No comments"
+
+
+def _clip_line(text, limit=REASON_MAX):
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+
+
+def _fact(label, value, wrap=True):
+    return {"decoratedText": {"topLabel": label, "text": _esc(value), "wrapText": wrap}}
+
+
+def _pair(left, right):
+    """Two facts side by side - one line of the summary where columns are available."""
+    items = [w for w in (left, right) if w]
+    if len(items) == 1:
+        return items[0]
+    return {"columns": {"columnItems": [
+        {"horizontalSizeStyle": "FILL_AVAILABLE_SPACE", "horizontalAlignment": "START",
+         "verticalAlignment": "TOP", "widgets": [w]} for w in items]}}
+
+
+def build_doc_card(persona, owner="", reviewer="", decision="", impact=None,
+                   impact_reason="", counts=None, targets=(), run_id=None, outcome=None,
+                   not_reviewed=0):
     """The card for one document review.
 
-    Says who reviewed (the persona - Business Analyst, Architect or QA - and the
-    person who ran it), the verdict and how many comments of what severity it
-    carries, which branch(es) were looked at, and exactly which documents - by
-    their path from the repository root - each with its own verdict.
+    1. Decision - the title, and a subtitle with the decision in words and the owner.
+    2. Summary - owner, reviewer role, who ran it, comment counts, impact.
+    3. Documents - one block per repository: a one-line heading (role, short repository
+       name, branch) and one line per document (file name and its decision), the parent
+       folder added only where two documents in the card share a file name.
+    A footer line carries the run id, what happened to the comments and how many
+    documents could not be reviewed.
 
-    `targets` is a list of dicts: {"label", "repo", "branch", "documents": [
-    {"file", "verdict_key", "verdict_label", "counts_text"}]}.
+    `targets` is a list of dicts: {"label", "role", "repo", "branch", "documents": [
+    {"file", "folder", "verdict_key"}]}.
     """
-    widgets = [{"decoratedText": {"topLabel": "Reviewer role", "text": _esc(persona or "?")}}]
-    if reviewer:
-        widgets.append({"decoratedText": {"topLabel": "Reviewed by", "text": _esc(reviewer)}})
-    widgets.append({"decoratedText": {
-        "topLabel": "Verdict", "text": _esc(_doc_verdict_text(verdict_key, verdict_label))}})
+    words, meaning = _DOC_DECISION.get(decision, _DOC_DECISION["request-changes"])
+    header = {"title": "Document review",
+              # Header text is plain text in Chat, so it is not escaped.
+              "subtitle": f"{words} — {meaning}" + (f" · Owner: {owner}" if owner else "")}
+
+    summary = []
+    if owner:
+        summary.append(_fact("Owner", owner))
+    summary.append(_pair(_fact("Reviewer role", persona or "?"),
+                         _fact("Reviewed by", reviewer) if reviewer else None))
+    impact_text = ""
     if impact:
-        widgets.append({"decoratedText": {"topLabel": "Impact", "text": _esc(f"{impact}/10")}})
-    if comments:
-        widgets.append({"decoratedText": {"topLabel": "Comments", "text": _esc(comments)}})
-    if outcome:
-        widgets.append({"decoratedText": {"topLabel": "Outcome", "text": _esc(outcome)}})
-    if not_reviewed:
-        widgets.append({"decoratedText": {
-            "topLabel": "Not reviewed",
-            "text": f"⚠ {not_reviewed} document(s) could not be reviewed"}})
+        impact_text = f"{impact}/10" + (f" — {_clip_line(impact_reason)}"
+                                        if (impact_reason or "").strip() else "")
+    summary.append(_pair(_fact("Comments", comment_counts_text(counts)),
+                         _fact("Impact", impact_text, wrap=False) if impact_text else None))
+
+    targets = [t for t in (targets or []) if t.get("documents")]
+    names = [d.get("file") or "" for t in targets for d in t["documents"]]
+    shared = {n for n in names if names.count(n) > 1}
+    blocks = []
     for t in targets:
-        # Several repositories can share a branch name; the repo is in every label.
-        name = t.get("repo") or t.get("label") or "repository"
-        label = t.get("label")
-        who = f"{label} · {name}" if label and label != name else name
-        widgets.append({"decoratedText": {
-            "topLabel": "Branch", "text": _esc(f"{who} → {t.get('branch') or '?'}")}})
-        docs = list(t.get("documents") or [])
-        lines = []
+        repo, branch = short_repo(t.get("repo")), short_branch(t.get("branch"))
+        place = " · ".join(x for x in (repo, branch) if x) or t.get("label") or ""
+        if len(targets) > 1:
+            label = {"BE": "Backend", "FE": "Frontend"}.get(t.get("role"), t.get("label") or "")
+            place = f"{label} · {place}" if label and label != place else place
+        lines = [f"<b>{_esc(place)}</b>"]
+        docs = list(t["documents"])
         for d in docs[:DOC_LINES_PER_REPO]:
-            glyph = _VERDICT_GLYPH.get(d.get("verdict_key"), "")
-            tail = " — ".join(x for x in (
-                _LEADING_SYMBOL_RE.sub("", d.get("verdict_label") or ""),
-                d.get("counts_text") or "") if x)
-            lines.append(f"{glyph} {_esc(d.get('file', '?'))}"
-                         + (f" — {_esc(tail)}" if tail else ""))
+            name = d.get("file") or "?"
+            lines.append(f"{_esc(name)} — {_esc(_DOC_DECISION.get(d.get('verdict_key'), _DOC_DECISION['request-changes'])[0])}")
+            if name in shared:
+                folder = d.get("folder") or ""
+                lines.append("&nbsp;&nbsp;in " + (_esc(folder) if folder else "the top folder"))
         if len(docs) > DOC_LINES_PER_REPO:
-            lines.append(f"… and {len(docs) - DOC_LINES_PER_REPO} more")
-        if lines:
-            widgets.append({"decoratedText": {
-                "topLabel": f"Documents ({len(docs)})", "wrapText": True,
-                "text": "<br>".join(x.strip() for x in lines)}})
+            lines.append(f"and {len(docs) - DOC_LINES_PER_REPO} more")
+        blocks.append({"decoratedText": {"text": "<br>".join(lines), "wrapText": True}})
+
+    foot = []
     if run_id:
-        widgets.append({"decoratedText": {"topLabel": "Run", "text": _esc(run_id)}})
-    header = {"title": "Document review"}
-    if project:
-        header["subtitle"] = project
-    return {"header": header, "sections": [{"widgets": widgets}]}
+        foot.append(f"Run {run_id}")
+    if outcome:
+        foot.append(str(outcome))
+    if not_reviewed:
+        foot.append(f"{not_reviewed} document{'' if not_reviewed == 1 else 's'} "
+                    f"could not be reviewed")
+    sections = [{"widgets": summary}]
+    if blocks:
+        sections.append({"header": "Documents", "widgets": blocks})
+    if foot:
+        sections.append({"widgets": [{"textParagraph": {
+            "text": f'<font color="#5f6368">{_esc(" · ".join(foot))}</font>'}}]})
+    return {"header": header, "sections": sections}
 
 
 def post_doc_summary(webhook_url, emit=None, **card_kwargs):

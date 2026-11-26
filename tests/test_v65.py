@@ -68,8 +68,9 @@ DOC_REPORT = """**Verdict:** ⚠️ Approve with comments
 <<<END-PRISM-REVIEW>>>
 """
 
+# v7.0 added "scale" (FR-X-6); every record still has every key.
 FINDING_KEYS = ("id", "kind", "category", "type", "description", "late_find", "persona",
-                "traceability")
+                "scale", "traceability")
 TRACE_KEYS = ("repo", "pull_request", "branch", "target_branch", "commit", "path", "line",
               "line_end", "section", "role")
 
@@ -100,9 +101,23 @@ class TTY(io.StringIO):
 
 
 def card_texts(body):
+    """{topLabel: text} for every labelled fact on a card (columns included), plus the
+    header subtitle as "_subtitle" and a document card's footer line as "_footer"."""
     card = body["cardsV2"][0]["card"]
-    return {w["decoratedText"]["topLabel"]: w["decoratedText"]["text"]
-            for w in card["sections"][0]["widgets"]}
+    out = {"_subtitle": card.get("header", {}).get("subtitle", "")}
+
+    def walk(widgets):
+        for w in widgets:
+            if "decoratedText" in w and w["decoratedText"].get("topLabel"):
+                out[w["decoratedText"]["topLabel"]] = w["decoratedText"]["text"]
+            elif "columns" in w:
+                for col in w["columns"]["columnItems"]:
+                    walk(col["widgets"])
+            elif "textParagraph" in w:
+                out["_footer"] = w["textParagraph"]["text"]
+    for section in card["sections"]:
+        walk(section["widgets"])
+    return out
 
 
 # ---------------------------------------------------------------- the name --
@@ -309,19 +324,19 @@ class PrCard(unittest.TestCase):
 
 
 class DocCard(unittest.TestCase):
-    TARGETS = [{"label": "Backend", "repo": "shop-be", "branch": "feat/x",
-                "documents": [{"file": "docs/spec.md", "verdict_key": "approve-with-comments",
-                               "verdict_label": "⚠️ Approve with comments",
-                               "counts_text": "1 major"}]},
-               {"label": "Frontend", "repo": "shop-fe", "branch": "feat/y",
-                "documents": [{"file": "docs/ui.md", "verdict_key": "request-changes",
-                               "verdict_label": "🔴 Request changes", "counts_text": "1 blocker"}]}]
+    """The v6.5 facts on the v7.0 card (FR-CARD): who reviewed, the decision, the counts,
+    which branches and documents, escaped text, a bounded list."""
+    TARGETS = [{"label": "Backend", "role": "BE", "repo": "shop-be", "branch": "feat/x",
+                "documents": [{"file": "spec.md", "folder": "docs",
+                               "verdict_key": "request-changes"}]},
+               {"label": "Frontend", "role": "FE", "repo": "shop-fe", "branch": "feat/y",
+                "documents": [{"file": "ui.md", "folder": "docs",
+                               "verdict_key": "request-changes"}]}]
 
     def card(self, **kw):
-        base = dict(persona="Architect", verdict_key="request-changes",
-                    verdict_label="🔴 Request changes", impact="6", comments="1 blocker, 1 major",
-                    targets=self.TARGETS, reviewer="Alex", run_id="20261124-1200-abc123",
-                    outcome="Comments committed and pushed")
+        base = dict(persona="Architect", owner="Priya", decision="request-changes", impact="6",
+                    counts={"Blocker": 1, "Major": 1}, targets=self.TARGETS, reviewer="Alex",
+                    run_id="20261124-1200-abc123", outcome="committed and pushed")
         base.update(kw)
         return {"cardsV2": [{"card": N.build_doc_card(**base)}]}
 
@@ -330,47 +345,48 @@ class DocCard(unittest.TestCase):
         t = card_texts(body)
         self.assertEqual(t["Reviewer role"], "Architect")
         self.assertEqual(t["Reviewed by"], "Alex")
-        self.assertEqual(t["Verdict"], "🔴 Request changes")
+        self.assertEqual(t["Owner"], "Priya")
+        self.assertEqual(t["_subtitle"], "Request changes — work may not start · Owner: Priya")
         self.assertEqual(t["Impact"], "6/10")
         self.assertEqual(t["Comments"], "1 blocker, 1 major")
-        self.assertEqual(t["Outcome"], "Comments committed and pushed")
-        self.assertEqual(t["Run"], "20261124-1200-abc123")
+        self.assertIn("committed and pushed", t["_footer"])
+        self.assertIn("20261124-1200-abc123", t["_footer"])
         text = json.dumps(body, ensure_ascii=False)
-        for expected in ("Backend · shop-be → feat/x", "Frontend · shop-fe → feat/y",
-                         "docs/spec.md", "docs/ui.md"):
+        for expected in ("Backend · shop-be · feat/x", "Frontend · shop-fe · feat/y",
+                         "spec.md — Request changes", "ui.md — Request changes"):
             self.assertIn(expected, text)
         self.assertEqual(body["cardsV2"][0]["card"]["header"]["title"], "Document review")
 
     def test_a_single_repository_is_not_labelled_twice(self):
-        one = [{"label": "clone", "repo": "clone", "branch": "main",
-                "documents": [{"file": "a.md", "verdict_key": "approve",
-                               "verdict_label": "✅ Approve", "counts_text": ""}]}]
+        one = [{"label": "clone", "role": "repo", "repo": "clone", "branch": "main",
+                "documents": [{"file": "a.md", "folder": "", "verdict_key": "approve"}]}]
         text = json.dumps(self.card(targets=one), ensure_ascii=False)
-        self.assertIn("clone → main", text)
+        self.assertIn("clone · main", text)
         self.assertNotIn("clone · clone", text)
+        self.assertNotIn("epository", text)
 
     def test_without_a_name_there_is_no_reviewed_by_row(self):
         self.assertNotIn("Reviewed by", card_texts(self.card(reviewer=None)))
 
     def test_file_names_cannot_inject_markup(self):
-        t = [{"label": "x", "repo": "x", "branch": "b", "documents": [
-            {"file": "<b>evil</b>.md", "verdict_key": "approve", "verdict_label": "✅ Approve",
-             "counts_text": ""}]}]
+        t = [{"label": "x", "role": "repo", "repo": "x", "branch": "b", "documents": [
+            {"file": "<b>evil</b>.md", "folder": "", "verdict_key": "approve"}]}]
         text = json.dumps(self.card(targets=t))
         self.assertNotIn("<b>evil", text)
         self.assertIn("&lt;b&gt;evil", text)
 
     def test_a_long_list_is_cut_with_a_count_rather_than_run_off_the_screen(self):
-        many = [{"file": f"docs/{i}.md", "verdict_key": "approve", "verdict_label": "✅ Approve",
-                 "counts_text": ""} for i in range(25)]
-        body = self.card(targets=[{"label": "x", "repo": "x", "branch": "b", "documents": many}])
+        many = [{"file": f"{i}.md", "folder": "docs", "verdict_key": "approve"}
+                for i in range(25)]
+        body = self.card(targets=[{"label": "x", "role": "repo", "repo": "x", "branch": "b",
+                                   "documents": many}])
         text = json.dumps(body, ensure_ascii=False)
-        self.assertIn(f"… and {25 - N.DOC_LINES_PER_REPO} more", text)
-        self.assertNotIn("docs/24.md", text)
+        self.assertIn(f"and {25 - N.DOC_LINES_PER_REPO} more", text)
+        self.assertNotIn("24.md", text)
 
     def test_documents_that_could_not_be_reviewed_are_called_out(self):
-        self.assertIn("2 document(s) could not be reviewed",
-                      card_texts(self.card(not_reviewed=2))["Not reviewed"])
+        self.assertIn("2 documents could not be reviewed",
+                      card_texts(self.card(not_reviewed=2))["_footer"])
 
     def test_posting_needs_a_webhook_and_never_raises(self):
         cap = Capture()
@@ -525,7 +541,7 @@ class DocumentReviewEndToEnd(Isolated):
         try:
             with mock.patch.object(sys, "stdout", out), \
                     mock.patch.object(sys.stdin, "isatty", return_value=False):
-                code = P.main(["docs", "docs/spec.md", "--persona", "architect", *extra])
+                code = P.main(["docs", "docs/spec.md", "--persona", "architect", "--owner", "Priya", *extra])
         finally:
             os.chdir(old)
         return code, out.getvalue()
@@ -547,7 +563,7 @@ class DocumentReviewEndToEnd(Isolated):
 
         # signed in the document itself
         doc = sh(self.origin, "show", "feat/x:docs/spec.md")
-        self.assertIn("Review v1 · Architect · by Alex Rivera · run `", doc)
+        self.assertIn("Review v1 · Architect · owner Priya · by Alex Rivera · run `", doc)
         self.assertIn('"reviewer":"Alex Rivera"', doc)
 
         # one alert, to the DOCUMENT webhook only
@@ -555,13 +571,15 @@ class DocumentReviewEndToEnd(Isolated):
         t = card_texts(cap.bodies[0])
         self.assertEqual(t["Reviewer role"], "Architect")
         self.assertEqual(t["Reviewed by"], "Alex Rivera")
-        self.assertIn("Approve with comments", t["Verdict"])
-        self.assertEqual(t["Impact"], "4/10")
+        # v7.0: a Major is open, so the decision is Request changes (FR-VER-4).
+        self.assertTrue(t["_subtitle"].startswith("Request changes — work may not start"))
+        self.assertEqual(t["Owner"], "Priya")
+        self.assertTrue(t["Impact"].startswith("4/10"))
         self.assertEqual(t["Comments"], "1 major, 1 minor")
-        self.assertEqual(t["Outcome"], "Comments committed and pushed")
+        self.assertIn("committed and pushed", t["_footer"])
         text = json.dumps(cap.bodies[0], ensure_ascii=False)
         self.assertIn("feat/x", text)
-        self.assertIn("docs/spec.md", text)
+        self.assertIn("spec.md — Request changes", text)
         self.assertIn("Posted document review summary to Google Chat.", out)
 
         # and the record carries the findings
@@ -596,13 +614,15 @@ class DocumentReviewEndToEnd(Isolated):
         self.assertIn("Could not post to Google Chat", out)
         self.assertIn("Review v1", sh(self.origin, "show", "feat/x:docs/spec.md"))
 
-    def test_a_dry_run_says_so_on_the_card_and_still_reports_findings(self):
+    def test_a_dry_run_posts_no_card_and_still_reports_findings(self):
+        """v7.0 (FR-DOC-IN-11, FR-X-5): a dry run reads and decides, and posts nothing."""
         C.set_docs_webhook_url("https://chat.googleapis.com/x")
         cap = Capture()
         with mock.patch.object(N.urllib.request, "urlopen", cap):
             code, out = self.run_docs("--dry-run")
         self.assertEqual(code, 0, out)
-        self.assertIn("Dry run", card_texts(cap.bodies[0])["Outcome"])
+        self.assertEqual(cap.bodies, [])
+        self.assertIn("Dry run: no chat card is posted.", out)
         (rec,) = self.jobs_json()
         self.assertEqual(len(rec["findings"]), 2)
 

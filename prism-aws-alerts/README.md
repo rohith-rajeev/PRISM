@@ -64,6 +64,57 @@ No SNS topics, CodeCommit notification rules, or existing EventBridge buses
 are touched — both rules run on the account's default event bus, which
 already receives these events natively.
 
+## The develop group
+
+Merges and deployments to `develop` go to their own Google Chat group, using
+the same mechanism as the release branches - there is no second alerting
+system. It is simply one more `chat_targets` entry that watches **only**
+`develop`, plus the develop pipelines in the pipeline maps:
+
+```hcl
+chat_targets = [
+  { name = "chat-a",       webhook_url = "<release group webhook>", branches = ["qa", "staging", "main"] },
+  { name = "chat-b",       webhook_url = "<staging group webhook>", branches = ["staging"] },
+  { name = "chat-develop", webhook_url = "<develop group webhook>", branches = ["develop"] },
+]
+
+pipeline_branches = {
+  # ...the qa / staging / main pipelines...
+  "your-backend-pipeline-dev"  = "develop"
+  "your-frontend-pipeline-dev" = "develop"
+}
+
+pipeline_repositories = {
+  # ...the qa / staging / main pipelines...
+  "your-backend-pipeline-dev"  = "your-backend-repo"
+  "your-frontend-pipeline-dev" = "your-frontend-repo"
+}
+```
+
+List one develop pipeline per repository that deploys `develop`. The values
+above are placeholders, like every other entry in `terraform.tfvars.example`;
+put the real develop webhook only in the gitignored `terraform.tfvars` (or
+`TF_VAR_chat_targets`).
+
+With that in place:
+
+- A PR merged into `develop` posts the "Pull Request Merged" card to the
+  develop group only. Merges into `qa`, `staging` or `main` never reach it,
+  and develop merges never reach the release groups (no target lists both).
+- When a develop pipeline succeeds or fails, the reply is threaded onto that
+  merge card in the develop group, in the same card style as the other
+  environments, titled `Develop deployment succeeded|failed` (the environment
+  label comes from the pipeline name's last part: `-dev` / `-develop` read as
+  "Develop").
+- A develop deployment that can't be matched to a merge card follows
+  `post_unlinked_deployments`: when on, the standalone card goes to the develop
+  group only, because it is the only target watching `develop`.
+- Thread tracking is unchanged: develop merges are stored in the same
+  DynamoDB table with the same `thread_ttl_days` (30-day) TTL, and chat target
+  names must still be unique.
+- CodeCommit and CodePipeline only. Alerts for GitLab repositories or
+  pipelines are out of scope.
+
 ## Setup
 
 1. Create an incoming webhook for each target Google Chat space (space menu →

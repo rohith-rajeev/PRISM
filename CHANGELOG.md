@@ -4,6 +4,37 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v7.0
+
+- **GitLab merge requests.** PRISM reads the host from the clone's remote: a CodeCommit remote
+  is reviewed as before, a GitLab one (gitlab.com or your own server) as a merge request — same
+  stages, same gates, findings in the description, and a fast-forward merge only (never a squash,
+  a merge commit or a force-push; a project that cannot fast-forward stops before merging). Save
+  a GitLab token under Help or with `prism config set gitlab_token`; the AWS CLI is not needed for
+  GitLab. Merge requests from forks are not reviewed.
+- **A very large or expensive change is never approved.** Every review now says whether the
+  change is normal or large. A large change scores at least 8/10, is Request changes, and is never
+  merged — no confirmation can turn it into one. A normal change with an impact of 7 or more still
+  waits for you to confirm, as before.
+- **A document review now ends in Approve or Request changes — nothing else.** Any open Blocker
+  or Major (or a large change, or a review cut short) is Request changes: work may not start.
+  Minor comments and suggestions are still written. Older reviews keep their old wording.
+- **Every document review names its owner** — the person who answers it, separate from you, the
+  reviewer. Required on the form (remembered for next time) and with `--owner` on the command line.
+- **A shorter chat card for document reviews:** the decision and owner up top, a compact summary,
+  then one short block per repository with up to five documents.
+- **Review documents that aren't on the branch.** Drop files on the document list (where your Tk
+  supports drag-and-drop) or use Upload: text, Markdown, Word, PDF or Excel. The review is written
+  into a copy next to the file (a PDF gets a Markdown sidecar and is never changed), and the file
+  is committed only to a destination path you give. With no repository at all, the document is
+  reviewed on its own. On the command line, pass a file outside the repository (and `--dest`).
+- **Live chat in the job details.** Expand *Chat* beside the OUTPUT log (it splits 70/30) and ask
+  about the job — running, queued, failed or finished. Answers come from that job only, in plain
+  words; it never steers or changes the review. On the command line: `prism chat <id> <question>`.
+- **prism-aws-alerts** can send the merges and deployments of your integration branch to a
+  Google Chat group of their own, apart from the release groups (see its README).
+- A dry run now posts no chat card, and `prism jobs --json` no longer shows the webhook URL.
+
 ## v6.5.1
 
 - **Follow-up document reviews no longer lose the earlier comments' text.** A comment the

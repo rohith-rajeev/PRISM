@@ -13,7 +13,8 @@ PIPELINE_BRANCHES = json.loads(os.environ.get("PIPELINE_BRANCHES_JSON", "{}"))
 PIPELINE_REPOSITORIES = json.loads(os.environ.get("PIPELINE_REPOSITORIES_JSON", "{}"))
 POST_UNLINKED = os.environ.get("POST_UNLINKED_DEPLOYMENTS", "true").lower() == "true"
 STATUS_BY_STATE = {"SUCCEEDED": "succeeded", "FAILED": "failed"}
-ENVIRONMENT_LABELS = {"qa": "QA", "staging": "Staging", "main": "Production"}
+ENVIRONMENT_LABELS = {"qa": "QA", "staging": "Staging", "main": "Production",
+                      "dev": "Develop", "develop": "Develop"}
 
 dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table(TABLE_NAME)
