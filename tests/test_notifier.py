@@ -19,10 +19,14 @@ class CardShape(unittest.TestCase):
         card = n.build_card("repo", "12", do_review=True, verdict_raw="Approve",
                             verdict_key="approve", impact_score="3", merged=True)
         widgets = card["sections"][0]["widgets"]
-        self.assertEqual(widgets[0]["decoratedText"]["text"], "✅ Merged")
+        # v7.1: flat Material icons instead of emoji.
+        self.assertEqual(widgets[0]["decoratedText"]["text"], "Merged")
+        self.assertEqual(widgets[0]["decoratedText"]["startIcon"],
+                         {"materialIcon": {"name": "merge"}})
         self.assertEqual(len(widgets), 3, "outcome + verdict + impact, nothing else")
-        self.assertIn("Approve", widgets[1]["decoratedText"]["text"])
-        self.assertIn("✅", widgets[1]["decoratedText"]["text"])
+        self.assertEqual(widgets[1]["decoratedText"]["text"], "Approve")
+        self.assertEqual(widgets[1]["decoratedText"]["startIcon"],
+                         {"materialIcon": {"name": "check_circle"}})
         self.assertEqual(widgets[2]["decoratedText"]["text"], "3/10")
 
     def test_branches_and_author_rows(self):
@@ -40,7 +44,11 @@ class CardShape(unittest.TestCase):
                             reason="verdict blocks merge")
         widgets = card["sections"][0]["widgets"]
         self.assertEqual(widgets[0]["decoratedText"]["text"],
-                         "⛔ Not merged — verdict blocks merge")
+                         "Not merged — verdict blocks merge")
+        self.assertEqual(widgets[0]["decoratedText"]["startIcon"]["materialIcon"]["name"],
+                         "block")
+        self.assertEqual(widgets[1]["decoratedText"]["startIcon"]["materialIcon"]["name"],
+                         "cancel")
 
     def test_review_skipped_by_configuration_has_no_verdict_widget(self):
         """Verdict/impact are meaningless with no review having run —
@@ -73,8 +81,8 @@ class CardShape(unittest.TestCase):
         card = n.build_card("repo", "12", do_review=True, verdict_raw="✅ Approve",
                             verdict_key="approve", merged=True)
         text = card["sections"][0]["widgets"][1]["decoratedText"]["text"]
-        self.assertEqual(text, "✅ Approve")
-        self.assertEqual(text.count("✅"), 1)
+        self.assertEqual(text, "Approve", "the agent's emoji is dropped; the icon is "
+                                          "a Material Symbol")
 
 
 class PostSummary(unittest.TestCase):

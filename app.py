@@ -822,18 +822,21 @@ def _dnd_available(widget):
 class ChatPane(tk.Frame):
     """The live chat about the open job (FR-CHAT): its own transcript, an input and an
     Ask button, titled CHAT. It never shows the reviewer's log - that is OUTPUT - and
-    the person's questions and the chat's answers are told apart line by line."""
+    the person's questions and the chat's answers are told apart line by line. It sits
+    on the card colour, not the log's near-black, so it reads as its own section."""
 
     HINT = "Ask about this job — its status, verdict or findings…"
+    BG = "card"
 
     def __init__(self, parent, on_send):
-        super().__init__(parent, bg=PAL["log_bg"])
+        bg = PAL[self.BG]
+        super().__init__(parent, bg=bg, padx=10, pady=6)
         self._on_send = on_send
-        self.title = tk.Label(self, text="CHAT", font=FONT_XS, bg=PAL["log_bg"],
-                              fg=PAL["muted"], anchor="w")
+        self.title = tk.Label(self, text="CHAT", font=FONT_XS, bg=bg,
+                              fg=PAL["accent_text"], anchor="w")
         self.title.pack(fill="x")
-        row = tk.Frame(self, bg=PAL["log_bg"])
-        row.pack(side="bottom", fill="x", pady=(4, 0))
+        row = tk.Frame(self, bg=bg)
+        row.pack(side="bottom", fill="x", pady=(6, 0))
         self.entry = tk.Entry(row, font=FONT_S, bg=PAL["field"], fg=PAL["text"],
                               insertbackground=PAL["text"], relief="flat", width=1,
                               highlightthickness=1, highlightbackground=PAL["border"],
@@ -844,14 +847,14 @@ class ChatPane(tk.Frame):
         self.send_btn = RoundedButton(row, text="Ask", command=self._send, style="outline",
                                       height=28, width=56, font=FONT_S)
         self.send_btn.pack(side="left")
-        self.text = tk.Text(self, height=3, width=1, font=FONT_S, bg=PAL["log_bg"],
-                            fg=PAL["log_fg"], relief="flat", wrap="word",
+        self.text = tk.Text(self, height=3, width=1, font=FONT_S, bg=bg,
+                            fg=PAL["text"], relief="flat", wrap="word",
                             highlightthickness=0, borderwidth=0, state="disabled")
         self.text.pack(fill="both", expand=True, pady=(4, 0))
         self.text.tag_config("you", foreground=PAL["accent_text"], font=FONT_B)
         self.text.tag_config("who", foreground=PAL["muted"], font=FONT_XS)
-        self.text.tag_config("chat", foreground=PAL["log_fg"])
-        self.text.tag_config("ph", foreground=PAL["log_ph"])
+        self.text.tag_config("chat", foreground=PAL["text"])
+        self.text.tag_config("ph", foreground=PAL["muted"])
 
     def _send(self):
         text = _entry_value(self.entry).strip()
@@ -884,13 +887,17 @@ class ChatPane(tk.Frame):
 class OutputSplit(tk.Frame):
     """The job details' output section: OUTPUT alone while the chat is collapsed, and
     split 70/30 with CHAT when it is expanded - the same ratio at any width, never
-    stacked and never hiding the output (FR-CHAT-1b)."""
+    stacked and never hiding the output (FR-CHAT-1b). A divider and the chat's own
+    background keep the two from reading as one section."""
 
     OUTPUT_SHARE = 0.7
+    GAP = 12            # px between OUTPUT and CHAT, with the divider in the middle
+    DIVIDER = 2
 
     def __init__(self, parent, on_send, bg_key="log_bg"):
         super().__init__(parent, bg=PAL[bg_key], height=60)
         self.out = tk.Frame(self, bg=PAL[bg_key])
+        self.divider = tk.Frame(self, bg=PAL["border"], width=self.DIVIDER)
         self.chat = ChatPane(self, on_send)
         self.is_open = None
         self.set_open(False)
@@ -901,12 +908,17 @@ class OutputSplit(tk.Frame):
             return
         self.is_open = is_open
         if is_open:
+            half = self.GAP // 2
             self.out.place(relx=0, rely=0, relwidth=self.OUTPUT_SHARE, relheight=1,
-                           width=-6)
+                           width=-half)
+            self.divider.place(relx=self.OUTPUT_SHARE, rely=0, relheight=1,
+                               x=-self.DIVIDER // 2, width=self.DIVIDER)
             self.chat.place(relx=self.OUTPUT_SHARE, rely=0,
-                            relwidth=1 - self.OUTPUT_SHARE, relheight=1)
+                            relwidth=1 - self.OUTPUT_SHARE, relheight=1,
+                            x=half, width=-half)
         else:
             self.chat.place_forget()
+            self.divider.place_forget()
             # width=0 explicitly: place() keeps options from the previous call, and the
             # gap left for the chat must not survive its closing.
             self.out.place(relx=0, rely=0, relwidth=1, relheight=1, width=0)

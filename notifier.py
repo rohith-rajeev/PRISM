@@ -21,10 +21,24 @@ from updater import _ssl_context
 
 POST_TIMEOUT = 10
 
-_VERDICT_GLYPH = {
-    "approve": "✅", "approve-with-comments": "⚠️",
-    "request-changes": "🔴", "block": "⛔",
+# Flat Material Symbols, not emoji: the same 2D style as the rest of Google Chat, and
+# each shape distinct on its own (a tick, a speech-bubble note, a cross, a bar).
+_VERDICT_ICON = {
+    "approve": "check_circle", "approve-with-comments": "rate_review",
+    "request-changes": "cancel", "block": "block",
 }
+
+
+def _icon(name):
+    return {"materialIcon": {"name": name}}
+
+
+def _row(label, text, icon=None):
+    """One labelled fact, with a Material icon in front when there is one."""
+    row = {"decoratedText": {"topLabel": label, "text": text}}
+    if icon:
+        row["decoratedText"]["startIcon"] = _icon(icon)
+    return row
 
 # The reviewer's own report already opens the verdict line with an emoji
 # (see agents/pr-reviewer.md's "**Verdict:** ✅ Approve | ..." template), so
@@ -51,13 +65,14 @@ def build_card(repo_name, pr_id, do_review, verdict_raw=None, verdict_key=None,
     the header stays stable across a run's lifetime.
     """
     if merged:
-        outcome = "✅ Merged"
+        outcome, outcome_icon = "Merged", "merge"
     elif merged is False:
-        outcome = "⛔ Not merged" + (f" — {reason}" if reason else "")
+        outcome, outcome_icon = ("Not merged" + (f" — {reason}" if reason else "")), "block"
     else:
-        outcome = "⚠️ Unknown outcome" + (f" — {reason}" if reason else "")
+        outcome, outcome_icon = ("Unknown outcome" + (f" — {reason}" if reason else "")), \
+            "help"
 
-    widgets = [{"decoratedText": {"topLabel": "Outcome", "text": outcome}}]
+    widgets = [_row("Outcome", outcome, outcome_icon)]
     if source and dest:
         widgets.append({"decoratedText": {
             "topLabel": "Branches", "text": f"{source} → {dest}"}})
@@ -71,10 +86,8 @@ def build_card(repo_name, pr_id, do_review, verdict_raw=None, verdict_key=None,
         widgets.append({"decoratedText": {
             "topLabel": "Review", "text": "Skipped by configuration"}})
     elif verdict_raw:
-        glyph = _VERDICT_GLYPH.get(verdict_key, "")
-        clean = _LEADING_SYMBOL_RE.sub("", verdict_raw)
-        widgets.append({"decoratedText": {
-            "topLabel": "Verdict", "text": f"{glyph} {clean}".strip()}})
+        clean = _LEADING_SYMBOL_RE.sub("", verdict_raw).strip()
+        widgets.append(_row("Verdict", clean, _VERDICT_ICON.get(verdict_key)))
         if impact_score:
             widgets.append({"decoratedText": {
                 "topLabel": "Impact", "text": f"{impact_score}/10"}})
@@ -130,18 +143,20 @@ def post_summary(webhook_url, emit=None, **card_kwargs):
 
 # ---- document reviews ----------------------------------------------------------
 
-# The card is three parts and nothing else (FR-CARD): the decision and its owner, a
-# short summary, and the documents. A card that fills the chat window defeats the
-# point of an alert, so each repository shows at most this many document lines,
-# followed by "and N more"; the job screen still lists every document.
+# The card is three parts (FR-CARD) and stays compact: the decision and its owner, a
+# short summary, and the documents - then a one-line note on why, and a footer. Each
+# repository shows at most this many document lines, then "and N more"; the job screen
+# still lists every document.
 DOC_LINES_PER_REPO = 5
 REPO_NAME_MAX = 40          # longer names show their last path segment
 BRANCH_MAX = 60             # longer branches keep their start and end
-REASON_MAX = 90             # the impact reason is clipped to one line
+NOTE_MAX = 160              # the note is a sentence or two, never cut mid-word
 
-_DOC_DECISION = {"approve": ("Approve", "work may start"),
-                 "request-changes": ("Request changes", "work may not start")}
+# The decision as a flat Material icon - a tick or a cross - and what it means.
+_DOC_ICON = {"approve": "check_circle", "request-changes": "cancel"}
+_DOC_MEANING = {"approve": "Work may start", "request-changes": "Work may not start"}
 _SEVERITIES = ("Blocker", "Major", "Minor", "Suggestion")
+_RAISED_PREFIX = "Raised to 8/10 because the change is large or expensive"
 
 
 def _esc(text):
@@ -150,11 +165,8 @@ def _esc(text):
     return html.escape(str(text), quote=False)
 
 
-def doc_decision_text(key):
-    """"Request changes — work may not start": the decision always says what it means.
-    Anything that is not one of the two decisions reads as Request changes."""
-    words, meaning = _DOC_DECISION.get(key, _DOC_DECISION["request-changes"])
-    return f"{words} — {meaning}"
+def _decision(key):
+    return key if key in _DOC_ICON else "request-changes"
 
 
 def short_repo(name):
@@ -183,13 +195,26 @@ def comment_counts_text(counts):
     return ", ".join(bits) or "No comments"
 
 
-def _clip_line(text, limit=REASON_MAX):
+def short_reason(text, limit=NOTE_MAX):
+    """The impact reason in a sentence: PRISM's "raised" preamble dropped, the first
+    sentence kept, and a long one shortened at a clause or word boundary - never cut
+    off with an ellipsis."""
     text = " ".join(str(text or "").split())
-    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+    if text.startswith(_RAISED_PREFIX):
+        text = text.split(": ", 1)[1] if ": " in text else ""
+    text = text.strip(" .;:—-")
+    first = re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0].rstrip(".")
+    if len(first) <= limit:
+        return first
+    cut = first[:limit]
+    for sep in ("; ", ", ", " — ", " - "):
+        if sep in cut[limit // 2:]:
+            return cut[:cut.rindex(sep)].rstrip(" ,;—-")
+    return cut[:cut.rindex(" ")] if " " in cut else cut
 
 
-def _fact(label, value, wrap=True):
-    return {"decoratedText": {"topLabel": label, "text": _esc(value), "wrapText": wrap}}
+def _fact(label, value):
+    return {"decoratedText": {"topLabel": label, "text": _esc(value), "wrapText": True}}
 
 
 def _pair(left, right):
@@ -204,59 +229,62 @@ def _pair(left, right):
 
 def build_doc_card(persona, owner="", reviewer="", decision="", impact=None,
                    impact_reason="", counts=None, targets=(), run_id=None, outcome=None,
-                   not_reviewed=0):
+                   not_reviewed=0, decision_reason=""):
     """The card for one document review.
 
-    1. Decision - the title, and a subtitle with the decision in words and the owner.
-    2. Summary - owner, reviewer role, who ran it, comment counts, impact.
-    3. Documents - one block per repository: a one-line heading (role, short repository
-       name, branch) and one line per document (file name and its decision), the parent
-       folder added only where two documents in the card share a file name.
-    A footer line carries the run id, what happened to the comments and how many
-    documents could not be reviewed.
+    1. Decision - title, the owner as the subtitle, and the decision as an icon with
+       what it means (a tick: work may start; a cross: work may not start).
+    2. Summary - reviewer role and who ran it, comment counts, impact (N/10).
+    3. Documents - per repository a one-line heading (role, short repository name,
+       branch), then one line per document: its decision icon and file name, with the
+       parent folder beneath only where two documents in the card share a name.
+    Then a short note on why (the decision's reason and the impact's), and a footer line
+    with the run id, what happened to the comments, and any document not reviewed.
 
     `targets` is a list of dicts: {"label", "role", "repo", "branch", "documents": [
     {"file", "folder", "verdict_key"}]}.
     """
-    words, meaning = _DOC_DECISION.get(decision, _DOC_DECISION["request-changes"])
-    header = {"title": "Document review",
-              # Header text is plain text in Chat, so it is not escaped.
-              "subtitle": f"{words} — {meaning}" + (f" · Owner: {owner}" if owner else "")}
-
-    summary = []
+    decision = _decision(decision)
+    header = {"title": "Document review"}
     if owner:
-        summary.append(_fact("Owner", owner))
-    summary.append(_pair(_fact("Reviewer role", persona or "?"),
-                         _fact("Reviewed by", reviewer) if reviewer else None))
-    impact_text = ""
-    if impact:
-        impact_text = f"{impact}/10" + (f" — {_clip_line(impact_reason)}"
-                                        if (impact_reason or "").strip() else "")
-    summary.append(_pair(_fact("Comments", comment_counts_text(counts)),
-                         _fact("Impact", impact_text, wrap=False) if impact_text else None))
+        # Header text is plain text in Chat, so it is not escaped.
+        header["subtitle"] = f"Owner: {owner}"
+
+    summary = [{"decoratedText": {"startIcon": _icon(_DOC_ICON[decision]),
+                                  "text": f"<b>{_DOC_MEANING[decision]}</b>"}},
+               _pair(_fact("Reviewer role", persona or "?"),
+                     _fact("Reviewed by", reviewer) if reviewer else None),
+               _pair(_fact("Comments", comment_counts_text(counts)),
+                     _fact("Impact", f"{impact}/10") if impact else None)]
 
     targets = [t for t in (targets or []) if t.get("documents")]
     names = [d.get("file") or "" for t in targets for d in t["documents"]]
     shared = {n for n in names if names.count(n) > 1}
-    blocks = []
+    docs = []
     for t in targets:
         repo, branch = short_repo(t.get("repo")), short_branch(t.get("branch"))
         place = " · ".join(x for x in (repo, branch) if x) or t.get("label") or ""
         if len(targets) > 1:
             label = {"BE": "Backend", "FE": "Frontend"}.get(t.get("role"), t.get("label") or "")
             place = f"{label} · {place}" if label and label != place else place
-        lines = [f"<b>{_esc(place)}</b>"]
-        docs = list(t["documents"])
-        for d in docs[:DOC_LINES_PER_REPO]:
+        docs.append({"decoratedText": {"text": f"<b>{_esc(place)}</b>", "wrapText": True}})
+        listed = list(t["documents"])
+        for d in listed[:DOC_LINES_PER_REPO]:
             name = d.get("file") or "?"
-            lines.append(f"{_esc(name)} — {_esc(_DOC_DECISION.get(d.get('verdict_key'), _DOC_DECISION['request-changes'])[0])}")
+            row = {"startIcon": _icon(_DOC_ICON[_decision(d.get("verdict_key"))]),
+                   "text": _esc(name), "wrapText": True}
             if name in shared:
-                folder = d.get("folder") or ""
-                lines.append("&nbsp;&nbsp;in " + (_esc(folder) if folder else "the top folder"))
-        if len(docs) > DOC_LINES_PER_REPO:
-            lines.append(f"and {len(docs) - DOC_LINES_PER_REPO} more")
-        blocks.append({"decoratedText": {"text": "<br>".join(lines), "wrapText": True}})
+                # Plain text in Chat: not escaped.
+                row["bottomLabel"] = "in " + (d.get("folder") or "the top folder")
+            docs.append({"decoratedText": row})
+        if len(listed) > DOC_LINES_PER_REPO:
+            docs.append({"decoratedText": {
+                "text": f"and {len(listed) - DOC_LINES_PER_REPO} more"}})
 
+    note = ". ".join(x for x in (
+        (decision_reason or "").strip().rstrip("."),
+        (f"Impact {impact}/10: {short_reason(impact_reason)}"
+         if impact and short_reason(impact_reason) else "")) if x)
     foot = []
     if run_id:
         foot.append(f"Run {run_id}")
@@ -266,11 +294,16 @@ def build_doc_card(persona, owner="", reviewer="", decision="", impact=None,
         foot.append(f"{not_reviewed} document{'' if not_reviewed == 1 else 's'} "
                     f"could not be reviewed")
     sections = [{"widgets": summary}]
-    if blocks:
-        sections.append({"header": "Documents", "widgets": blocks})
+    if docs:
+        sections.append({"header": "Documents", "widgets": docs})
+    tail = []
+    if note:
+        tail.append({"textParagraph": {"text": _esc(note + ".")}})
     if foot:
-        sections.append({"widgets": [{"textParagraph": {
-            "text": f'<font color="#5f6368">{_esc(" · ".join(foot))}</font>'}}]})
+        tail.append({"textParagraph": {
+            "text": f'<font color="#5f6368">{_esc(" · ".join(foot))}</font>'}})
+    if tail:
+        sections.append({"widgets": tail})
     return {"header": header, "sections": sections}
 
 

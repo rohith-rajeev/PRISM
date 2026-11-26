@@ -611,11 +611,15 @@ Leave the field empty to turn it off — nothing else about PRISM changes.
 ## Document-review alerts
 The same, for document reviews, with a **separate webhook** in the same **Help** card
 (`google_chat_docs_webhook_url`; `prism config set docs-webhook …`). When a document
-review finishes PRISM posts one card: the reviewer **persona** (Business Analyst,
-Architect or QA), who ran it, the verdict, impact and comment counts by severity, the
-**branch(es)** reviewed, the **path of each document** from the repository root with its
-own verdict, and whether the comments were committed and pushed. A run that fails outright
-posts nothing; a failed post never affects the review.
+review finishes PRISM posts one compact card: the **owner** under the title, the
+decision as a flat icon (a tick: work may start; a cross: work may not start), the
+reviewer **persona** (Business Analyst, Architect or QA), who ran it, the comment counts
+by severity and the impact (`6/10`), then per repository its **branch** and each
+**document** by file name with its own decision icon (at most five, then "and N more").
+A one-sentence note says why (the open comments, a large change…, and the impact's
+reason), and a footer gives the run id and whether the comments were committed and
+pushed. Pull-request cards use the same flat icons. A run that fails outright, or a dry
+run, posts nothing; a failed post never affects the review.
 
 ## Your name
 The first time PRISM starts it asks for your name or username, once. It names the window
