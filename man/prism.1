@@ -1,6 +1,6 @@
 .TH PRISM 1 "" "PRISM" "PRISM Manual"
 .SH NAME
-prism \- review and safely merge AWS CodeCommit pull requests, and review spec documents, from the command line
+prism \- review and safely merge AWS CodeCommit pull requests and GitLab merge requests, and review spec documents, from the command line
 .SH SYNOPSIS
 .B prism
 .I command
@@ -19,6 +19,8 @@ prism \- review and safely merge AWS CodeCommit pull requests, and review spec d
 .B prism docs
 .I file
 \&...
+.B \-\-owner
+.I NAME
 .RB [ \-\-branch
 .IR NAME ]
 .RB [ \-\-persona
@@ -45,9 +47,30 @@ from anywhere.
 .PP
 .B prism run
 works out what it needs from the folder you are in: the git repository (from
-any subdirectory), the CodeCommit repository name and region from its
+any subdirectory), the host from its
 .B origin
-remote, then your saved defaults. A folder that holds several clones needs
+remote (AWS CodeCommit, or GitLab on gitlab.com or a self\-managed server), the
+CodeCommit repository name and region or the GitLab project from that remote, then
+your saved defaults. A remote that is neither is refused. A GitLab merge request goes
+through the same stages and gates as a CodeCommit pull request: review, description,
+merge check, sync, then a fast\-forward merge only (never a squash or a merge commit,
+never a force\-push). A project whose merge method cannot fast\-forward is reviewed and
+described, and the job stops before merging. GitLab needs an access token with the api
+scope, from
+.B GITLAB_TOKEN
+or
+.BR "prism config set gitlab_token" ;
+the AWS CLI is not needed for it.
+.PP
+Every review classifies the change as
+.B normal
+or
+.BR large .
+A large change (very large or expensive to build, roll back or review safely) scores
+at least 8/10, is never approved and is never merged, whatever anyone answers. A
+normal change with an impact of 7 or more still waits for a person to confirm the
+merge.
+.PP A folder that holds several clones needs
 .BR \-\-repo ;
 PRISM never guesses between them.
 .PP
@@ -62,6 +85,16 @@ always checking security, stability and scalability. PRISM adds its findings to
 the end of each document as a \(lqPRISM review comments\(rq section, grouped by severity
 (Blocker, Major, Minor, Suggestion) with a category and a stable id such as
 .BR DR\-3 .
+A document review ends in one of two decisions:
+.B Approve
+(work may start) or
+.B Request changes
+(work may not start). PRISM sets it: any open Blocker or Major comment, a review cut
+short, or a change classified as large means Request changes. Every document review
+names its owner
+.RB ( \-\-owner ):
+the person who answers it, shown on the chat card and in the document beside the
+reviewer.
 The section is written to aid a human review, not to replace it. PRISM then
 commits it to the branch as
 .B PRISM\-<run id>: <brief message>
@@ -114,6 +147,12 @@ Run a finished job again with the same settings.
 .BI "ask " "id question"
 Ask the reviewer about a finished job. Read\-only: nothing is changed or merged.
 .TP
+.BI "chat " "id question"
+Ask the live chat about a job, in any state: running, queued, held, failed or
+finished, pull request or document review. The answer comes from the job's details
+and is printed. Read\-only: it never steers the review, uses a steering round or
+changes anything, and it declines questions that are not about the job.
+.TP
 .BI "rm " id ...
 Delete finished jobs' records and logs.
 .TP
@@ -152,9 +191,12 @@ Project folder. Default: the git repository you are in, else the saved
 .BR project_dir .
 .TP
 .BI \-\-repo " NAME"
-CodeCommit repository name. Default: saved
+CodeCommit repository name, or the GitLab project path (\fIgroup/project\fR) when the
+remote's does not match the server. Default: saved
 .BR repo ,
-else the clone's remote, else the folder's name.
+else the clone's remote, else the folder's name. The host always comes from the
+remote. A GitLab merge request id may be written
+.BR !214 .
 .TP
 .BI \-\-clone " DIR"
 Local clone to use when it is not the folder itself.
@@ -204,6 +246,25 @@ or, for a file that exists only on the branch, from the repository root.
 .I file ...
 Document(s) to review, in a single repository: the one you are in, or
 .BR \-\-clone .
+A file on this machine outside the repository is an uploaded document (plain text,
+Markdown, Word .docx, PDF or Excel .xlsx). It is reviewed against the branch's code
+even though it is not committed; its comments go into a copy next to it
+(\fIname\fR.prism\-review.\fIext\fR; a PDF gets a Markdown sidecar and is never
+changed), and it is committed only with
+.BR \-\-dest .
+Outside any repository the documents are reviewed with no codebase.
+.TP
+.BI \-\-owner " NAME"
+Required. The owner of the review request: the person responsible for the document
+and for answering the review (not the person running PRISM).
+.TP
+.BI \-\-dest " FILE=PATH"
+Commit an uploaded document to
+.I PATH
+in the repository, with the review in it (Commit must be on). Repeat it per file;
+with one uploaded document
+.BI \-\-dest " PATH"
+is enough. A path that already exists on the branch is refused.
 .TP
 .BI \-\-path " DIR"
 Project folder. Default: the git repository you are in, else the saved
@@ -328,7 +389,9 @@ major, minor, suggestion for a document),
 .BR type ,
 .BR description ,
 .BR late_find ,
-.B persona
+.BR persona ,
+.B scale
+(normal or large, from the review it came from)
 and
 .BR traceability
 (repo, pull_request, branch, target_branch, commit, path, line, line_end, section, role);
@@ -464,7 +527,7 @@ Edit the file by hand or use:
 .B prism config path
 .RE
 .PP
-Three extra keys are shared with the desktop application.
+Five extra keys are shared with the desktop application.
 .B webhook
 sets the Google Chat webhook for pull\-request reviews,
 .B docs_webhook
@@ -473,7 +536,13 @@ sets the Google Chat webhook for pull\-request reviews,
 the one for document\-review alerts, and
 .B username
 the name that signs every review (the PR description, the chat cards, the review comments
-in a document). PRISM asks for the name once, at a terminal, the first time you run
+in a document).
+.B gitlab_token
+saves the GitLab access token (shown masked; the
+.B GITLAB_TOKEN
+environment variable wins), and
+.B gitlab_hosts
+lists self\-managed GitLab servers whose names do not contain \(lqgitlab\(rq. PRISM asks for the name once, at a terminal, the first time you run
 .B prism run
 or
 .BR "prism docs" ;

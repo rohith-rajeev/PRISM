@@ -28,6 +28,7 @@ import orchestrator as o  # noqa: E402
 
 REPORT = ("## PR #7\n**Verdict:** OK Approve\n"
           "**Impact score:** 2/10 - isolated\n"
+          "**Scale:** normal - one isolated file\n"
           "- **[Low] style — `x.py:1`** nit\n")
 
 
@@ -281,6 +282,8 @@ class SafetyGates(unittest.TestCase):
 
 HIGH_IMPACT_REPORT = ("## PR #7\n**Verdict:** OK Approve\n"
                       "**Impact score:** 8/10 - touches shared auth\n"
+                      # Normal scale: a high score alone is the confirmation gate, not a hold.
+                      "**Scale:** normal - one line in the auth module\n"
                       "- **[High] risk — `auth.py:1`** big change\n")
 
 
@@ -551,7 +554,8 @@ class VerdictRecovery(unittest.TestCase):
         prompts = []
         def continue_turn(prompt, *a, **k):
             prompts.append(prompt)
-            return 0, "**Verdict:** ✅ Approve\n**Impact score:** 2/10 — tiny\n", "ses_x"
+            return 0, ("**Verdict:** ✅ Approve\n**Impact score:** 2/10 — tiny\n"
+                       "**Scale:** normal — tiny\n"), "ses_x"
         o._continue_turn = continue_turn
         res = self._run(ask=lambda *a, **k: None)
         self.assertEqual(len(prompts), 1)

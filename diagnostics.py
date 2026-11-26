@@ -43,6 +43,9 @@ _SECRET_PATTERNS = (
     (re.compile(r"\b(?:sk|pk)-[A-Za-z0-9_-]{16,}"), "<redacted-key>"),
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), "<redacted-token>"),
     (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"), "<redacted-token>"),
+    # GitLab personal / project / group access tokens.
+    (re.compile(r"\bgl(?:pat|dt|ptt|oas|rt)-[A-Za-z0-9_.-]{10,}"), "<redacted-token>"),
+    (re.compile(r"(?i)\bPRIVATE-TOKEN\s*[:=]\s*\S+"), "PRIVATE-TOKEN: <redacted>"),
     (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{12,}"), "Bearer <redacted>"),
     # key = value / "key": "value" for the usual secret names.
     (re.compile(
@@ -71,7 +74,8 @@ def _scrub(value):
     if isinstance(value, str):
         return redact(value)
     if isinstance(value, dict):
-        return {k: ("<redacted>" if "webhook" in str(k).lower() and v else _scrub(v))
+        return {k: ("<redacted>" if any(w in str(k).lower() for w in ("webhook", "token"))
+                    and v else _scrub(v))
                 for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [_scrub(v) for v in value]
@@ -173,6 +177,68 @@ def _check_aws(region, deep):
                         "reachable" if rc == 0 else (_first_line(out) or "failed"),
                         "" if rc == 0 else "This identity cannot use CodeCommit in this region. "
                         "Check the region and that your IAM policy allows codecommit:*."))
+    return checks
+
+
+def _remote_of(repo):
+    """classify_remote() of the clone's origin, or None when there is no clone to read."""
+    import gitlab as GL
+    if not repo:
+        return None
+    rc, out = _run(["git", "remote", "get-url", "origin"], 10, cwd=str(Path(repo).expanduser()))
+    return GL.classify_remote(out.strip() if rc == 0 else "")
+
+
+def _check_gitlab(info, pr, deep):
+    """GitLab access: the token works, the project is visible, the MR is readable."""
+    import gitlab as GL
+    base = (info or {}).get("base_url") or ""
+    token = GL.get_token(base)
+    if not token:
+        return [Check("GitLab token", FAIL, "not set",
+                      "Set GITLAB_TOKEN, or save one with `prism config set gitlab_token "
+                      "<token>` (or under Help in the desktop app). It needs the api scope to "
+                      "read, describe and merge merge requests.")]
+    checks = [Check("GitLab token", OK, f"set ({GL.mask(token)})")]
+    if not deep or not base:
+        if not base:
+            checks.append(Check("GitLab", INFO, "no GitLab clone given; pass --repo <clone> "
+                                                "to check access to its project"))
+        return checks
+    client = GL.Client(base, token=token)
+    try:
+        user = client.current_user()
+        checks.append(Check(f"GitLab sign-in ({base})", OK,
+                            f"signed in as {user.get('username') or '?'}"))
+    except GL.GitLabError as exc:
+        checks.append(Check(f"GitLab sign-in ({base})", FAIL, _first_line(str(exc), 500),
+                            "Check the token (not expired, api scope) and the GitLab address."))
+        return checks
+    project = (info or {}).get("project") or ""
+    if project:
+        try:
+            p = client.project(project)
+            method = p.get("merge_method") or "?"
+            checks.append(Check(f"GitLab project {project}", OK if method == "ff" else WARN,
+                                f"visible; merge method '{method}'",
+                                "" if method == "ff" else "PRISM merges by fast-forward only; "
+                                "with this merge method it reviews and describes, then stops "
+                                "before merging."))
+        except GL.GitLabError as exc:
+            checks.append(Check(f"GitLab project {project}", FAIL, _first_line(str(exc), 500),
+                                "The token cannot see this project: check the path and the "
+                                "token's access."))
+            return checks
+    if pr and project:
+        try:
+            mr = client.get_pr(project, str(pr).lstrip("!#"))
+            checks.append(Check(f"merge request !{str(pr).lstrip('!#')}", OK,
+                                f"{mr.get('sourceReference')} → {mr.get('destinationReference')} "
+                                f"({mr.get('status') or 'status unknown'})"))
+        except GL.GitLabError as exc:
+            checks.append(Check(f"merge request !{str(pr).lstrip('!#')}", FAIL,
+                                _first_line(str(exc), 500), "PRISM could not read this merge "
+                                "request: wrong number, or no access."))
     return checks
 
 
@@ -296,9 +362,26 @@ def run_checks(region=None, repo=None, pr=None, model=None, deep=True):
     path_checks, _missing = _check_path()
     checks += path_checks
     checks += _check_git()
-    checks += _check_aws(region, deep)
-    if deep and pr:
-        checks += _check_pr(pr, region)
+    import gitlab as GL
+    remote = _remote_of(repo)
+    host = (remote or {}).get("host")
+    has_token = bool(GL.get_token((remote or {}).get("base_url") or ""))
+    if host == GL.HOST_GITLAB:
+        # A machine that only uses GitLab does not need the AWS CLI (FR-GL-6).
+        checks.append(Check("aws CLI", INFO, "not needed: this clone's remote is GitLab"))
+        checks += _check_gitlab(remote, pr, deep)
+    else:
+        aws = _check_aws(region, deep)
+        if remote is None and has_token:
+            # No clone named, GitLab configured: the AWS CLI matters only for CodeCommit.
+            aws = [Check(c.name, WARN if c.status == FAIL else c.status, c.detail,
+                         (c.hint + " (Only needed for CodeCommit; GitLab is set up too.)")
+                         if c.status == FAIL else c.hint) for c in aws]
+        checks += aws
+        if remote is None and has_token:
+            checks += _check_gitlab(None, None, deep)
+        if deep and pr:
+            checks += _check_pr(pr, region)
     if deep and repo:
         checks += _check_repo(repo)
     checks += _check_engine(model, deep)

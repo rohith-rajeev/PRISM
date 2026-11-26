@@ -225,6 +225,7 @@ class DocFormLayout(unittest.TestCase):
         card = self.form.cards["BE"]
         card["branch"].set("feat/x")
         card["files"].insert("1.0", "docs/extra/one.md")
+        self.form.owner_var.set("Priya")         # required since v7.0 (FR-OWN-1)
         return card
 
     def test_the_reviewer_persona_is_chosen_with_one_click_and_reaches_the_job(self):

@@ -99,6 +99,23 @@ def effective_username():
     return get_username() or system_username()
 
 
+# ---- the owner of a document review request -------------------------------------
+# The person who answers a document review (not the person who ran it). Asked on
+# every document review; the last one given pre-fills the next form (FR-OWN-2).
+def get_last_owner():
+    value = load().get("last_doc_owner")
+    return clean_username(value) if isinstance(value, str) else ""
+
+
+def set_last_owner(name):
+    name = clean_username(name)
+    if not name:
+        return
+    cfg = load()
+    cfg["last_doc_owner"] = name
+    save(cfg)
+
+
 # ---- codegen integration -------------------------------------------------------
 # Optional and OFF by default: PRISM opens no port and touches nothing unless
 # the person turns this on. Stored under one "codegen" key so the file stays

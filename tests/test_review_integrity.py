@@ -419,6 +419,7 @@ class DocumentReviewsFollowTheSameRule(unittest.TestCase):
     def run_job(self, agent_output, **kw):
         D._run_agent = lambda *a, **k: (0, agent_output, "sess")
         t = D.DocTarget("repo", "clone", str(self.clone), "feat/x", ("docs/spec.md",))
+        kw.setdefault("owner", "Priya")
         return D._pipeline(project_dir=str(self.project), targets=[t],
                            emit=lambda m, *a, **k: self.log.append(m), **kw)
 

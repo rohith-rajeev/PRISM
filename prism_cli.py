@@ -34,9 +34,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config as CFG  # noqa: E402
+import chat as CHAT  # noqa: E402
 import cli_jobs as CJ  # noqa: E402
 import diagnostics as DG  # noqa: E402
 import docreview as DR  # noqa: E402
+import gitlab as GL  # noqa: E402
 import jobs as J  # noqa: E402
 import winproc  # noqa: E402
 from pathutil import native_path, native_rel  # noqa: E402
@@ -51,7 +53,8 @@ PROG = "prism"
 
 # Words the first argument can be. The desktop binary uses this to decide
 # whether it was started as a command or as the application.
-COMMANDS = ("run", "docs", "jobs", "logs", "stop", "retry", "ask", "rm", "models", "repos",
+COMMANDS = ("run", "docs", "jobs", "logs", "stop", "retry", "ask", "chat", "rm", "models",
+            "repos",
             "doctor", "export", "config", "man", "version", "update", "help")
 
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_STOPPED = 0, 1, 2, 130
@@ -194,13 +197,41 @@ def resolve_target(path=None, repo=None, clone=None, cfg=None, cwd=None):
     return str(base), name, local, region_hint
 
 
+def detect_host(clone):
+    """What the clone's origin remote is: classify_remote's dict (host, base_url,
+    project, region). No clone, or no remote, is CodeCommit as before."""
+    url = _git(clone, "config", "--get", "remote.origin.url") if clone else ""
+    return GL.classify_remote(url)
+
+
 def build_spec(args, cfg=None, cwd=None):
     cfg = cfg if cfg is not None else CFG.get_cli()
     project_dir, repo, local, region_hint = resolve_target(
         args.path, args.repo, args.clone, cfg=cfg, cwd=cwd)
-    pr = str(args.pr_id).strip().lstrip("#")
+    if local is None and args.repo:
+        # `--repo` may be the GitLab project path correcting what the remote says
+        # (FR-GL-2); the clone is then still the one you are in.
+        _p, _r, here, _h = resolve_target(args.path, None, args.clone, cfg=cfg, cwd=cwd)
+        if here and detect_host(here)["host"] == GL.HOST_GITLAB:
+            project_dir, local = _p, here
+    pr = str(args.pr_id).strip().lstrip("#!")
     if not pr.isdigit():
-        raise UsageError("The pull request id must be a number, e.g. prism run 214")
+        raise UsageError("The pull request or merge request id must be a number, e.g. "
+                         "prism run 214 (a GitLab merge request may be written !214)")
+    info = detect_host(local)
+    if info["host"] == GL.HOST_UNSUPPORTED:
+        raise UsageError(f"{local}: its origin remote is neither AWS CodeCommit nor GitLab. "
+                         f"PRISM reviews CodeCommit pull requests and GitLab merge requests "
+                         f"only. (A self-managed GitLab whose name does not contain "
+                         f"'gitlab': prism config set gitlab_hosts <host>)")
+    host, host_url = info["host"], ""
+    if host == GL.HOST_GITLAB:
+        host_url = info["base_url"]
+        repo = (args.repo or "").strip() or info["project"]
+        if not GL.get_token(host_url):
+            raise UsageError("No GitLab token. Set GITLAB_TOKEN, or save one with: "
+                             f"{PROG} config set gitlab_token <token> (it needs the api scope "
+                             f"to read, describe and merge the merge request).")
 
     def flag(cli_value, key):
         return cfg[key] if cli_value is None else cli_value
@@ -221,7 +252,8 @@ def build_spec(args, cfg=None, cwd=None):
         do_merge=flag(args.merge, "merge"), do_sync=flag(args.sync, "sync"),
         dry_run=flag(args.dry_run, "dry_run"),
         webhook_url=CFG.get_webhook_url() or None, reviewer=CFG.effective_username(),
-        custom_instructions=(instructions or "").strip(), origin="cli")
+        custom_instructions=(instructions or "").strip(), origin="cli",
+        host=host, host_url=host_url)
 
 
 def with_identity(spec):
@@ -244,24 +276,55 @@ def _current_branch(clone):
 
 
 def _doc_path(arg, clone, cwd):
-    """A document argument as a path from the repository root.
+    """A document argument: ("repo", path from the repository root) or ("upload", file).
 
-    Typed the way a shell would: relative to where you are (so tab completion
-    from a subfolder works), or absolute, or - for a file that only exists on
-    the branch - already from the repository root.
+    Typed the way a shell would: relative to where you are (so tab completion from a
+    subfolder works), or absolute, or - for a file that only exists on the branch -
+    already from the repository root. A file that exists on this machine but outside
+    the repository is an uploaded document (FR-DOC-IN-5): reviewed from where it is,
+    and committed only to a --dest you give.
     """
-    clone_root = Path(native_path(clone)).resolve()
     given = Path(native_path(arg))
+    local = given if given.is_absolute() else Path(cwd) / given
+    if clone is None:
+        if local.is_file():
+            return "upload", str(local.resolve())
+        raise UsageError(f"{arg} is not a file. With no repository, documents are files on "
+                         f"this machine.")
+    clone_root = Path(native_path(clone)).resolve()
     for candidate in ([given] if given.is_absolute() else [Path(cwd) / given, clone_root / given]):
         try:
             rel = candidate.resolve().relative_to(clone_root)
         except (ValueError, OSError):
             continue
         if candidate.exists() and rel.parts:
-            return str(rel)
+            return "repo", str(rel)
+    if local.is_file():
+        return "upload", str(local.resolve())
     if given.is_absolute():
-        raise UsageError(f"{arg} is not inside {clone_root}.")
-    return native_rel(arg) or arg
+        raise UsageError(f"{arg} is not a file.")
+    return "repo", native_rel(arg) or arg
+
+
+def _dest_map(values, uploads):
+    """{upload path: destination} from --dest FILE=PATH (or a bare PATH with one upload)."""
+    out = {}
+    for raw in values or []:
+        raw = str(raw)
+        if "=" in raw:
+            src, dest = raw.split("=", 1)
+            src_path = str(Path(native_path(src)).resolve()) if src.strip() else ""
+            match = [u for u in uploads if u == src_path or Path(u).name == src.strip()]
+            if len(match) != 1:
+                raise UsageError(f"--dest {raw}: {src} is not one of the uploaded documents"
+                                 + (f" ({', '.join(Path(u).name for u in uploads)})"
+                                    if uploads else "") + ".")
+            out[match[0]] = dest.strip()
+        elif len(uploads) == 1:
+            out[uploads[0]] = raw.strip()
+        else:
+            raise UsageError("--dest needs FILE=PATH when more than one document is uploaded.")
+    return out
 
 
 def build_docs_spec(args, cfg=None, cwd=None):
@@ -329,6 +392,8 @@ def build_docs_spec(args, cfg=None, cwd=None):
                 raise UsageError(
                     f"{base} holds {len(subs)} clones ({', '.join(n for n, _ in subs)}). "
                     f"Say which one: --clone <dir>")
+            if role == "repo" and not args.branch:
+                return None             # no repository: uploaded files only (FR-DOC-IN-7)
             raise UsageError(f"No git clone found in {base}. Run from inside one, or pass "
                              f"--clone <dir>.")
         named = [(n, p) for n, p in subs if DR.guess_role(n) == role]
@@ -344,8 +409,22 @@ def build_docs_spec(args, cfg=None, cwd=None):
                          + f". Say so: --{role.lower()}-clone <dir>")
 
     targets = []
+    dest_values = list(getattr(args, "dest", None) or [])
+    all_uploads = []
     for role, explicit, branch, files in wanted:
         clone = pick_clone(role, explicit)
+        kinds = [_doc_path(f, clone, cwd) for f in files]
+        rels = tuple(dict.fromkeys(p for k, p in kinds if k == "repo"))
+        ups = list(dict.fromkeys(p for k, p in kinds if k == "upload"))
+        for u in ups:
+            bad = DR.upload_type_problem(u)
+            if bad:
+                raise UsageError(bad)
+        all_uploads += [(u, len(targets)) for u in ups]
+        if clone is None:
+            targets.append(DR.DocTarget(role=DR.ROLE_NONE, repo_name="", local_repo="",
+                                        branch="", files=(), uploads=tuple(ups)))
+            continue
         name = branch or _current_branch(clone)
         if not name:
             raise UsageError(f"{clone} is not on a branch (detached HEAD). Say which one: "
@@ -356,7 +435,16 @@ def build_docs_spec(args, cfg=None, cwd=None):
             raise UsageError(f"{bad[0].upper()}{bad[1:]}.")
         targets.append(DR.DocTarget(
             role=role, repo_name=Path(clone).name, local_repo=clone, branch=name,
-            files=tuple(dict.fromkeys(_doc_path(f, clone, cwd) for f in files))))
+            files=rels, uploads=tuple(ups)))
+    dests = _dest_map(dest_values, [u for u, _i in all_uploads])
+    if dests:
+        fixed = []
+        for i, t in enumerate(targets):
+            ups = tuple(DR.Upload(u.path, dests.get(u.path, "")) for u in t.uploads)
+            if any(u.dest for u in ups) and not t.has_repo:
+                raise UsageError("--dest needs a repository and a branch to commit to.")
+            fixed.append(dataclasses.replace(t, uploads=ups))
+        targets = fixed
     if len({t.local_repo for t in targets}) != len(targets):
         raise UsageError("The backend and the frontend are the same clone. Pass "
                          "--be-clone and --fe-clone.")
@@ -385,8 +473,16 @@ def build_docs_spec(args, cfg=None, cwd=None):
         except OSError as e:
             raise UsageError(f"Cannot read {args.instructions_file}: {e.strerror or e}")
     do_commit = flag(args.commit, "commit")
+    # Who owns the request and answers the review (FR-OWN-1): required, never guessed.
+    owner = CFG.clean_username(getattr(args, "owner", "") or "")
+    if not owner:
+        raise UsageError("Say who owns this review request - the person responsible for "
+                         f"the document and for answering the review: --owner <name>")
     return DR.DocJobSpec(
-        project_dir=str(base), targets=tuple(targets), requirements_path=requirements,
+        owner=owner,
+        project_dir=str(base) if any(t.has_repo for t in targets) or is_repo or subs
+        else (str(start) if args.path else ""),
+        targets=tuple(targets), requirements_path=requirements,
         persona=persona, model=args.model or cfg["model"] or None, do_commit=do_commit,
         do_push=flag(args.push, "push") and do_commit, dry_run=flag(args.dry_run, "dry_run"),
         custom_instructions=(instructions or "").strip(), origin="cli",
@@ -614,6 +710,13 @@ def execute(spec, job_id=None, quiet=False, runner=None, interactive=None):
         if getattr(spec, "kind", "pr") == "docs":
             fields.update(committed=summary.get("committed") is True,
                           pushed=summary.get("pushed") is True)
+            # A document's verdict is one of exactly two values (FR-X-6).
+            if summary.get("decision") in DR.DECISIONS:
+                fields["verdict"] = summary["decision"]
+        if summary.get("scale") in ("normal", "large"):
+            fields["scale"] = summary["scale"]
+        elif getattr(summary.get("review"), "scale", "") in ("normal", "large"):
+            fields["scale"] = summary["review"].scale
         if not fields["tokens"]:
             fields.pop("tokens")
         # What the review found, as data (see findings.py) - read by `prism jobs --json`.
@@ -641,7 +744,9 @@ def execute(spec, job_id=None, quiet=False, runner=None, interactive=None):
 # ------------------------------------------------------------ commands --
 def _add_run_options(p):
     p.add_argument("--path", help="project folder (default: the git repository you are in)")
-    p.add_argument("--repo", help="CodeCommit repository name (default: from the clone's remote)")
+    p.add_argument("--repo", help="CodeCommit repository name, or GitLab project path "
+                                  "(group/project) when the remote's does not match the "
+                                  "server (default: from the clone's remote)")
     p.add_argument("--clone", help="local clone to use, when not the folder itself")
     p.add_argument("--region", help=f"AWS region (default: {REGION_DEFAULT} or your saved default)")
     p.add_argument("--model", help="reviewer model, e.g. anthropic/claude-sonnet-5-5")
@@ -665,7 +770,9 @@ def _add_run_options(p):
 
 def _add_docs_options(p):
     p.add_argument("files", nargs="*", metavar="file",
-                   help="document(s) to review, in the repository you are in")
+                   help="document(s) to review: paths in the repository you are in, or "
+                        "files elsewhere on this machine (reviewed as uploaded documents; "
+                        "with no repository at all, reviewed without a codebase)")
     p.add_argument("--path", help="project folder (default: the git repository you are in)")
     p.add_argument("--clone", help="the repository's clone, when it is not the folder itself")
     p.add_argument("--branch", help="branch the documents are on (default: the one checked out)")
@@ -677,6 +784,13 @@ def _add_docs_options(p):
     p.add_argument("--fe-clone", metavar="DIR", help="the frontend clone (default: guessed from "
                                                       "the folder names)")
     p.add_argument("--fe-branch", metavar="NAME", help="frontend branch (default: checked out)")
+    p.add_argument("--owner", metavar="NAME",
+                   help="who owns this review request: the person responsible for the "
+                        "document and for answering the review (required)")
+    p.add_argument("--dest", action="append", metavar="FILE=PATH",
+                   help="commit an uploaded document (a file outside the repository) to PATH "
+                        "in the repository, with the review in it; repeat per file. Without "
+                        "it the review goes into a local copy only")
     p.add_argument("--persona", metavar="NAME",
                    help="who reviews: ba (Business Analyst, functional; the default), "
                         "architect (technical) or qa (quality)")
@@ -705,13 +819,17 @@ def _add_docs_options(p):
 
 def build_parser():
     p = argparse.ArgumentParser(
-        prog=PROG, description="PRISM - review and safely merge AWS CodeCommit pull requests.",
+        prog=PROG, description="PRISM - review and safely merge AWS CodeCommit pull requests "
+                               "and GitLab merge requests, and review spec documents.",
         epilog=f"Run '{PROG} <command> --help' for a command's options. Defaults live in "
                f"{CFG.CONFIG_PATH} (see '{PROG} config').")
     sub = p.add_subparsers(dest="command", metavar="<command>")
 
-    r = sub.add_parser("run", help="review a pull request",
-                       description="Review PR <pr_id> of the repository in the current folder.")
+    r = sub.add_parser("run", help="review a pull request (CodeCommit) or merge request (GitLab)",
+                       description="Review CodeCommit pull request <pr_id>, or GitLab merge "
+                                   "request <pr_id> (also written !<id>), of the repository in "
+                                   "the current folder. The host is read from the clone's "
+                                   "origin remote.")
     r.add_argument("pr_id", metavar="pr_id")
     _add_run_options(r)
 
@@ -750,6 +868,16 @@ def build_parser():
     a = sub.add_parser("ask", help="ask the reviewer about a finished job (read-only)")
     a.add_argument("job_id")
     a.add_argument("question", nargs="+")
+
+    ch = sub.add_parser(
+        "chat", help="ask about a job, in any state (read-only)",
+        description="Ask the live chat about a job - running, queued, held, failed or "
+                    "finished, pull request or document review. The answer comes from the "
+                    "job's details and is printed; it never steers the review, uses a "
+                    "steering round or changes anything. Questions that are not about the "
+                    "job are declined.")
+    ch.add_argument("job_id")
+    ch.add_argument("question", nargs="+")
 
     rm = sub.add_parser("rm", help="delete a finished job's record and log")
     rm.add_argument("job_id", nargs="*")
@@ -807,12 +935,12 @@ def build_parser():
 
 
 CONFIG_KEYS_HELP = list(CFG.CLI_TEXT_KEYS) + list(CFG.CLI_FLAG_KEYS) + [
-    "webhook", "docs_webhook", "username"]
+    "webhook", "docs_webhook", "username", "gitlab_token", "gitlab_hosts"]
 
 
 def cmd_run(args):
     spec = build_spec(args)
-    dup = CJ.find_active(spec.repo_name, spec.pr_id)
+    dup = CJ.find_duplicate(spec)
     if dup is not None and dup.get("id") != args.job_id:
         raise UsageError(f"{spec.label} is already being reviewed (job {dup['id']}).")
     job_id = args.job_id or CJ.new_id()
@@ -898,6 +1026,9 @@ def cmd_jobs(args):
             if not isinstance(r.get("findings"), list):
                 r["findings"] = []
             r.setdefault("reviewer", "")
+            r.setdefault("scale", None)
+            if (r.get("spec") or {}).get("kind") == "docs":
+                r.setdefault("spec", {}).setdefault("owner", "")
         print(json.dumps(records, indent=1))
         return EXIT_OK
     if not records:
@@ -910,7 +1041,12 @@ def cmd_jobs(args):
     rows = [("ID", "STATUS", "TARGET" if has_docs else "PULL REQUEST", "STAGE / RESULT", "AGE")]
     for r in records:
         active = CJ.is_active(r)
-        detail = r.get("stage") if active else (r.get("verdict") or r.get("error") or "")
+        verdict = r.get("verdict") or ""
+        if (r.get("spec") or {}).get("kind") == "docs" and verdict in DR.DECISIONS:
+            verdict = DR.decision_words(verdict)
+        if r.get("scale") == "large" and verdict:
+            verdict += " (large change)"
+        detail = r.get("stage") if active else (verdict or r.get("error") or "")
         if not active and r.get("merged"):
             detail = (detail + "  ·  merged").strip(" ·")
         elif not active and r.get("pushed"):
@@ -1044,7 +1180,9 @@ def cmd_ask(args):
                 question, spec.project_dir, spec.repo_name, spec.pr_id,
                 local_repo=spec.local_repo, region=spec.region, model=spec.model,
                 session_id=record.get("session_id") or None, outcome=outcome,
-                emit=emit, control=control)
+                emit=emit, control=control,
+                **({"host": spec.host, "host_url": spec.host_url}
+                   if getattr(spec, "is_gitlab", False) else {}))
         reason = followup_declined(reply) if getattr(spec, "kind", "pr") != "docs" else None
         reporter.line(f"⛔ Not actioned — {reason}" if reason else "✔ Follow-up answered.",
                       "warn" if reason else "ok")
@@ -1059,6 +1197,77 @@ def cmd_ask(args):
     finally:
         reporter.close()     # the job is finished, so this is the only writer
     return code
+
+
+def record_details(record, log_text=None):
+    """A CLI job's details for the live chat (chat.snapshot), from its record and log."""
+    spec_data = record.get("spec") or {}
+    docs = spec_data.get("kind") == "docs"
+    try:
+        spec = CJ.spec_from_dict(spec_data)
+    except ValueError:
+        spec = None
+    verdict = record.get("verdict") or ""
+    if docs and verdict in DR.DECISIONS:
+        verdict = DR.verdict_label(verdict)
+    if spec is None:
+        settings = target = host = ""
+    elif docs:
+        settings = spec.summary_bits()
+        target = "; ".join(
+            (f"{t.label}: {t.repo_name} @ {t.branch}" if t.has_repo else t.label) + " — "
+            + ", ".join(list(t.files) + [f"{u.name} (uploaded)" for u in t.uploads])
+            for t in spec.targets)
+        host = ""
+    else:
+        settings, target = spec.summary_bits(), spec.label
+        host = ("GitLab " + spec.host_url) if spec.is_gitlab else f"CodeCommit ({spec.region})"
+    stage = record.get("stage") or ""
+    if log_text is None:
+        log_text = CJ.read_log(record.get("id"), tail=CHAT.OUTPUT_TAIL_LINES) or ""
+    return {
+        "label": CJ.label(record), "kind": "docs" if docs else "pr",
+        "status": CJ.status_of(record), "stages": {"current stage": stage} if stage else {},
+        "settings": settings, "host": host or None, "target": target,
+        "branches": record.get("branches") or None,
+        "owner": spec_data.get("owner") or None, "reviewer": record.get("reviewer") or None,
+        "verdict": verdict, "impact": record.get("impact") or None,
+        "scale": record.get("scale") or None,
+        "merged": record.get("merged") if record.get("merged") is not None else None,
+        "stopped": record.get("stopped") or None, "error": record.get("error") or None,
+        "findings": record.get("findings") if isinstance(record.get("findings"), list)
+        else None,
+        "output": (log_text or "").splitlines(),
+    }
+
+
+def chat_reply(record, question, control=None):
+    """(reply, how) for a question about a CLI job. The reviewer's session is continued
+    only once the job is finished; a running job is answered from its record."""
+    spec = CJ.spec_from_dict(record.get("spec"))
+    details = CHAT.snapshot(record_details(record))
+    session = record.get("session_id") if CJ.is_finished(record) else None
+    return CHAT.ask(question, details, CJ.label(record), getattr(spec, "kind", "pr"),
+                    spec.project_dir, model=spec.model, session_id=session or None,
+                    control=control)
+
+
+def cmd_chat(args):
+    record = _need_record(args.job_id)
+    try:
+        CJ.spec_from_dict(record.get("spec"))
+    except ValueError as e:
+        raise UsageError(f"Cannot chat about {args.job_id}: {e}")
+    control = RunControl()
+    try:
+        reply, _how = chat_reply(record, " ".join(args.question), control=control)
+    except Cancelled:
+        return EXIT_STOPPED
+    except Exception as e:  # noqa: BLE001
+        print(f"Could not answer: {str(e)[:500]}", file=sys.stderr)
+        return EXIT_ERROR
+    print(reply)
+    return EXIT_OK
 
 
 def cmd_rm(args):
@@ -1158,6 +1367,12 @@ def cmd_config(args):
         docs_hook = CFG.get_docs_webhook_url()
         print(f"{'docs_webhook':<13} {_mask(docs_hook) if docs_hook else '-'}")
         print(f"{'username':<13} {CFG.get_username() or '-'}")
+        saved = CFG.load().get("gitlab_token")
+        token = saved.strip() if isinstance(saved, str) else ""
+        print(f"{'gitlab_token':<13} {GL.mask(token) if token else '-'}")
+        hosts = CFG.load().get("gitlab_hosts")
+        hosts = [hosts] if isinstance(hosts, str) else (hosts if isinstance(hosts, list) else [])
+        print(f"{'gitlab_hosts':<13} {', '.join(str(h) for h in hosts) or '-'}")
         return EXIT_OK
     key = (args.key or "").replace("-", "_")
     if key not in CONFIG_KEYS_HELP:
@@ -1169,6 +1384,12 @@ def cmd_config(args):
             CFG.set_docs_webhook_url("")
         elif key == "username":
             CFG.set_username("")
+        elif key == "gitlab_token":
+            GL.set_token("")
+        elif key == "gitlab_hosts":
+            cfg = CFG.load()
+            cfg.pop("gitlab_hosts", None)
+            CFG.save(cfg)
         else:
             CFG.unset_cli(key)
         print(f"{key} unset.")
@@ -1186,6 +1407,13 @@ def cmd_config(args):
             raise UsageError("The name is empty once markup and control characters are removed.")
         CFG.set_username(name)
         text = name
+    elif key == "gitlab_token":
+        GL.set_token(text)
+        text = GL.mask(text.strip())         # never echoed in full
+    elif key == "gitlab_hosts":
+        cfg = CFG.load()
+        cfg["gitlab_hosts"] = [h.strip() for h in re.split(r"[,\s]+", text) if h.strip()]
+        CFG.save(cfg)
     elif key in CFG.CLI_FLAG_KEYS:
         CFG.set_cli(**{key: _parse_bool(text)})
     elif key == "project_dir":
@@ -1261,7 +1489,8 @@ def cmd_update(args):
 
 
 HANDLERS = {"run": cmd_run, "jobs": cmd_jobs, "logs": cmd_logs, "stop": cmd_stop,
-            "docs": cmd_docs, "retry": cmd_retry, "ask": cmd_ask, "rm": cmd_rm, "models": cmd_models,
+            "docs": cmd_docs, "retry": cmd_retry, "ask": cmd_ask, "chat": cmd_chat, "rm": cmd_rm,
+            "models": cmd_models,
             "doctor": cmd_doctor, "export": cmd_export,
             "repos": cmd_repos, "config": cmd_config, "man": cmd_man,
             "update": cmd_update}

@@ -166,6 +166,7 @@ class Pipeline(unittest.TestCase):
 
     def run_job(self, **kw):
         t = D.DocTarget("repo", "clone", str(self.clone), "feat/x", ("docs/spec.md",))
+        kw.setdefault("owner", "Priya")
         return D._pipeline(project_dir=str(self.project), targets=[t],
                            emit=lambda m, *a, **k: self.log.append(m), **kw)
 
@@ -208,7 +209,7 @@ class Pipeline(unittest.TestCase):
         self.run_job(persona="architect")
         self.assertIn("PERSONA: Architect.", self.prompts[0])
         text = self.remote()
-        self.assertIn("Review v1 · Architect · run", text)
+        self.assertIn("Review v1 · Architect · owner Priya · run", text)
         _b, runs, _a = D.split_document(text)
         self.assertEqual((runs[0].meta["persona"], runs[0].meta["persona_label"]),
                          ("architect", "Architect"))
@@ -351,7 +352,7 @@ class CommandLine(Isolated):
         try:
             with mock.patch.object(sys, "stdout", out), mock.patch.object(sys.stdin, "isatty",
                                                                           return_value=False):
-                code = P.main(["docs", "docs/spec.md", "--persona", "qa"])
+                code = P.main(["docs", "docs/spec.md", "--persona", "qa", "--owner", "Priya"])
                 P.main(["jobs", "--all"])
         finally:
             os.chdir(old)

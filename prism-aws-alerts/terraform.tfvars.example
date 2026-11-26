@@ -5,7 +5,8 @@
 aws_region  = "us-east-1"
 name_prefix = "prism-aws-alerts"
 
-# Example matching "chat A gets qa+staging+production, chat B gets staging only":
+# Example matching "chat A gets qa+staging+production, chat B gets staging only,
+# and the develop group gets develop only":
 chat_targets = [
   {
     name        = "chat-a"
@@ -16,6 +17,13 @@ chat_targets = [
     name        = "chat-b"
     webhook_url = "https://chat.googleapis.com/v1/spaces/BBBBBBB/messages?key=XXXX&token=YYYY"
     branches    = ["staging"]
+  },
+  # The develop group: watches only develop, so develop merges and deployments
+  # never reach the release groups above (and qa/staging/main never reach it).
+  {
+    name        = "chat-develop"
+    webhook_url = "https://chat.googleapis.com/v1/spaces/DDDDDDD/messages?key=XXXX&token=YYYY"
+    branches    = ["develop"]
   },
 ]
 
@@ -33,6 +41,21 @@ pipeline_branches = {
   "your-frontend-pipeline-qa"   = "qa"
   "your-frontend-pipeline-stg"  = "staging"
   "your-frontend-pipeline-prod" = "main"
+  "your-backend-pipeline-dev"   = "develop"
+  "your-frontend-pipeline-dev"  = "develop"
+}
+
+# Which repository each pipeline deploys from - used to look up the deployed
+# commit's author when no PR-merge thread was recorded.
+pipeline_repositories = {
+  "your-backend-pipeline-qa"    = "your-backend-repo"
+  "your-backend-pipeline-stg"   = "your-backend-repo"
+  "your-backend-pipeline-prod"  = "your-backend-repo"
+  "your-frontend-pipeline-qa"   = "your-frontend-repo"
+  "your-frontend-pipeline-stg"  = "your-frontend-repo"
+  "your-frontend-pipeline-prod" = "your-frontend-repo"
+  "your-backend-pipeline-dev"   = "your-backend-repo"
+  "your-frontend-pipeline-dev"  = "your-frontend-repo"
 }
 
 thread_ttl_days           = 30

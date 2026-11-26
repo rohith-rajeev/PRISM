@@ -20,6 +20,7 @@ import orchestrator as O  # noqa: E402
 
 REPORT = """**Verdict:** ✅ Approve
 **Impact score:** 4/10 — small
+**Scale:** normal — a small change to one module
 
 <<<PRISM-REVIEW>>>
 ### Summary
@@ -186,15 +187,27 @@ class Findings(unittest.TestCase):
 
 
 class Verdict(unittest.TestCase):
-    def test_a_verdict_is_never_rosier_than_its_comments(self):
+    def test_the_decision_is_binary_and_computed_from_the_open_comments(self):
+        """FR-VER-4: any open Blocker or Major is Request changes; otherwise Approve."""
         z = {s: 0 for s in D.SEVERITIES}
-        self.assertEqual(D.reconcile_verdict("approve", dict(z, Blocker=1)),
-                         ("request-changes", True))
-        self.assertEqual(D.reconcile_verdict("approve", dict(z, Major=1)),
-                         ("approve-with-comments", True))
-        self.assertEqual(D.reconcile_verdict("block", dict(z, Blocker=1)), ("block", False))
-        self.assertEqual(D.reconcile_verdict("approve", z), ("approve", False))
-        self.assertEqual(D.reconcile_verdict("", z)[0], "approve")
+        self.assertEqual(D.decide(dict(z, Blocker=1)), "request-changes")
+        self.assertEqual(D.decide(dict(z, Major=1)), "request-changes")
+        self.assertEqual(D.decide(dict(z, Minor=3, Suggestion=2)), "approve")
+        self.assertEqual(D.decide(dict(z, Suggestion=1)), "approve")
+        self.assertEqual(D.decide(z), "approve")
+        # A cut-short review (FR-X-4) and a large change (FR-SCALE-4) are never approvals.
+        self.assertEqual(D.decide(z, partial=True), "request-changes")
+        self.assertEqual(D.decide(z, large=True), "request-changes")
+
+    def test_the_decision_always_says_what_it_means(self):
+        """FR-VER-7: the same words every time, never a glyph alone, never a third label."""
+        self.assertEqual(D.verdict_label("approve"), "✅ Approve — work may start")
+        self.assertEqual(D.verdict_label("request-changes"),
+                         "🔴 Request changes — work may not start")
+        for old in ("approve-with-comments", "block", "", None):
+            self.assertEqual(D.verdict_label(old), "🔴 Request changes — work may not start")
+        self.assertEqual(D._worst(["approve", "approve"]), "approve")
+        self.assertEqual(D._worst(["approve", "request-changes"]), "request-changes")
 
     def test_report_parsing_takes_the_last_complete_block(self):
         text = ("format example <<<PRISM-REVIEW>>>\nold\n<<<END-PRISM-REVIEW>>>\n"
@@ -416,6 +429,7 @@ class Pipeline(unittest.TestCase):
         args = dict(project_dir=str(self.project), targets=[self.target()],
                     emit=lambda m, tag=None: self.log.append(m))
         args.update(kw)
+        args.setdefault("owner", "Priya")
         return D._pipeline(**args)
 
     def remote_text(self, path="docs/spec.md", branch="feat/x"):

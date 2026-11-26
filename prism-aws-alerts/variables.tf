@@ -15,7 +15,8 @@ variable "chat_targets" {
     Google Chat spaces to notify, each with its own webhook and its own set of
     branches. A branch can be watched by more than one chat, and a chat can
     watch more than one branch - e.g. "chat-a" watching ["qa", "staging"] and
-    "chat-b" watching only ["staging"]. Set via a terraform.tfvars file or
+    "chat-b" watching only ["staging"]. A develop group is just another entry
+    watching only ["develop"]. Set via a terraform.tfvars file or
     TF_VAR_chat_targets (as a JSON string) - never commit real webhook URLs.
   EOT
   type = list(object({
@@ -50,6 +51,8 @@ variable "pipeline_branches" {
     "your-frontend-pipeline-qa"   = "qa"
     "your-frontend-pipeline-stg"  = "staging"
     "your-frontend-pipeline-prod" = "main"
+    "your-backend-pipeline-dev"   = "develop"
+    "your-frontend-pipeline-dev"  = "develop"
   }
 }
 
@@ -63,6 +66,8 @@ variable "pipeline_repositories" {
     "your-frontend-pipeline-qa"   = "your-frontend-repo"
     "your-frontend-pipeline-stg"  = "your-frontend-repo"
     "your-frontend-pipeline-prod" = "your-frontend-repo"
+    "your-backend-pipeline-dev"   = "your-backend-repo"
+    "your-frontend-pipeline-dev"  = "your-frontend-repo"
   }
 }
 

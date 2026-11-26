@@ -16,6 +16,9 @@ without scraping Markdown:
       "late_find":   true when a pull-request reviewer marked it as missed by
                      an earlier review of the same change
       "persona":     the document reviewer's lens (ba, architect, qa); null for a PR
+      "scale":       "normal" | "large" - the scale of the change the review it came
+                     from classified (a large change is never approved); null when
+                     that review stated none
       "traceability": {
           "repo":          repository the finding is about
           "pull_request":  PR id (pull request) | null
@@ -44,7 +47,8 @@ PR_CATEGORIES = ("critical", "high", "medium", "low", "nit")
 DOC_CATEGORIES = ("blocker", "major", "minor", "suggestion")
 
 FINDING_KEYS = ("id", "kind", "category", "type", "description", "late_find",
-                "persona", "traceability")
+                "persona", "scale", "traceability")
+SCALES = ("normal", "large")
 TRACE_KEYS = ("repo", "pull_request", "branch", "target_branch", "commit", "path",
               "line", "line_end", "section", "role")
 
@@ -76,12 +80,13 @@ def _trace(**given):
 
 
 def make_finding(id, kind, category, description, trace, type="", late_find=False,
-                 persona=None):
+                 persona=None, scale=None):
     """One finding with every key present and every value of a plain, JSON-safe type."""
     return {
         "id": str(id), "kind": kind, "category": str(category).lower(),
         "type": str(type or ""), "description": str(description or "")[:MAX_DESCRIPTION],
         "late_find": bool(late_find), "persona": persona or None,
+        "scale": scale if scale in SCALES else None,
         "traceability": trace,
     }
 
@@ -122,7 +127,7 @@ def _split_location(text):
 # ---- pull requests -----------------------------------------------------------
 
 def parse_pr_findings(lines, repo="", pull_request="", branch="", target_branch="",
-                      commit=""):
+                      commit="", scale=None):
     """Findings from the reviewer's one-line bullets.
 
     Each line is ``- **[High] Category — `path/to/file:line`** what is wrong ...``
@@ -154,7 +159,7 @@ def parse_pr_findings(lines, repo="", pull_request="", branch="", target_branch=
             _trace(repo=repo or None, pull_request=str(pull_request) or None,
                    branch=branch or None, target_branch=target_branch or None,
                    commit=commit or None, path=path, line=line, line_end=end),
-            type=label, late_find=bool(_LATE_RE.search(raw))))
+            type=label, late_find=bool(_LATE_RE.search(raw)), scale=scale))
     return out
 
 
@@ -172,7 +177,7 @@ def _comment_text(body, start):
 
 
 def parse_doc_findings(body, path="", repo="", branch="", commit="", role="",
-                       persona=None):
+                       persona=None, scale=None):
     """Findings from one document's review body.
 
     ``body`` is the part of the review that lists the *current* comments (the caller
@@ -202,5 +207,5 @@ def parse_doc_findings(body, path="", repo="", branch="", commit="", role="",
             ident, KIND_DOC, severity, " ".join(description.split()),
             _trace(repo=repo or None, branch=branch or None, commit=commit or None,
                    path=path or None, section=section, role=role or None),
-            type=kind_label, persona=persona))
+            type=kind_label, persona=persona, scale=scale))
     return out
