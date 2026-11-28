@@ -4,6 +4,36 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v7.2
+
+- **Every job has a job ID you can search for.** Ten hex characters (like `3f9c2a71be`),
+  kept for the life of the job — a retry keeps it. It is at the bottom of every chat card
+  (pull request and document review), on the job's row and page, and in its output. Type or
+  paste it into **Search by job ID** above the jobs list (Ctrl+F) to find that job. In a
+  terminal: `prism jobs --find <job id>`; it works wherever a command takes a job id.
+- **Pull-request reviews and document reviews are listed apart**, on a tab each, in the
+  jobs list and in CLI jobs.
+- **High-impact and large changes ask you again instead of being blocked.** A pull request
+  with an impact of 7 or more, including every large change (still raised to at least 8/10),
+  keeps the reviewer's verdict and waits for you to approve the merge. The chat card flags it
+  in a note: the change, and whether a person approved the merge. With nobody to ask (a
+  detached run) it is not merged. A large document review is still Request changes.
+- **Security standards, on top of every review.** Pull requests and documents are also
+  validated against OWASP ASVS, the OWASP Top 10, the CIS AWS Foundations Benchmark / AWS
+  Foundational Security Best Practices and NIST SSDF. The review itself is unchanged; the
+  report adds one conclusion per standard, written into the PR description or the
+  document's Coverage. A standard left out is named in the output.
+- **Rerun a document review as another reviewer role.** On a finished document review's
+  page, pick Business Analyst, Architect or QA next to the model, then Retry. In a terminal:
+  `prism retry <id> --persona architect`.
+- **The document-review form starts empty every time.** Nothing carries over from the last
+  request — the owner above all — whether you start a review or open a new job. Only the
+  working folder stays.
+- **Clearer file buttons.** "Browse repository…" picks documents in the selected clone,
+  "Select Files" adds files from anywhere. The file chooser now lists Word, PDF and Excel
+  files too (it used to show only text and Markdown, so a folder of .docx specs looked
+  empty). Dragging files onto the form is no longer offered.
+
 ## v7.1
 
 - **GitLab merge requests.** PRISM reads the host from the clone's remote: a CodeCommit remote

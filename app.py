@@ -43,6 +43,7 @@ import folderpicker  # noqa: E402
 import prism_cli as PC  # noqa: E402
 import jobs as J  # noqa: E402
 import docreview as DR  # noqa: E402
+import jobid as JID  # noqa: E402
 import gitlab as GL  # noqa: E402
 import updater as U  # noqa: E402
 from pathutil import native_path  # noqa: E402
@@ -805,20 +806,6 @@ class AgentPanel(RoundedCard):
         self._on_skip()
 
 
-_DND = {}
-
-
-def _dnd_available(widget):
-    """Whether this Tk can take files dropped from the desktop (the tkdnd extension)."""
-    if "ok" not in _DND:
-        try:
-            widget.tk.call("package", "require", "tkdnd")
-            _DND["ok"] = True
-        except tk.TclError:
-            _DND["ok"] = False
-    return _DND["ok"]
-
-
 class ChatPane(tk.Frame):
     """The live chat about the open job (FR-CHAT): its own transcript, an input and an
     Ask button, titled CHAT. It never shows the reviewer's log - that is OUTPUT - and
@@ -1300,9 +1287,11 @@ class JobRow(RoundedCard):
             label = "Pushed ✓"
         elif job.status == J.DONE and (job.result or {}).get("committed") is True:
             label = "Committed ✓"
+        # The label can change on a retry (another reviewer role names a new one).
+        self.title.config(text=job.label)
         self.sub.config(text="  ·  ".join(filter(None, [
-            label, job.branches, f"by {job.author}" if job.author else "",
-            job.spec.summary_bits()])))
+            label, f"job ID {job.job_id}", job.branches,
+            f"by {job.author}" if job.author else "", job.spec.summary_bits()])))
         if job.verdict_raw:
             self.verdict.config(text=job.verdict_raw[:26],
                                 fg=PAL[_verdict_colour(job.verdict_key)])
@@ -1469,6 +1458,8 @@ class CliJobRow(RoundedCard):
         where = record.get("host") if record.get("host") not in (None, socket.gethostname()) \
             else ""
         bits = [word]
+        if CJ.job_id_of(record):
+            bits.append(f"job ID {CJ.job_id_of(record)}")
         if status in J.ACTIVE_STATES and record.get("stage"):
             bits.append(record["stage"])
         started = record.get("started")
@@ -2342,9 +2333,11 @@ class DocReviewForm(tk.Frame):
                       height=32, width=110).pack(side="left")
         self.hint = self._hint_label(pi, "", pady=(4, 0))
         # Who owns the request: the person responsible for the document and for
-        # answering the review - not the reviewer (that is whoever runs PRISM). Required.
+        # answering the review - not the reviewer (that is whoever runs PRISM). Required,
+        # and typed afresh for every review: a name carried over from the last one is
+        # how a review ends up under the wrong owner.
         lab(pi, "Owner of this review request").pack(anchor="w", pady=(8, 2))
-        self.owner_var = tk.StringVar(value=CFG.get_last_owner())
+        self.owner_var = tk.StringVar(value="")
         entry(pi, self.owner_var).pack(fill="x", ipady=3)
         self._hint_label(pi, "The person responsible for the document and for answering "
                              "the review. Shown on the chat card and in the document.",
@@ -2488,29 +2481,29 @@ class DocReviewForm(tk.Frame):
         # Branch field and read as that field's button.
         brow = tk.Frame(inner, bg=PAL["card"])
         brow.pack(fill="x", pady=(4, 0))
-        browse = RoundedButton(brow, text="Browse files…",
+        # Two ways in, named for where the files come from: documents on the branch,
+        # picked inside the selected clone, or files from anywhere on this machine.
+        browse = RoundedButton(brow, text="Browse repository…",
                                command=lambda r=role: self._browse_files(r),
-                               style="outline", height=26, width=116, font=FONT_XS)
+                               style="outline", height=26, width=156, font=FONT_XS)
         browse.pack(side="left", padx=(0, 8))
-        upload = RoundedButton(brow, text="Upload…",
+        upload = RoundedButton(brow, text="Select Files",
                                command=lambda r=role: self._upload_files(r),
-                               style="outline", height=26, width=84, font=FONT_XS)
+                               style="outline", height=26, width=108, font=FONT_XS)
         upload.pack(side="left", padx=(0, 8))
-        self._hint_label(brow, "Pick several, or type paths from the repository root "
-                               "(one per line or comma separated). Upload, or drop files "
-                               "here, to review files that are not on the branch.",
+        self._hint_label(brow, "Browse repository picks documents in the selected clone, "
+                               "or type their paths from the repository root (one per line "
+                               "or comma separated). Select Files adds files from anywhere "
+                               "on this machine, including ones that are not on the branch.",
                          inline=True)
         # Uploaded documents: listed by name, each removable, each with an optional
         # path to commit it to - empty until the person fills it in (FR-DOC-IN-10).
         ulist = tk.Frame(inner, bg=PAL["card"])
         ulist.pack(fill="x", pady=(4, 0))
         uhint = self._hint_label(inner, "", pady=(2, 0))
-        c = {"card": card, "title": title, "sub": sub, "picker": picker,
-             "branch": branch_var, "files": files, "browse": browse, "upload": upload,
-             "col": col, "ulist": ulist, "uhint": uhint, "uploads": []}
-        for widget in (card, inner, files, ulist):
-            self._register_drop(widget, role)
-        return c
+        return {"card": card, "title": title, "sub": sub, "picker": picker,
+                "branch": branch_var, "files": files, "browse": browse, "upload": upload,
+                "col": col, "ulist": ulist, "uhint": uhint, "uploads": []}
 
     PERSONA_HINTS = {
         "ba": "Functional: do the requirements and the document align, with each other and "
@@ -2622,31 +2615,8 @@ class DocReviewForm(tk.Frame):
         self._dialog(lambda: folderpicker.pick_files(title, repo), finish)
 
     # ----- uploaded documents -----
-    def _register_drop(self, widget, role):
-        """Accept files dropped from the desktop, when this Tk has the tkdnd extension.
-
-        Tk has no drag-and-drop of its own; tkdnd is the standard extension for it. Where
-        it is missing the Upload button does the same job.
-        """
-        if not _dnd_available(self):
-            return
-        try:
-            cmd = self.register(lambda data, r=role: self._dropped(r, data))
-            self.tk.call("tkdnd::drop_target", "register", widget._w, "DND_Files")
-            self.tk.call("bind", widget._w, "<<Drop:DND_Files>>", cmd + " %D")
-        except tk.TclError:
-            pass
-
-    def _dropped(self, role, data):
-        try:
-            paths = list(self.tk.splitlist(data))
-        except tk.TclError:
-            paths = []
-        self.add_uploads(role, paths)
-        return "copy"
-
     def _upload_files(self, role):
-        title = "Upload document(s) to review"
+        title = "Select the document(s) to review"
         start = self.proj_var.get().strip() or str(Path.home())
 
         def finish(paths):
@@ -2659,9 +2629,9 @@ class DocReviewForm(tk.Frame):
         self._dialog(lambda: folderpicker.pick_files(title, start), finish)
 
     def add_uploads(self, role, paths):
-        """Add dropped or uploaded files to a card's list. One drop or upload may hold
-        several files; they join the list, never replace it (FR-DOC-IN-3). A type a
-        review cannot read is named on the form and not added (FR-DOC-IN-4)."""
+        """Add files picked with Select Files to a card's list. One pick may hold several
+        files; they join the list, never replace it (FR-DOC-IN-3). A type a review cannot
+        read is named on the form and not added (FR-DOC-IN-4)."""
         card = self.cards[role]
         have = {u["path"] for u in card["uploads"]}
         refused, in_repo = [], []
@@ -2905,37 +2875,29 @@ class DocReviewForm(tk.Frame):
             reviewer=CFG.effective_username(),
             custom_instructions=self.instr_text.get("1.0", "end").strip())
 
-    def populate(self, spec):
-        """Seed the form from a previous document job."""
-        self.proj_var.set(spec.project_dir)
-        self.refresh_detection()
-        self.req_var.set(spec.requirements_path)
-        self._set_persona(spec.persona if spec.persona in DR.PERSONAS else DR.DEFAULT_PERSONA)
-        self.commit_var.set(spec.do_commit)
-        self.push_var.set(spec.do_push)
-        self.dry_var.set(spec.dry_run)
-        self._sync_stages()
+    def reset(self):
+        """Clear everything a review request was given, for the next one.
+
+        Nothing of an earlier request carries over - the owner above all, since a name
+        left from the last review is how a review ends up under the wrong owner. The
+        working folder and the clones found in it stay: they say where you work, not
+        what this request is.
+        """
+        self.owner_var.set("")
+        self.req_var.set("")
         self.instr_text.delete("1.0", "end")
-        self.instr_text.insert("1.0", spec.custom_instructions or "")
-        if getattr(spec, "owner", ""):
-            self.owner_var.set(spec.owner)
+        self._set_persona(DR.DEFAULT_PERSONA)
+        self.model_picker.set_custom(DEFAULT_MODEL)
+        self.commit_var.set(True)
+        self.push_var.set(True)
+        self.dry_var.set(False)
+        self._sync_stages()
         for c in self.cards.values():
             c["branch"].set("")
             c["files"].delete("1.0", "end")
             for item in list(c["uploads"]):
                 self._remove_upload(c, item)
-        for t in spec.targets:
-            role = "BE" if (t.role in ("repo", DR.ROLE_NONE) or self.mode == "single") \
-                else t.role
-            c = self.cards.get(role)
-            if c is None:
-                continue
-            if t.has_repo:
-                c["picker"].set_custom(t.repo_name)
-            c["branch"].set(t.branch)
-            c["files"].insert("1.0", "\n".join(t.files))
-            for u in t.uploads:
-                self._add_upload_row(c, u.path, u.dest)
+            c["uhint"].config(text="", fg=PAL["muted"])
 
     def set_models(self, models, hint=None):
         self.model_picker.set_models(models)
@@ -3004,6 +2966,7 @@ class App(tk.Tk):
         # job rows half-painted; settle the list whenever that happens.
         for seq in ("<FocusIn>", "<Map>"):
             self.bind(seq, self._on_window_back, add="+")
+        self.bind("<Control-f>", self._focus_search, add="+")
 
     def _on_window_back(self, event=None):
         if event is not None and event.widget is not self:
@@ -3104,6 +3067,11 @@ class App(tk.Tk):
         RoundedButton(head, text="+  New job", command=self.show_new,
                       style="primary", height=32, width=130,
                       font=FONT_B).pack(side="right")
+        self.jobs_search = self._search_entry(head, self._refresh_jobs_list)
+        self.jobs_search.pack(side="right", ipady=4, padx=(0, 10))
+        # Pull-request reviews and document reviews are listed apart, one tab each.
+        self.jobs_kind = "pr"
+        self.jobs_tabs = self._kind_tabs(parent, self._set_jobs_kind)
         self.jobs_list = ScrollFrame(parent)
         self.jobs_list.pack(fill="both", expand=True)
         # Section headers for the two groups below; packed only while their
@@ -3113,10 +3081,126 @@ class App(tk.Tk):
         self.jobs_hdr_done = tk.Label(self.jobs_list.inner, text="", font=FONT_XS,
                                       bg=PAL["page"], fg=PAL["muted"], anchor="w")
         self.jobs_empty = tk.Label(
-            self.jobs_list.inner,
-            text="No jobs yet.\n\nStart one with “New job” — each pull request "
-                 "runs as its own job,\nand several can run at the same time.",
+            self.jobs_list.inner, text=self._JOBS_EMPTY,
             font=FONT_S, bg=PAL["page"], fg=PAL["muted"], justify="center")
+        # An empty tab whose jobs are elsewhere says so, and a click goes there: the other
+        # tab ("kind"), or CLI jobs when only a command-line job matches a search ("cli").
+        self._jobs_empty_action = None
+        self.jobs_empty.bind("<Button-1>", lambda _e: self._jobs_empty_clicked())
+
+    _JOBS_EMPTY = ("No jobs yet.\n\nStart one with “New job” — each pull request "
+                   "runs as its own job,\nand several can run at the same time.")
+    # The two kinds of job, as the list's tabs name them.
+    _KIND_NAMES = {"pr": ("Pull requests", "pull-request review", "pull-request reviews"),
+                   "docs": ("Document reviews", "document review", "document reviews")}
+
+    @staticmethod
+    def _kind_of_job(job):
+        return "docs" if getattr(job.spec, "kind", "pr") == "docs" else "pr"
+
+    @staticmethod
+    def _kind_of_record(record):
+        return "docs" if (record.get("spec") or {}).get("kind") == "docs" else "pr"
+
+    def _kind_tabs(self, parent, on_pick):
+        """The Pull requests | Document reviews selector above a job list."""
+        bar = tk.Frame(parent, bg=PAL["page"])
+        bar.pack(fill="x", pady=(0, 8))
+        tabs = {}
+        for kind, width in (("pr", 160), ("docs", 190)):
+            btn = RoundedButton(bar, text=self._KIND_NAMES[kind][0], height=30, width=width,
+                                font=FONT_S, command=lambda k=kind: on_pick(k))
+            btn.pack(side="left", padx=(0, 6))
+            tabs[kind] = btn
+        tabs["pr"].set_selected(True)
+        return tabs
+
+    def _paint_kind_tabs(self, tabs, selected, counts):
+        for kind, btn in tabs.items():
+            btn.set_text(f"{self._KIND_NAMES[kind][0]} · {counts.get(kind, 0)}")
+            btn.set_selected(kind == selected)
+
+    def _set_jobs_kind(self, kind):
+        if kind != self.jobs_kind:
+            self.jobs_kind = kind
+            self.jobs_list.canvas.yview_moveto(0)
+        self._refresh_jobs_list()
+
+    def _set_cli_kind(self, kind):
+        if kind != self.cli_kind:
+            self.cli_kind = kind
+            self.cli_list.canvas.yview_moveto(0)
+        self._refresh_cli_list()
+
+    def _jobs_empty_clicked(self):
+        action = self._jobs_empty_action
+        if action == "kind":
+            self._set_jobs_kind("docs" if self.jobs_kind == "pr" else "pr")
+        elif action == "cli":
+            self._search_in_cli()
+    _SEARCH_PLACEHOLDER = "Search by job ID"
+
+    def _search_entry(self, parent, on_change):
+        """A job-list search box: filters as you type, Escape clears it.
+
+        The job ID on a chat card is the usual thing typed or pasted here; a pasted
+        "Job ID 3f9c2a71be" or "PRISM-3f9c2a71be" works too (see jobid.normalise_query).
+        """
+        var = tk.StringVar()
+        entry = self._entry(parent, var, width=24)
+        # Held by the entry: a StringVar nobody references is deleted, and its trace
+        # with it - the box would take typing and never filter.
+        entry._search_var = var  # noqa: SLF001
+        _add_placeholder(entry, self._SEARCH_PLACEHOLDER)
+        pending = {}
+
+        def changed(*_a):
+            # Debounced: the placeholder is written into the field before it is marked
+            # as one, so the text is read once that has settled - never mid-way.
+            if pending.get("job") is not None:
+                try:
+                    self.after_cancel(pending["job"])
+                except Exception:  # noqa: BLE001
+                    pass
+            pending["job"] = self.after(120, run)
+
+        def run():
+            pending["job"] = None
+            on_change()
+
+        def clear(_e=None):
+            if _entry_value(entry):
+                entry.delete(0, "end")
+            return "break"
+        var.trace_add("write", changed)
+        entry.bind("<Escape>", clear)
+        Tooltip(entry, lambda: "The job ID is on the job's chat cards and its page. "
+                               "Part of it is enough.")
+        return entry
+
+    def _search_query(self, entry):
+        return JID.normalise_query(_entry_value(entry))
+
+    def _search_in_cli(self):
+        """From a jobs-list search only a command-line job matched: show it there, on
+        the tab of its kind."""
+        text = _entry_value(self.jobs_search).strip()
+        _set_entry_text(self.cli_search, text)
+        query = JID.normalise_query(text)
+        kinds = {self._kind_of_record(r) for r in self.cli_records if CJ.matches(r, query)}
+        if kinds and self.cli_kind not in kinds:
+            self.cli_kind = kinds.pop()
+        self.show_cli()
+
+    def _focus_search(self, _e=None):
+        """Ctrl+F: to the search box of the job list on screen."""
+        entry = {self.jobs_screen: self.jobs_search,
+                 self.cli_screen: self.cli_search}.get(self.screen)
+        if entry is None:
+            return None
+        entry.focus_set()
+        entry.select_range(0, "end")
+        return "break"
 
     # ---------------- screen 6: one command-line job, live ----------------
     def _build_cli_detail_screen(self, parent):
@@ -3226,6 +3310,7 @@ class App(tk.Tk):
         self._close_pickers()
         self.selected_job_id = None
         self._new_return = None
+        self.cli_kind = self._kind_of_record(record)
         self._show_screen(self.cli_detail_screen)
         self.cli_detail_id = job_id
         self._cli_log_pos, self._cli_log_tail = 0, ""
@@ -3256,7 +3341,13 @@ class App(tk.Tk):
             bits.append(record["stage"])
         if record.get("started"):
             bits.append(_since(time.time() - record["started"]))
-        bits.append(f"job {job_id}")
+        card_id = CJ.job_id_of(record)
+        if not card_id:                          # a job from before v7.2, not yet rerun
+            bits.append(f"job {job_id}")
+        elif card_id == job_id:
+            bits.append(f"job ID {job_id}")
+        else:
+            bits.append(f"job {job_id} (job ID {card_id})")
         spec = record.get("spec") or {}
         bits += [record.get("branches") or "", spec.get("region") or "",
                  f"model {spec['model']}" if spec.get("model") else "default model"]
@@ -3350,6 +3441,10 @@ class App(tk.Tk):
         head.pack(fill="x", pady=(0, 8))
         tk.Label(head, text="CLI JOBS", font=FONT_XS, bg=PAL["page"],
                  fg=PAL["muted"]).pack(side="left")
+        self.cli_search = self._search_entry(head, self._refresh_cli_list)
+        self.cli_search.pack(side="right", ipady=4)
+        self.cli_kind = "pr"
+        self.cli_tabs = self._kind_tabs(parent, self._set_cli_kind)
         self.cli_list = ScrollFrame(parent)
         self.cli_list.pack(fill="both", expand=True)
         self.cli_hdr_running = tk.Label(self.cli_list.inner, text="", font=FONT_XS,
@@ -3357,11 +3452,12 @@ class App(tk.Tk):
         self.cli_hdr_done = tk.Label(self.cli_list.inner, text="", font=FONT_XS,
                                      bg=PAL["page"], fg=PAL["muted"], anchor="w")
         self.cli_empty = tk.Label(
-            self.cli_list.inner,
-            text="No command-line jobs.\n\nRun  prism run <pr-id>  in a terminal — here or "
-                 "over ssh — and it shows up here.\nThis list is for stopping and "
-                 "retrying; follow a job's output with  prism logs <id> -f.",
+            self.cli_list.inner, text=self._CLI_EMPTY,
             font=FONT_S, bg=PAL["page"], fg=PAL["muted"], justify="center")
+
+    _CLI_EMPTY = ("No command-line jobs.\n\nRun  prism run <pr-id>  in a terminal — here or "
+                  "over ssh — and it shows up here.\nThis list is for stopping and "
+                  "retrying; follow a job's output with  prism logs <id> -f.")
 
     # ---------------- screen 4: the manual, built in ----------------
     def _build_help_screen(self, parent):
@@ -3848,6 +3944,23 @@ class App(tk.Tk):
         self.detail_model_picker.pack(side="left")
         self.detail_model_hint = self._lab(mi_, "", font=FONT_XS)
         self.detail_model_hint.pack(side="left", padx=(10, 0))
+        self._model_card = mrow
+        # ---- reviewer role: a document review only. Like the model, what this run
+        # used and what a retry will use - pick another role, then press Retry. ----
+        rc_ = RoundedCard(root)
+        self.detail_role_card = rc_
+        ri_ = rc_.inner
+        ri_.config(padx=12, pady=5)
+        self._lab(ri_, "REVIEWER ROLE", font=FONT_XS).pack(side="left", padx=(0, 10))
+        self.detail_persona = DR.DEFAULT_PERSONA
+        self.detail_role_btns = {}
+        for key, width in (("ba", 132), ("architect", 100), ("qa", 60)):
+            btn = RoundedButton(ri_, text=DR.PERSONAS[key]["label"], height=26, width=width,
+                                font=FONT_XS, command=lambda k=key: self._set_detail_persona(k))
+            btn.pack(side="left", padx=(0, 6))
+            self.detail_role_btns[key] = btn
+        self.detail_role_hint = self._lab(ri_, "", font=FONT_XS)
+        self.detail_role_hint.pack(side="left", padx=(4, 0))
         # ---- progress: below the action, because it reports on it ----
         self.seg = ProgressBar(root)
         self.seg.pack(fill="x", pady=(2, 4))
@@ -4432,7 +4545,9 @@ class App(tk.Tk):
         spec = spec or self.last_spec
         if spec is not None:
             if getattr(spec, "kind", "pr") == "docs":
-                self.doc_form.populate(spec)
+                # A document review request always starts from an empty form: nothing
+                # of an earlier request - its owner above all - is carried into a new one.
+                self.doc_form.reset()
                 self._show_new_tab("docs", repaint=False)
             else:
                 self._populate_form(spec)
@@ -4468,9 +4583,12 @@ class App(tk.Tk):
         self._close_pickers()
         self.selected_job_id = job_id
         self._new_return = None
+        # Back on the list, this job's own tab is the one showing.
+        self.jobs_kind = self._kind_of_job(job)
         self._show_screen(self.detail_screen)
         self._render_job(job)
         self.detail_model_picker.set_custom(self._job_model(job))
+        self._show_role_card(job)
         self._refresh_model_hint(job)
         self._refresh_pill()
 
@@ -4484,6 +4602,28 @@ class App(tk.Tk):
         else:
             text = "Used by this run. Change it before the next Retry."
         self.detail_model_hint.config(text=text)
+        if getattr(job.spec, "kind", "pr") == "docs":
+            self.detail_role_hint.config(
+                text="Pick another role to rerun the review as it when you press Retry."
+                if job.is_terminal else "Used by this run. Change it before the next Retry.")
+
+    def _set_detail_persona(self, key):
+        """The reviewer role the next Retry of this document review uses."""
+        self.detail_persona = key
+        for k, btn in self.detail_role_btns.items():
+            btn.set_selected(k == key)
+
+    def _show_role_card(self, job):
+        """The reviewer-role row belongs to a document review only; it starts on the
+        role this job last ran as."""
+        if getattr(job.spec, "kind", "pr") == "docs":
+            self._set_detail_persona(job.spec.persona if job.spec.persona in DR.PERSONAS
+                                     else DR.DEFAULT_PERSONA)
+            if not self.detail_role_card.winfo_manager():
+                self.detail_role_card.pack(fill="x", pady=(0, 6), after=self._model_card)
+                self._repaint(self.detail_role_card)
+        elif self.detail_role_card.winfo_manager():
+            self.detail_role_card.pack_forget()
 
     def _close_pickers(self):
         pickers = [getattr(self, "detail_model_picker", None), getattr(self, "be_picker", None), getattr(self, "fe_picker", None),
@@ -4507,6 +4647,8 @@ class App(tk.Tk):
                 row.destroy()
                 del self.rows[job_id]
         running, finished = [], []
+        query = self._search_query(self.jobs_search)
+        counts = {"pr": 0, "docs": 0}
         for job in self.manager.jobs.values():
             row = self.rows.get(job.id)
             if row is None:
@@ -4516,7 +4658,12 @@ class App(tk.Tk):
                 self.rows[job.id] = row
                 created = True
             row.refresh()
-            (running if job.is_active else finished).append(row)
+            if job.matches(query):
+                kind = self._kind_of_job(job)
+                counts[kind] += 1
+                if kind == self.jobs_kind:
+                    (running if job.is_active else finished).append(row)
+        self._paint_kind_tabs(self.jobs_tabs, self.jobs_kind, counts)
         finished.reverse()
         self.jobs_hdr_running.config(text=f"RUNNING  ·  {len(running)}")
         self.jobs_hdr_done.config(text=f"COMPLETED  ·  {len(finished)}")
@@ -4536,11 +4683,34 @@ class App(tk.Tk):
                     w.pack(fill="x", pady=(0, 4) if w is desired[0] else (10, 4))
                 else:
                     w.pack(fill="x", pady=(0, 6))
-        if self.manager.jobs:
+        if running or finished:
             if self.jobs_empty.winfo_manager():
                 self.jobs_empty.pack_forget()
-        elif not self.jobs_empty.winfo_manager():
-            self.jobs_empty.pack(pady=40)
+        else:
+            self._jobs_empty_action = None
+            other = "docs" if self.jobs_kind == "pr" else "pr"
+            _tab, one, many = self._KIND_NAMES[self.jobs_kind]
+            _o_tab, o_one, o_many = self._KIND_NAMES[other]
+            if query:
+                text = f"No {one} has a job ID matching “{query}”."
+            elif counts[other]:
+                text = f"No {many} yet."
+            else:
+                text = self._JOBS_EMPTY
+            if counts[other]:
+                self._jobs_empty_action = "kind"
+                n = counts[other]
+                noun = o_one if n == 1 else o_many
+                verb = (" matches" if n == 1 else " match") if query else ""
+                text += f"\n\n{n} {noun}{verb} — click to see {'it' if n == 1 else 'them'}."
+            elif query and any(CJ.matches(r, query) for r in self.cli_records):
+                self._jobs_empty_action = "cli"
+                text += "\n\nA command-line job does — click to see it in CLI jobs."
+            clickable = self._jobs_empty_action is not None
+            self.jobs_empty.config(text=text, cursor="hand2" if clickable else "",
+                                   fg=PAL["accent_text"] if clickable else PAL["muted"])
+            if not self.jobs_empty.winfo_manager():
+                self.jobs_empty.pack(pady=40)
         if created and self.screen is self.jobs_screen:
             # Newly built rows have never had a <Configure>; draw them now
             # rather than wait for one.
@@ -4679,6 +4849,8 @@ class App(tk.Tk):
                 row.destroy()
                 del self.cli_rows[job_id]
         running, finished, created = [], [], False
+        query = self._search_query(self.cli_search)
+        counts = {"pr": 0, "docs": 0}
         for record in self.cli_records:           # newest first
             job_id = record.get("id")
             row = self.cli_rows.get(job_id)
@@ -4691,7 +4863,12 @@ class App(tk.Tk):
                 created = True
             starting = job_id in self.cli_pending
             row.refresh(record, starting=starting)
-            (running if CJ.is_active(record) or starting else finished).append(row)
+            if CJ.matches(record, query):
+                kind = self._kind_of_record(record)
+                counts[kind] += 1
+                if kind == self.cli_kind:
+                    (running if CJ.is_active(record) or starting else finished).append(row)
+        self._paint_kind_tabs(self.cli_tabs, self.cli_kind, counts)
         self.cli_hdr_running.config(text=f"RUNNING  ·  {len(running)}")
         self.cli_hdr_done.config(text=f"COMPLETED  ·  {len(finished)}")
         desired = []
@@ -4708,11 +4885,24 @@ class App(tk.Tk):
                     w.pack(fill="x", pady=(0, 4) if w is desired[0] else (10, 4))
                 else:
                     w.pack(fill="x", pady=(0, 6))
-        if self.cli_records:
+        if running or finished:
             if self.cli_empty.winfo_manager():
                 self.cli_empty.pack_forget()
-        elif not self.cli_empty.winfo_manager():
-            self.cli_empty.pack(pady=40)
+        else:
+            other = "docs" if self.cli_kind == "pr" else "pr"
+            _tab, one, many = self._KIND_NAMES[self.cli_kind]
+            if query:
+                text = f"No command-line {one} has a job ID matching “{query}”."
+            elif counts[other]:
+                text = f"No command-line {many}."
+            else:
+                text = self._CLI_EMPTY
+            if counts[other]:
+                text += (f"\n\nSee {self._KIND_NAMES[other][0]} "
+                         f"({counts[other]}) above.")
+            self.cli_empty.config(text=text)
+            if not self.cli_empty.winfo_manager():
+                self.cli_empty.pack(pady=40)
         if created:
             self._repaint(self.cli_list.inner)
 
@@ -4984,7 +5174,8 @@ class App(tk.Tk):
             show_warning(self, "Already running", str(e))
             return
         self.last_spec = spec
-        CFG.set_last_owner(spec.owner)       # pre-fills the next form (FR-OWN-2)
+        # Started: the form is cleared, so the next request is typed afresh.
+        self.doc_form.reset()
         self.manager.pump()
         self._refresh_jobs_list()
         self._refresh_pill()
@@ -5044,13 +5235,16 @@ class App(tk.Tk):
         id and flags, no form to refill. The new job's own review picks up
         automatically where PRISM's last one left off (see JobManager.retry)."""
         job = self.manager.jobs.get(job_id)
-        model = J.KEEP_MODEL
+        model, persona = J.KEEP_MODEL, None
         if job is not None and job_id == self.selected_job_id and self.screen is self.detail_screen:
             model = self.detail_model_picker.get()      # "" = the default model
+            if getattr(job.spec, "kind", "pr") == "docs":
+                persona = self.detail_persona           # the role picked on this page
         try:
-            new_job = self.manager.retry(job_id, model=model)
-        except J.DuplicateJob as e:
-            show_warning(self, "Already running", str(e))
+            new_job = self.manager.retry(job_id, model=model, persona=persona)
+        except (J.DuplicateJob, ValueError) as e:
+            show_warning(self, "Cannot retry" if isinstance(e, ValueError)
+                         else "Already running", str(e))
             return
         if new_job is None:
             return
@@ -5613,6 +5807,20 @@ def _entry_value(entry):
     if getattr(entry, "_has_ph", False):
         return ""
     return entry.get()
+
+
+def _set_entry_text(entry, text):
+    """Put `text` in a field that may have a placeholder; empty restores the placeholder."""
+    if not text:
+        if getattr(entry, "_ph_text", None) is not None:
+            _restore_placeholder(entry)
+        else:
+            entry.delete(0, "end")
+        return
+    entry.delete(0, "end")
+    entry._has_ph = False  # noqa: SLF001 - marked real before the text lands
+    entry.config(fg=PAL["text"])
+    entry.insert(0, text)
 
 
 # Impact is a 1-10 blast-radius score. Only the score belongs on the card: the

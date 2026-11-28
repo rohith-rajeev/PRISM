@@ -271,11 +271,12 @@ def outcome_from_summary(summary, review):
         return DECISION_NEEDS_HUMAN, ("High-impact change: a person has to confirm "
                                       "the merge in PRISM.")
     if stopped == "large-change" or getattr(review, "scale", "") == "large":
-        # Never merged by PRISM, and resubmitting the same large change would only loop
-        # until the round limit: a person has to split it or take it through.
-        return DECISION_NEEDS_HUMAN, ("The change is large or expensive: PRISM does not "
-                                      "approve or merge it. Split it into smaller pull "
-                                      "requests, or have a person take it through.")
+        # Not merged (a merged one returned above): a large change waits for a person to
+        # approve its merge, and resubmitting it would only loop until the round limit.
+        # ("large-change" is how a run before v7.2 stopped.)
+        return DECISION_NEEDS_HUMAN, ("The change is large or expensive: a person has to "
+                                      "approve its merge in PRISM, or split it into "
+                                      "smaller pull requests.")
     if verdict == "request-changes":
         return DECISION_CHANGES, ""
     if verdict == "block":

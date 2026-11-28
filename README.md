@@ -14,8 +14,13 @@ slots free.
 
 Jobs are in-memory only — PRISM stays stateless, so closing the window stops
 everything. Each job snapshots its settings when created, so setting up the
-next one never disturbs a job already running, and the new-job form is
-pre-filled from the last job (usually only the PR id changes).
+next one never disturbs a job already running, and the pull-request form is
+pre-filled from the last job (usually only the PR id changes); the document-review form
+always starts empty.
+
+Pull-request reviews and document reviews are listed apart, on a tab each. Every job has a **job ID** (ten hex characters, on its chat cards and its row), kept when
+it is retried; type or paste one into **Search by job ID** above the list to find that
+job. `prism jobs --find <job id>` does the same in a terminal.
 
 ## What it does
 1. You pick the project **root folder** — that's the only required input.
@@ -91,12 +96,12 @@ backend, the frontend, or both (either is optional), the **reviewer role**, an
 optional **requirements folder** (**Browse** to choose it, kept relative to the
 repository when it is inside one), the model and optional custom instructions.
 Document file names can be typed as paths from the repository root, or picked with
-**Browse…**, which lets you select several files at once. Every document review also
-names its **owner** — the person who answers it, separate from the reviewer who ran
-PRISM — which is required and remembered for the next form.
+**Browse repository…**, which lets you select several files in the clone at once. Every
+document review also names its **owner** — the person who answers it, separate from the
+reviewer who ran PRISM — which is required and typed afresh for every request.
 
-**Documents that are not on the branch.** Drop files on the document list (needs the
-*tkdnd* Tk extension) or click **Upload…** — text, Markdown, Word, PDF or Excel. An
+**Documents that are not on the branch.** Click **Select Files** — text, Markdown,
+Word, PDF or Excel. An
 uploaded file is reviewed against the selected branch's code even though it isn't
 committed; its comments go into a copy next to it (`spec.prism-review.md`; a PDF gets
 a Markdown sidecar and is never changed), and it reaches the branch only at a
@@ -119,7 +124,11 @@ still written). Reviews written before v7.0 keep their own wording.
 **Security, stability and scalability are always checked**, whichever persona is
 chosen, and the review states its conclusion on each (PRISM warns if one is
 missing). Each persona's reviews are tracked separately in the document, so running
-the Architect again follows up the Architect's earlier comments.
+the Architect again follows up the Architect's earlier comments. To rerun a finished
+review as another persona, pick it under **Reviewer role** on the job's page and press
+Retry (`prism retry <id> --persona architect` in a terminal).
+
+**Security standards, on top of every review.** Every review — pull request or document — also validates the change against **OWASP ASVS** and the **OWASP Top 10** (application code), the **CIS AWS Foundations Benchmark / AWS Foundational Security Best Practices** (infrastructure) and **NIST SSDF** (the SDLC). It is an added layer: the review itself is unchanged. The report gives one conclusion per standard — `met`, the findings that break it, or `n/a` with why — on a *Standards* line, which goes into the PR description, or into the document's Coverage. A pull-request report without it is asked for it once; a standard still left out is named in the log so you can check it yourself.
 
 **Requirements are optional.** With them, the review centres on whether the
 decomposition satisfies the *entire* requirement and is consistent with the
@@ -139,9 +148,9 @@ For each document the `doc-reviewer` agent reads the codebase, the document and
    tagged with a category (Gap, Feasibility, Contradiction, Ambiguity,
    Traceability, Testability, Risk, Consistency, Scope, Compliance) and a stable
    id (`DR-3`);
-2. commits it to the branch as `PRISM-<run id>: <brief message>` (the run id
-   is shared by the backend and frontend commits of one run, so
-   `git log --grep PRISM-<run id>` finds them);
+2. commits it to the branch as `PRISM-<job id>: <brief message>` (the job ID
+   is shared by the backend and frontend commits of a job and by its retries, so
+   `git log --grep PRISM-<job id>` finds them all);
 3. pushes it to the same branch on `origin`, never forced.
 
 Commit, Push and Dry run are switches, like the review/sync/merge stages of a PR
@@ -161,7 +170,7 @@ to report on stays open, under "Not assessed", never silently resolved.
 agent, writes the section, and refuses to write if anything outside the section
 would change. If the push is rejected because the branch moved, PRISM replays
 its one commit on top and pushes again; if that fails, the commit is kept under
-`refs/prism/docs/<run id>-<role>` in your clone and nothing is lost.
+`refs/prism/docs/<job id>-<suffix>-<role>` in your clone and nothing is lost.
 
 ## GitLab merge requests
 A pull-request job reads the host from the clone's `origin` remote. CodeCommit works as
@@ -180,14 +189,15 @@ or a command line. An authentication or permission error stops the job with GitL
 own message. Merge requests from forks are refused. The AWS CLI is not needed for
 GitLab (`prism doctor --repo <clone> --pr <id>` checks the token, project and MR).
 
-## Large changes are never approved
+## Large changes need a person's approval
 Every review — pull request or document — classifies the change as `normal` or
 `large` (very large or expensive to build, roll back or review safely). PRISM enforces
-the rules in code after reading the report: a large change scores at least 8/10, is
-Request changes (Block stays Block), and is never merged or offered for confirmation,
-whoever is asking — a person, the command line or a code-generation client. A report
-without a Scale line is asked once; still without one, an impact of 8 or more counts as
-large. A normal change with impact 7 or more still pauses for a person to confirm.
+the rules in code after reading the report: a large change scores at least 8/10. A pull
+request with impact 7 or more — every large one included — pauses for a person to
+approve the merge, and is merged only on *Proceed*; with nobody to ask (a detached run)
+it is not merged. The chat card flags the change and whether a person approved it. A
+large document review is always Request changes. A report without a Scale line is asked
+once; still without one, an impact of 8 or more counts as large.
 
 ## Live chat
 Each job's page shows the reviewer's log as **OUTPUT**. **Chat ▸** opens a live chat
@@ -398,7 +408,7 @@ prism ask 7f3a9c "why is DR-2 a blocker?"
 
 The same as the app's **Document review** tab: the review is written into each
 document as a *PRISM review comments* section, committed as
-`PRISM-<run id>: <message>` and pushed, in a temporary worktree, so your branch, files and
+`PRISM-<job id>: <message>` and pushed, in a temporary worktree, so your branch, files and
 uncommitted work are never changed. It works out what it needs from where you are: the repository you
 are inside, the branch you have checked out, files typed the way a shell would
 (relative to where you are, absolute, or from the repository root). With
@@ -617,7 +627,7 @@ reviewer **persona** (Business Analyst, Architect or QA), who ran it, the commen
 by severity and the impact (`6/10`), then per repository its **branch** and each
 **document** by file name with its own decision icon (at most five, then "and N more").
 A one-sentence note says why (the open comments, a large change…, and the impact's
-reason), and a footer gives the run id and whether the comments were committed and
+reason), and a footer gives the job ID and whether the comments were committed and
 pushed. Pull-request cards use the same flat icons. A run that fails outright, or a dry
 run, posts nothing; a failed post never affects the review.
 

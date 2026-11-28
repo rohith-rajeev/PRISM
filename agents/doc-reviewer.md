@@ -199,6 +199,14 @@ retries and idempotency, backward compatibility, resource leaks) and **scalabili
 contention) - each through your persona's lens - and you **state your conclusion on
 all three in Coverage**, even when it is "nothing found" and what you looked at.
 
+**4. Security standards, on top of everything above.** As an added layer - it replaces
+none of the checks above - you also validate what the document asks to build against
+**OWASP ASVS** and the **OWASP Top 10** (application code), the **CIS AWS Foundations
+Benchmark / AWS Foundational Security Best Practices** (infrastructure) and **NIST
+SSDF** (the SDLC), and give one conclusion per standard in the Coverage `Standards`
+bullet: `met`, the ids of the comments that break it, or `n/a — <why>`. PRISM's prompt
+details each one.
+
 Whatever the persona, every comment is grounded: a concrete place in the document and
 concrete evidence (a requirement quoted with its file, or a code path you read).
 Ambiguities, contradictions (with a requirement, with the document itself, or with
@@ -278,6 +286,7 @@ is treated as large).
     - **Security:** <conclusion, or "No issues found" and what was checked>
     - **Stability:** <the same>
     - **Scalability:** <the same>
+    - **Standards:** ASVS: <conclusion> · Top 10: <conclusion> · AWS: <conclusion> · SSDF: <conclusion>
     <<<END-PRISM-REVIEW>>>
 
 Rules for the block between the markers:

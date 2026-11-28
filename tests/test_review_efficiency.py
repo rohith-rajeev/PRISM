@@ -481,7 +481,7 @@ else:                                         # a healthy review
        "text": {report!r}}})
 """
     REPORT = ("**Verdict:** ✅ Approve\n**Impact score:** 2/10 — small\n"
-              "**Scale:** normal — one file\n\n### Findings\n"
+              "**Scale:** normal — one file\n**Standards:** ASVS: met · Top 10: met · AWS: n/a — no infrastructure · SSDF: met\n\n### Findings\n"
               "- **[Low] x — `app.py:6`** y\n\n### Summary\nCoverage: app.py.\n")
 
     def setUp(self):

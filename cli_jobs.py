@@ -22,7 +22,6 @@ Stdlib only and free of Tkinter, like jobs.py, so it is testable headlessly.
 """
 import json
 import os
-import secrets
 import socket
 import subprocess
 import sys
@@ -34,6 +33,7 @@ import bundle
 import config
 import docreview
 import jobs as J
+import jobid
 
 INTERRUPTED = "interrupted"
 
@@ -70,7 +70,8 @@ def log_path(job_id):
 
 
 def new_id():
-    return secrets.token_hex(3)
+    """A new job's id: its job ID too (see jobid.py), the one on its chat cards."""
+    return jobid.new()
 
 
 def valid_id(job_id):
@@ -177,9 +178,23 @@ def load(job_id):
     return record if isinstance(record, dict) else None
 
 
+def job_id_of(record):
+    """The job ID on a record's chat cards: its own id since v7.2. A record from before
+    (a six-character id) is given a job ID when it is first run again, and keeps it."""
+    rid = record.get("id")
+    if jobid.valid(rid):
+        return rid
+    jid = record.get("job_id")
+    return jid if jobid.valid(jid) else ""
+
+
 def create(spec, job_id=None, cwd=None):
-    """Write a fresh record for a job this process is about to run."""
+    """Write a fresh record for a job this process is about to run. A retry rewrites
+    the same record and keeps its job ID."""
     job_id = job_id or new_id()
+    before = load(job_id)
+    card_id = (job_id if jobid.valid(job_id)
+               else (job_id_of(before) if before else "") or jobid.new())
     now = time.time()
     record = {
         "id": job_id, "pid": os.getpid(), "host": socket.gethostname(),
@@ -193,6 +208,7 @@ def create(spec, job_id=None, cwd=None):
         # always present - an empty list until the run delivers a review - so a script
         # reading `prism jobs --json` never has to test for the key.
         "reviewer": getattr(spec, "reviewer", "") or "", "findings": [],
+        "job_id": card_id,
     }
     for ext in ("stop", "log"):          # a reused id must not inherit either
         try:
@@ -259,6 +275,20 @@ def list_jobs():
 
 def active_jobs():
     return [r for r in list_jobs() if is_active(r)]
+
+
+def matches(record, query):
+    """Whether a search for `query` finds this record: by its job ID or id (or a part of
+    either), or its label. See jobid.matches."""
+    return jobid.matches(query, [job_id_of(record), record.get("id")], label(record))
+
+
+def find_by_job_id(job_id):
+    """The record with this exact job ID, or None."""
+    job_id = jobid.normalise_query(job_id)
+    if not jobid.valid(job_id):
+        return None
+    return next((r for r in list_jobs() if job_id_of(r) == job_id), None)
 
 
 def find_active(repo_name, pr_id, host="codecommit", host_url=""):

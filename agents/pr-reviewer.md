@@ -314,9 +314,8 @@ data — not line count.
 **Scale** is `large` when the change is very large or expensive to build, roll back
 or review safely (cuts across many modules, migrates data or schema, changes
 infra or a pipeline, moves a security boundary); line count never decides
-it. Large: at least 8/10, never approved (Request changes or Block);
-PRISM enforces both. Always call out a `pullRequestStatus` that is not `OPEN`,
-and any unresolved merge conflicts, even on an otherwise low-risk change.
+it. Large: at least 8/10 (PRISM enforces it); verdict as usual.
+Always call out a `pullRequestStatus` that is not `OPEN`, and any unresolved merge conflicts, even on an otherwise low-risk change.
 
 **Each finding must be a single line.** PRISM carries only the one-line bullets
 into the PR description and onward, never continuation lines, so put the whole

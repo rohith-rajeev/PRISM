@@ -89,7 +89,13 @@ def pick_folder(title="Select a folder", initial=None, platform=sys.platform,
 # Between file names in a multiple selection. Not "|" (zenity's default), which
 # a file name may contain; this control character cannot appear in one.
 FILE_SEP = "\x1f"
-_DOC_PATTERNS = "*.md *.markdown *.mdx *.txt *.rst *.adoc"
+# The chooser opens on this filter, so it must list every kind of document a review
+# reads (docreview.UPLOAD_TYPES) - Word, PDF and Excel included. With text types only,
+# a folder of .docx specs looked empty: the chooser showed nothing but folders. GTK 3
+# matches patterns case-sensitively, so each comes in lower and upper case.
+DOC_SUFFIXES = (".md", ".markdown", ".mdx", ".txt", ".text", ".rst", ".adoc",
+                ".docx", ".pdf", ".xlsx")
+_DOC_PATTERNS = " ".join(f"*{s} *{s.upper()}" for s in DOC_SUFFIXES)
 
 
 def files_command(title, initial, which=shutil.which):

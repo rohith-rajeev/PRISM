@@ -32,6 +32,8 @@ import config
 import findings as findings_mod
 import gitlab
 import notifier
+import jobid
+import security
 import winproc
 from pathutil import native_path
 
@@ -155,7 +157,8 @@ IMPACT_RE = re.compile(_LABEL_LEAD + r"Impact(?:\s+score)?" + _LABEL_SEP +
                        re.IGNORECASE | re.MULTILINE)
 # Every review classifies the change it looked at as normal or large ("**Scale:**
 # large — migrates the orders table"). Large means very large or expensive to
-# build, roll back or review safely, and such a change is never approved: PRISM
+# build, roll back or review safely: such a change scores at least 8/10 and a pull
+# request is merged only once a person approves it. PRISM
 # reads this line and enforces that in code (see enforce_scale), whatever the
 # verdict line says. "Scalability:" (a Coverage heading) is a different word and
 # does not match: the label must be followed directly by its separator.
@@ -500,11 +503,20 @@ class ReviewResult:
     scale: str = ""
     scale_reason: str = ""
     scale_missing: bool = False
+    # True once a person approved the merge at the high-impact confirmation; the chat
+    # card flags it (see notifier.build_card's note). approval_unasked: the run reached
+    # that confirmation with nobody there to ask (a detached run, a codegen request).
+    person_approved: bool = False
+    approval_unasked: bool = False
+    # The report's conclusion per security standard (see security.py), "" without one.
+    standards: str = ""
 
     def merge_allowed(self) -> bool:
         v = self.verdict_key
+        # A large change may be merged too, but only once a person approves it: the
+        # high-impact confirmation always asks for one (see _needs_approval).
         return (v in ("approve", "approve-with-comments", "skipped") and not self.partial
-                and not self.incomplete_reason and self.scale != SCALE_LARGE)
+                and not self.incomplete_reason)
 
 
 _AWC_RE = re.compile(r"approv\w*\W+(?:w/|with\b)")
@@ -647,6 +659,7 @@ def parse_review_output(text: str) -> ReviewResult:
         res.impact_score = m2.group(1).strip()
         res.impact_reason = m2.group(2).strip()
     res.scale, res.scale_reason = parse_scale(text)
+    res.standards = security.parse(text)
     # findings: keep the one-line bullets. The cap here is a defensive
     # ceiling against a malformed/runaway line, not a working trim — the
     # developer reading the PR description should see the finding in full,
@@ -729,13 +742,12 @@ def resolve_scale(result):
 
 
 def enforce_scale(result, kind="pr"):
-    """A large change is impact >= 8 and never an approval. Returns log lines.
+    """A large change is impact >= 8. Returns log lines.
 
-    Applied by PRISM after the report is parsed, so a report that approves a large
-    change is never stored, shown, written or merged as an approval. A pull request
-    keeps Block when the reviewer said Block; anything rosier becomes Request
-    changes. (A document's decision is computed in docreview.decide, which also
-    reads the scale.)
+    Applied by PRISM after the report is parsed. A pull request keeps the reviewer's
+    verdict, but an impact of 8 or more means a person must approve the merge (the
+    high-impact confirmation; v7.2 - before it, a large change was never merged). A
+    document's decision is computed in docreview.decide, which also reads the scale.
     """
     if result.scale != SCALE_LARGE:
         return []
@@ -750,11 +762,17 @@ def enforce_scale(result, kind="pr"):
         notes.append(f"⚠ The change is large or expensive: impact raised from {said} to "
                      f"{LARGE_IMPACT_FLOOR}/10.")
     if kind == "pr" and result.verdict_key in ("approve", "approve-with-comments"):
-        result.verdict_key = "request-changes"
-        result.verdict_raw = "🔴 Request changes (large or expensive change)"
-        notes.append("⚠ The change is large or expensive, so PRISM does not approve it: "
-                     "the verdict is Request changes.")
+        notes.append("⚠ The change is large or expensive: it is merged only if a person "
+                     "approves it.")
     return notes
+
+
+def _needs_approval(review):
+    """(True, impact) when a person must approve the merge: an impact of
+    HIGH_IMPACT_THRESHOLD or more, or a large change whatever its score."""
+    n = impact_number(getattr(review, "impact_score", None))
+    large = getattr(review, "scale", "") == SCALE_LARGE
+    return (large or (n is not None and n >= HIGH_IMPACT_THRESHOLD)), n
 
 
 _SCALE_PROMPT = (
@@ -2641,6 +2659,8 @@ def run_opencode_review(pr_id, repo_name, local_repo, project_dir,
             f"Follow your pr-reviewer workflow and report the verdict in chat, "
             f"then stop and ask about updating the PR description."
         )
+    # Every review is validated against the security standards (security.py).
+    prompt += "\n\n" + security.PR_TEXT + "\n\n"
     # The PR's facts and diff, gathered once by PRISM (see "Preparing the PR"),
     # sized to whatever room the prompt has left under the OS's argument limit.
     prompt += _prepare_pr_block(
@@ -2921,7 +2941,7 @@ def _emit_pr_meta(pr_id, region, emit, host=None):
 
 def compose_description(current, verdict_text, impact, findings, verdict_key=None,
                         source_commit=None, late=0, reviewer="", scale="",
-                        limit=None, limit_label="CodeCommit"):
+                        limit=None, limit_label="CodeCommit", standards=""):
     """The description with PRISM's findings block, the author's own text kept.
 
     Pure text, shared by every host: a stale PRISM block is removed first (so the
@@ -2938,8 +2958,10 @@ def compose_description(current, verdict_text, impact, findings, verdict_key=Non
         "\n\n<!-- prism:start -->\n" + stamp + "---\n"
         f"**PRISM review — {verdict_text} (impact {impact}/10)**\n"
     ) + (f"Reviewed by: {who}\n" if who else "") + (
-        "Scale: large — a large or expensive change; PRISM does not approve or merge it.\n"
-        if scale == SCALE_LARGE else "") + ((
+        "Scale: large — a large or expensive change; it is merged only if a person "
+        "approves it.\n" if scale == SCALE_LARGE else "") + (
+        f"Security standards: {' '.join(str(standards).split())[:600]}\n"
+        if standards else "") + ((
             f"⚠ {late} late finding(s) — defects in code an earlier review had already "
             f"covered. A fix made now has not been through whatever testing followed that "
             f"review; test it again before relying on it.\n") if late else "")
@@ -2968,7 +2990,7 @@ def compose_description(current, verdict_text, impact, findings, verdict_key=Non
 
 def update_description_direct(pr_id, verdict_text, impact, findings, region=REGION_DEFAULT,
                               verdict_key=None, source_commit=None, late=0, reviewer="",
-                              scale=""):
+                              scale="", standards=""):
     """Step 2: write the review's findings onto the PR description via AWS CLI.
 
     No agent call — the findings are already one-line bullets straight from
@@ -2985,7 +3007,8 @@ def update_description_direct(pr_id, verdict_text, impact, findings, region=REGI
     pr = get_pr(pr_id, region=region)
     merged = compose_description(pr["description"], verdict_text, impact, findings,
                                  verdict_key=verdict_key, source_commit=source_commit,
-                                 late=late, reviewer=reviewer, scale=scale)
+                                 late=late, reviewer=reviewer, scale=scale,
+                                 standards=standards)
     aws_cli("update-pull-request-description", "--pull-request-id", str(pr_id),
             "--description", merged, region=region)
     return merged
@@ -3131,11 +3154,12 @@ class GitLabHost:
             return {}
 
     def update_description(self, pr_id, verdict_text, impact, findings, verdict_key=None,
-                           source_commit=None, late=0, reviewer="", scale=""):
+                           source_commit=None, late=0, reviewer="", scale="", standards=""):
         current = self.get_pr(pr_id).get("description") or ""
         text = compose_description(current, verdict_text, impact, findings,
                                    verdict_key=verdict_key, source_commit=source_commit,
                                    late=late, reviewer=reviewer, scale=scale,
+                                   standards=standards,
                                    limit=GITLAB_DESCRIPTION_MAX, limit_label="GitLab")
         self.client.update_description(self.project, pr_id, text)
         return text
@@ -3767,6 +3791,8 @@ def _run_pipeline(project_dir, repo_name, pr_id, local_repo=None,
                     review.impact_reason = restated.impact_reason
                 if restated.scale and not review.scale:
                     review.scale, review.scale_reason = restated.scale, restated.scale_reason
+                if restated.standards and not review.standards:
+                    review.standards = restated.standards
 
         # Every review states the change's scale. A report without the line is asked
         # for it once (FR-SCALE-2); resolve_scale below applies the rule if it is
@@ -3789,6 +3815,28 @@ def _run_pipeline(project_dir, repo_name, pr_id, local_repo=None,
                 emit(f"⚠ Could not ask for the Scale line ({str(e)[:200]}); PRISM's rule "
                      f"decides it.")
 
+        # Every review is validated against the security standards: a report that does
+        # not say how is asked for its Standards line once, like the Scale line.
+        if (review.verdict_key and review.verdict_key != "unknown"
+                and security.missing(review.standards) and session_id
+                and not review.incomplete_reason):
+            emit("\n⚠ The report does not state every security standard — asking the "
+                 "reviewer for its Standards line once.")
+            ck()
+            try:
+                _rc, raw4, sid4 = _continue_turn(security.REASK_PROMPT, project_dir,
+                                                 session_id, emit, model, control,
+                                                 what="security standards", meter=meter)
+                session_id = sid4 or session_id
+                again = security.parse(raw4)
+                if len(security.missing(again)) < len(security.missing(review.standards)):
+                    review.standards = again
+            except Cancelled:
+                raise
+            except Exception as e:  # noqa: BLE001
+                # Only a nudge, like the Scale re-ask: never costs a finished review.
+                emit(f"⚠ Could not ask for the Standards line ({str(e)[:200]}).")
+
         if review.incomplete_reason:
             # No verdict line is printed and nothing below runs: the description is
             # not written, nothing is merged, and the commit is not recorded as
@@ -3808,7 +3856,8 @@ def _run_pipeline(project_dir, repo_name, pr_id, local_repo=None,
                 + " Retry the job once the cause is fixed (a failed fetch, a blocked "
                   "command and an empty diff are the usual ones).")
         # Scale is settled and enforced before anything is shown, written, recorded
-        # or merged: a large change is never an approval (FR-SCALE-3/4/7).
+        # or merged: a large change scores at least 8/10, so a person must approve its
+        # merge (v7.2; a document's large change is still never an approval).
         if review.verdict_key and review.verdict_key != "unknown":
             note = resolve_scale(review)
             if note:
@@ -3817,6 +3866,13 @@ def _run_pipeline(project_dir, repo_name, pr_id, local_repo=None,
                 emit(line)
             emit(f"▸ Scale: {review.scale}"
                  + (f" — {review.scale_reason}" if review.scale_reason else ""))
+            gaps = security.missing(review.standards)
+            if review.standards:
+                emit(f"▸ Security standards: {review.standards}")
+            if gaps:
+                emit(f"⚠ The review states no conclusion on {', '.join(gaps)} — every review "
+                     f"is meant to. Check {'that' if len(gaps) == 1 else 'those'} yourself, "
+                     f"or retry the job.")
         emit(f"\n◆ Verdict: {review.verdict_raw or review.verdict_key}   "
              f"Impact: {review.impact_score or '?'}/10 {review.impact_reason}")
         # carry_forward/restate may have replaced `review`; set the flag last.
@@ -3906,7 +3962,8 @@ def _run_pipeline(project_dir, repo_name, pr_id, local_repo=None,
                     review.impact_score or "?", review.findings,
                     verdict_key=review.verdict_key,
                     source_commit=source_commit_at_review, late=late_count,
-                    reviewer=reviewer, scale=getattr(review, "scale", ""))
+                    reviewer=reviewer, scale=getattr(review, "scale", ""),
+                    standards=getattr(review, "standards", ""))
                 emit(f"◆ Description updated directly from the review ({len(merged)} chars).")
                 pg(STAGE_DESCRIBE, "done")
             except Exception as e:  # noqa: BLE001
@@ -3926,17 +3983,6 @@ def _run_pipeline(project_dir, repo_name, pr_id, local_repo=None,
 
     # ---- Steps 3/4: merge ----
     ck()
-    if getattr(review, "scale", "") == SCALE_LARGE:
-        # Never merged, never offered for confirmation, whoever asks (a person, the
-        # command line or a code-generation client) - FR-SCALE-5. Checked before every
-        # other merge rule so the job always says why it is held.
-        emit("\n⛔ The change is large or expensive — PRISM does not approve or merge it, "
-             "and no confirmation can change that. The job is held; split the change or "
-             "have a person take it through.")
-        pg(STAGE_MERGE_CHECK, "skipped")
-        pg(STAGE_MERGE, "skipped")
-        return {"review": review, "merged": False, "stopped": "large-change",
-                "tokens": meter.total()}
     if not do_merge:
         emit("\n═══ Merge skipped by option. Done. ═══")
         pg(STAGE_MERGE_CHECK, "skipped")
@@ -4092,16 +4138,19 @@ def _run_pipeline(project_dir, repo_name, pr_id, local_repo=None,
                 "stopped": "pr-changed-since-review", "tokens": meter.total()}
 
     if do_review:
-        try:
-            impact_num = int(review.impact_score)
-        except (TypeError, ValueError):
-            impact_num = None
-        if impact_num is not None and impact_num >= HIGH_IMPACT_THRESHOLD:
+        needs, impact_num = _needs_approval(review)
+        large = getattr(review, "scale", "") == SCALE_LARGE
+        if needs:
             ck()
-            emit(f"\n⚠ Impact score {impact_num}/10 — pausing for human "
-                 f"confirmation before merging.")
+            shown = f"{impact_num}/10" if impact_num is not None else "an unknown score"
+            emit(("\n⚠ Large or expensive change, impact " if large else
+                  "\n⚠ Impact score ") + f"{shown} — pausing for a person to approve "
+                 f"the merge.")
             question = (
-                f"PR #{pr_id} scored {impact_num}/10 impact"
+                ("LARGE OR EXPENSIVE CHANGE" + (f": {review.scale_reason}"
+                                                if review.scale_reason else "") + "\n"
+                 if large else "")
+                + f"PR #{pr_id} scored {shown} impact"
                 + (f" — {review.impact_reason}" if review.impact_reason else "")
                 + f".\nVerdict: {review.verdict_raw or review.verdict_key}\n\n"
                 + ("\n".join(review.findings) if review.findings
@@ -4116,12 +4165,15 @@ def _run_pipeline(project_dir, repo_name, pr_id, local_repo=None,
                 ("proceed", "Proceed with merge"),
                 ("abort", "Abort — I'll handle this manually"),
             ]) if ask is not None else None
+            if ask is None:
+                review.approval_unasked = True
             if answer != "proceed":
                 emit("■ Merge not confirmed — stopping without merging.")
                 pg(STAGE_MERGE, "skipped")
                 return {"review": review, "merged": False,
                         "stopped": "high-impact-not-confirmed", "tokens": meter.total()}
             emit("▸ Merge confirmed.")
+            review.person_approved = True
     else:
         # Review was switched off, so nothing has looked at this PR. That is a
         # legitimate "just sync and merge" run, but also an easy one to start
@@ -4240,13 +4292,29 @@ def structured_findings(review, repo_name="", pr_id=""):
 INTERNAL_SUMMARY_KEYS = ("review", "tokens", "findings", "results")
 
 
+def _approval_state(review, stopped):
+    """What the card says about a person's approval of the merge: "approved",
+    "not-approved" (asked, and not approved), "unasked" (it reached the confirmation with
+    nobody there to ask), "needed" (an approvable change that stopped before the
+    confirmation - merging off, a dry run...), or None (nothing to say: no approval
+    needed, or the verdict itself does not allow a merge)."""
+    if review is None:
+        return None
+    if getattr(review, "person_approved", False):
+        return "approved"
+    if stopped == "high-impact-not-confirmed":
+        return "unasked" if getattr(review, "approval_unasked", False) else "not-approved"
+    needs, _n = _needs_approval(review)
+    return "needed" if needs and review.merge_allowed() else None
+
+
 def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
                   region=REGION_DEFAULT, do_review=True,
                   do_update_desc=True, do_merge=True, do_sync=True,
                   dry_run=False, model=None, webhook_url=None, progress=None,
                   emit=_emit_plain, control=None, ask=None,
                   custom_instructions="", get_note=None, reviewer="",
-                  host=HOST_CODECOMMIT, host_url=""):
+                  host=HOST_CODECOMMIT, host_url="", job_id=None):
     """Run the pipeline (see _run_pipeline), then post a brief outcome
     summary to Google Chat if a webhook is configured.
 
@@ -4266,6 +4334,10 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
     could not be parsed — see _NOTIFIABLE_VERDICTS. A review-skipped
     (sync + merge only) run IS notified.
     """
+    # The job's ID: handed in by the job (so its list row and its card agree; a retry
+    # keeps it), or new.
+    job_id = job_id if jobid.valid(job_id) else jobid.new()
+    emit(f"▸ Job ID {job_id}  ·  find this job later by searching the job list for it.")
     # No try/except here on purpose: a hard failure propagates untouched
     # (Cancelled included) — see the note above on why it isn't notified.
     result = _run_pipeline(
@@ -4276,6 +4348,7 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
         custom_instructions=custom_instructions, get_note=get_note, reviewer=reviewer,
         **({"host": host, "host_url": host_url} if host == HOST_GITLAB else {}))
     review = result.get("review")
+    result["job_id"] = job_id
     # What the review found, as data: read by `prism jobs --json`.
     result["findings"] = structured_findings(review, repo_name, pr_id)
     if webhook_url and dry_run:
@@ -4295,6 +4368,8 @@ def full_pipeline(project_dir, repo_name, pr_id, local_repo=None,
             author=pr_info.get("authorArn"),
             source=pr_info.get("sourceReference"),
             dest=pr_info.get("destinationReference"),
-            reviewer=config.clean_username(reviewer) or None,
+            reviewer=config.clean_username(reviewer) or None, job_id=job_id,
+            scale=getattr(review, "scale", "") or None,
+            approval=_approval_state(review, result.get("stopped")),
             **({"ref": f"MR !{pr_id}"} if host == HOST_GITLAB else {}))
     return result

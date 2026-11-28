@@ -17,7 +17,7 @@ without scraping Markdown:
                      an earlier review of the same change
       "persona":     the document reviewer's lens (ba, architect, qa); null for a PR
       "scale":       "normal" | "large" - the scale of the change the review it came
-                     from classified (a large change is never approved); null when
+                     from classified (large: impact 8/10 or more); null when
                      that review stated none
       "traceability": {
           "repo":          repository the finding is about

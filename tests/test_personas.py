@@ -209,7 +209,7 @@ class Pipeline(unittest.TestCase):
         self.run_job(persona="architect")
         self.assertIn("PERSONA: Architect.", self.prompts[0])
         text = self.remote()
-        self.assertIn("Review v1 · Architect · owner Priya · run", text)
+        self.assertIn("Review v1 · Architect · owner Priya · job", text)
         _b, runs, _a = D.split_document(text)
         self.assertEqual((runs[0].meta["persona"], runs[0].meta["persona_label"]),
                          ("architect", "Architect"))
@@ -248,13 +248,13 @@ class Pipeline(unittest.TestCase):
         self.run_job(persona="ba")                 # v3: follows v1
         prompt = self.prompts[2]
         self.assertIn("PREVIOUS REVIEW", prompt)
-        self.assertIn(f"run {ba_id}", prompt)
-        self.assertNotIn(f"run {arch_id}", prompt)
+        self.assertIn(f"job {ba_id}", prompt)
+        self.assertNotIn(f"job {arch_id}", prompt)
         self.assertIn("DR-1", prompt)
         self.assertNotIn("DR-3", prompt)                            # the Architect's comment
         self.run_job(persona="architect")          # v4: follows v2
         prompt = self.prompts[3]
-        self.assertIn(f"run {arch_id}", prompt)
+        self.assertIn(f"job {arch_id}", prompt)
         self.assertIn("DR-3", prompt)
         self.assertNotIn("DR-1 ", prompt)
 
@@ -362,7 +362,7 @@ class CommandLine(Isolated):
         # The header also names who ran it ("by <login>") when a name is known.
         document = sh(self.origin, "show", "feat/x:docs/spec.md")
         self.assertIn("Review v1 · QA · ", document)
-        self.assertIn(" · run `", document)
+        self.assertIn(" · job `", document)
         self.assertIn("Docs · QA ·", out.getvalue())
 
 
