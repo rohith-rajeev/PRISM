@@ -17,10 +17,12 @@ reasons are given because several steps look optional and are not.
   tenth; 6.9 is followed by 7.0, there is no 6.10). Setting `6.5` or `6.5.0` by hand
   makes CI tag 6.6 and skip a version. "v6.5.0" in a request means the release
   `v6.5`; the third number is only for fix-ups (below).
-- **Fix-up releases (6.4.1, 6.4.2)** are the exception: edit `version.py` yourself
-  to the fix-up number, and merge with `[skip release]` in the merge message so CI
-  does not also cut a normal release. (These publish no binaries; the next minor
-  release does.)
+- **Fix-up releases (6.4.1, 6.5.1, 7.2.1)** are the exception: edit `version.py`
+  yourself to the fix-up number, add `## vX.Y.Z` to `CHANGELOG.md`, and merge with
+  `[skip release]` in the merge message so CI does not also cut a normal release.
+  Then push an annotated tag `vX.Y.Z` on that merge commit: the tag push is what builds
+  and publishes the release (the "Refuse a tag that disagrees with version.py" check
+  guards it). This is the one tag ever pushed by hand.
 
 ## Before you start
 

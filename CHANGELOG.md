@@ -4,6 +4,12 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v7.2.1
+
+- **The document-review form keeps your reviewer role and model.** A new request still
+  starts with an empty owner, documents, requirements, instructions and stages, but the
+  reviewer role and model you last used stay selected, like the working folder.
+
 ## v7.2
 
 - **Every job has a job ID you can search for.** Ten hex characters (like `3f9c2a71be`),

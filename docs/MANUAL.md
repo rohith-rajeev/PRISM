@@ -222,7 +222,7 @@ and a *Frontend* card, pre-filled from the folder names.
 **3. Enter the owner.** *Owner of this review request* is the person responsible
 for the document and for answering the review — not you, the reviewer. It is
 required and shown on the chat card and in the document. It is never filled in for
-you: every request starts from an empty form (see below), so a review can't end up
+you: every request starts with an empty owner (see below), so a review can't end up
 under the last request's owner by mistake.
 
 **4. For each repository you want reviewed, enter the branch and the document
@@ -390,9 +390,10 @@ Two rules keep things safe:
 
 The pull-request form remembers your last job's settings, so reviewing five PRs in
 one repo usually means changing only the PR id. The **Document review** form does
-not: once a review starts, the form is cleared — owner, documents, requirements,
-instructions, reviewer, model and stages — and `+ New job` always opens it empty.
-Only the working folder and its clones stay.
+not: once a review starts, the request is cleared — owner, documents, requirements,
+instructions and stages — and `+ New job` always opens it that way. What stays is
+how and where you work: the **reviewer role**, the **model**, and the working folder
+with its clones.
 
 ### Job IDs and searching the list
 

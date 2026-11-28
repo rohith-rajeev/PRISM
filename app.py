@@ -2876,18 +2876,17 @@ class DocReviewForm(tk.Frame):
             custom_instructions=self.instr_text.get("1.0", "end").strip())
 
     def reset(self):
-        """Clear everything a review request was given, for the next one.
+        """Clear what a review request was given, for the next one.
 
-        Nothing of an earlier request carries over - the owner above all, since a name
-        left from the last review is how a review ends up under the wrong owner. The
-        working folder and the clones found in it stay: they say where you work, not
-        what this request is.
+        What the request is about never carries over - the owner above all, since a
+        name left from the last review is how a review ends up under the wrong owner -
+        nor do the documents, requirements, instructions or stages. What stays is how
+        and where you work: the reviewer role, the model, and the working folder with
+        the clones found in it.
         """
         self.owner_var.set("")
         self.req_var.set("")
         self.instr_text.delete("1.0", "end")
-        self._set_persona(DR.DEFAULT_PERSONA)
-        self.model_picker.set_custom(DEFAULT_MODEL)
         self.commit_var.set(True)
         self.push_var.set(True)
         self.dry_var.set(False)

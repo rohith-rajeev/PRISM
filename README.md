@@ -16,7 +16,7 @@ Jobs are in-memory only — PRISM stays stateless, so closing the window stops
 everything. Each job snapshots its settings when created, so setting up the
 next one never disturbs a job already running, and the pull-request form is
 pre-filled from the last job (usually only the PR id changes); the document-review form
-always starts empty.
+starts each request empty except for the reviewer role, the model and the working folder.
 
 Pull-request reviews and document reviews are listed apart, on a tab each. Every job has a **job ID** (ten hex characters, on its chat cards and its row), kept when
 it is retried; type or paste one into **Search by job ID** above the list to find that
