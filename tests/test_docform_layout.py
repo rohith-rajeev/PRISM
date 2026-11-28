@@ -265,17 +265,22 @@ class DocFormLayout(unittest.TestCase):
 
     def test_a_new_request_starts_from_an_empty_form(self):
         # v7.2: nothing of an earlier request carries over - the owner above all.
+        # v7.2.1: the reviewer role and the model are how you work, and they stay.
         self._ready_form()
         self.form.persona_btns["qa"]._click(None)
+        self.form.model_picker.set_custom("anthropic/claude-sonnet-5-5")
         self.form.req_var.set("docs/reqs")
         self.form.instr_text.insert("1.0", "look at retries")
         self.form.dry_var.set(True)
         self.form.reset()
         f = self.form
-        self.assertEqual((f.owner_var.get(), f.persona_var.get(), f.req_var.get(),
+        self.assertEqual((f.owner_var.get(), f.req_var.get(),
                           f.instr_text.get("1.0", "end").strip(), f.dry_var.get(),
                           f.commit_var.get(), f.push_var.get()),
-                         ("", "ba", "", "", False, True, True))
+                         ("", "", "", False, True, True))
+        self.assertEqual((f.persona_var.get(), f.model_picker.get()),
+                         ("qa", "anthropic/claude-sonnet-5-5"))
+        self.assertTrue(f.persona_btns["qa"]._selected)
         for c in f.cards.values():
             self.assertEqual((c["branch"].get(), c["files"].get("1.0", "end").strip(),
                               c["uploads"]), ("", "", []))

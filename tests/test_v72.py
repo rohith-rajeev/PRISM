@@ -629,6 +629,14 @@ class Desktop(Isolated):
         f.add_uploads("BE", [str(doc)])
         f.owner_var.set(owner)
         f.persona_btns["qa"]._click(None)
+        # A model the engine lists (an unlisted one is dropped when the list loads).
+        p = mock.patch.object(self.A, "list_available_models",
+                              lambda *a, **k: ["anthropic/claude-sonnet-5-5"])
+        p.start()
+        self.addCleanup(p.stop)
+        self.app._load_models_async(force=True)
+        self.settle()
+        f.model_picker.set_custom("anthropic/claude-sonnet-5-5")
         f.instr_text.insert("1.0", "check retries")
         self.app._show_new_tab("docs")
         self.app._start()
@@ -639,9 +647,11 @@ class Desktop(Isolated):
         (job,) = self.app.manager.jobs.values()
         self.assertEqual((job.spec.owner, job.spec.persona), ("Priya", "qa"))
         f = self.form
-        self.assertEqual((f.owner_var.get(), f.persona_var.get(),
-                          f.instr_text.get("1.0", "end").strip(), f.cards["BE"]["uploads"]),
-                         ("", "ba", "", []))
+        self.assertEqual((f.owner_var.get(), f.instr_text.get("1.0", "end").strip(),
+                          f.cards["BE"]["uploads"]), ("", "", []))
+        # v7.2.1: the reviewer role and the model stay for the next request.
+        self.assertEqual((f.persona_var.get(), f.model_picker.get()),
+                         ("qa", "anthropic/claude-sonnet-5-5"))
         # "+ New job" (from the list or from the job's page) never refills it either.
         f.owner_var.set("Someone")
         self.app.show_new()
@@ -652,6 +662,8 @@ class Desktop(Isolated):
         self.assertEqual(f.owner_var.get(), "")
         self.assertEqual(self.app.new_tab, "docs")
         self.assertIsNotNone(f.problem())                  # the owner must be typed again
+        self.assertEqual((f.persona_var.get(), f.model_picker.get()),
+                         ("qa", "anthropic/claude-sonnet-5-5"))
 
     # ---- job IDs in the list, and searching it ----
     def test_rows_show_the_job_id_and_the_search_filters_them(self):
