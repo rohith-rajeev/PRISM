@@ -252,13 +252,13 @@ class Inputs(unittest.TestCase):
         m = D.commit_message("20261107-1432-ab12", "review\ncomments  v1")
         self.assertEqual(m, "PRISM-20261107-1432-ab12: review comments v1")
 
-    def test_run_ids_are_unique(self):
+    def test_job_ids_are_unique(self):
         # Many, and from many threads at once: no id is ever handed out twice.
         import threading
         seen, lock = [], threading.Lock()
 
         def draw():
-            ids = [D.new_run_id() for _ in range(2000)]
+            ids = [D.new_job_id() for _ in range(2000)]
             with lock:
                 seen.extend(ids)
         threads = [threading.Thread(target=draw) for _ in range(4)]
@@ -266,25 +266,18 @@ class Inputs(unittest.TestCase):
         [t.join() for t in threads]
         self.assertEqual(len(set(seen)), 8000)
 
-    def test_run_ids_keep_their_readable_shape(self):
-        import re
-        self.assertRegex(D.new_run_id(), r"^\d{8}-\d{4}-[0-9a-f]{6}$")
+    def test_job_ids_are_ten_hex_characters(self):
+        self.assertRegex(D.new_job_id(), r"^[0-9a-f]{10}$")
 
     def test_a_clash_is_redrawn_not_returned(self):
-        """If the random part repeated within a minute, the id handed out would still differ."""
-        import uuid
-        real = uuid.uuid4
-        with mock.patch.object(D.time, "strftime", lambda fmt: "20261107-1432"):
-            first = D.new_run_id()
-            # The next draw reproduces first's random digits exactly (a true clash); the
-            # one after it is genuinely different.
-            clash = uuid.UUID(hex=first[-6:] + "0" * 26)
-            self.assertEqual(clash.hex[:6], first[-6:])
-            draws = iter([clash, real()])
-            with mock.patch.object(D.uuid, "uuid4", lambda: next(draws)):
-                second = D.new_run_id()
-        self.assertEqual(first[:14], second[:14])             # same minute ...
-        self.assertNotEqual(first, second)                     # ... still not the same id
+        """If the random draw repeated an id already handed out, a new one is drawn."""
+        import jobid
+        first = D.new_job_id()
+        draws = iter([first, "abcdef0123"])
+        with mock.patch.object(jobid.secrets, "token_hex", lambda n: next(draws)):
+            second = D.new_job_id()
+        self.assertNotEqual(first, second)
+        self.assertEqual(second, "abcdef0123")
 
 
 class Browsing(unittest.TestCase):
@@ -448,7 +441,7 @@ class Pipeline(unittest.TestCase):
         self.assertIn(D.SECTION_TITLE, text)
         self.assertIn("DR-1", text)
         top = self.remote_log()[0]
-        self.assertTrue(top.startswith(f"PRISM-{res['run_id']}: "), top)
+        self.assertTrue(top.startswith(f"PRISM-{res['job_id']}: "), top)
         # the verdict was raised because it listed a blocker yet said Approve
         self.assertTrue(any("Request changes" in m for m in self.log if isinstance(m, str)))
         self.assertTrue(any(m.strip().startswith("◆ Verdict: 🔴 Request changes") for m in self.log))
@@ -488,7 +481,7 @@ class Pipeline(unittest.TestCase):
         self.assertIn("Start new comments at DR-3", self.calls[1])
         _b, runs, _a = D.split_document(self.remote_text())
         self.assertEqual([r.meta["v"] for r in runs], [2, 1])
-        self.assertEqual([r.meta["id"] for r in runs], [second["run_id"], first["run_id"]])
+        self.assertEqual([r.meta["id"] for r in runs], [second["job_id"], first["job_id"]])
         self.assertIn("Body, revised.", self.remote_text())
 
     def _edit_and_push(self):
@@ -636,7 +629,7 @@ class Pipeline(unittest.TestCase):
                              text=True, encoding="utf-8").stdout.strip().splitlines()
         self.assertEqual(len(out), 1)
 
-    def test_two_repositories_in_one_run_share_a_run_id(self):
+    def test_two_repositories_in_one_run_share_a_job_id(self):
         second = Path(self.tmp.name) / "second"
         second.mkdir()
         origin2, clone2 = make_remote_and_clone(second)
@@ -645,10 +638,10 @@ class Pipeline(unittest.TestCase):
         res = self.run_job(targets=[t1, t2])
         self.assertTrue(res["pushed"])
         self.assertEqual(res["documents"], 2)
-        self.assertEqual(self.remote_log()[0].split(":")[0], f"PRISM-{res['run_id']}")
+        self.assertEqual(self.remote_log()[0].split(":")[0], f"PRISM-{res['job_id']}")
         top2 = subprocess.run(["git", "log", "-1", "--format=%s", "feat/x"], cwd=origin2,
                               capture_output=True, text=True, encoding="utf-8").stdout
-        self.assertTrue(top2.startswith(f"PRISM-{res['run_id']}:"))
+        self.assertTrue(top2.startswith(f"PRISM-{res['job_id']}:"))
         # each document is told about the other under review
         self.assertIn("Other documents under review", self.calls[0])
 

@@ -130,8 +130,12 @@ confirm.
 Large means very large or expensive to build, roll back or review safely: it cuts
 across many modules, migrates data or schema, changes infrastructure or a pipeline,
 or moves a security boundary (line count alone never decides it). A large change is
-scored at least 8/10, is **Request changes**, and is **never merged** — there is no
-"proceed" for it, whoever asks. Split it, or take it through by hand.
+scored at least 8/10 and keeps the reviewer's verdict. Like any change with an impact
+of 7 or more, an approved large change **waits for you to approve the merge**: PRISM
+asks *Proceed with merging this PR?*, flagging it as large, and merges only on
+*Proceed*. With nobody to ask (a detached command-line run) it is not merged. The chat
+card flags the large or high-impact change and whether a person approved the merge.
+A large *document* review is always Request changes.
 
 The reviewer's reasoning is in the **OUTPUT** panel.
 
@@ -217,21 +221,25 @@ and a *Frontend* card, pre-filled from the folder names.
 
 **3. Enter the owner.** *Owner of this review request* is the person responsible
 for the document and for answering the review — not you, the reviewer. It is
-required, shown on the chat card and in the document, and remembered for the next
-form.
+required and shown on the chat card and in the document. It is never filled in for
+you: every request starts from an empty form (see below), so a review can't end up
+under the last request's owner by mistake.
 
 **4. For each repository you want reviewed, enter the branch and the document
-file name(s).** Click `Browse…` beside the file names to pick one or several
-documents at once in your desktop's file chooser — they are added as paths
-relative to the repository, next to anything you have already typed. You can also
+file name(s).** Click `Browse repository…` under the file names to pick one or
+several documents in the selected clone with your desktop's file chooser — they are
+added as paths relative to the repository, next to anything you have already typed.
+The chooser lists Markdown, text, Word, PDF and Excel files; switch its filter to
+*All files* for anything else. You can also
 type paths from the repository root yourself, one per line or comma separated.
 Fill in either card or both; an empty card is skipped. (Select the clone first:
 picked files must lie inside it.)
 
-**Documents that aren't on the branch.** Click `Upload…`, or drop files onto the
-card (drag-and-drop needs the *tkdnd* Tk extension; Upload always works). Text,
+**Documents that aren't on the branch.** Click `Select Files` to add files from
+anywhere on this machine (dragging files onto the form is not supported). Text,
 Markdown, Word, PDF and Excel are accepted; anything else is named on the card and
-not added. Each uploaded file is listed by name with an ✕ to remove it. It is
+not added. A file you select that lies inside the selected clone is added as a
+document on the branch instead. Each uploaded file is listed by name with an ✕ to remove it. It is
 reviewed against the selected branch's code even though it isn't committed, and
 the review is written into a **copy next to it** (`spec.prism-review.md`; a PDF gets
 `spec.pdf.prism-review.md` and is never changed). It goes onto the branch only if
@@ -258,6 +266,8 @@ and the review states a conclusion on each. Run the document again with another
 persona to see it from another side; each persona's reviews are kept apart, so
 an Architect re-review follows up the Architect's comments.
 
+**Security standards, on top of every review.** Every review — pull request or document — also validates the change against **OWASP ASVS** and the **OWASP Top 10** (application code), the **CIS AWS Foundations Benchmark / AWS Foundational Security Best Practices** (infrastructure) and **NIST SSDF** (the SDLC). It is an added layer: the review itself is unchanged. The report gives one conclusion per standard — `met`, the findings that break it, or `n/a` with why — on a *Standards* line, which goes into the PR description, or into the document's Coverage. A pull-request report without it is asked for it once; a standard still left out is named in the log so you can check it yourself.
+
 **6. (Optional) Add the requirements.** Click `Browse` to pick the folder holding
 the requirements the document was decomposed from, as you did for the working
 folder. **With** requirements, the review centres on whether the decomposition
@@ -277,7 +287,7 @@ they do for a PR.
 **What you get.** A **PRISM review comments** section is added at the end of each
 document: a summary, then comments grouped by severity (Blocker, Major, Minor,
 Suggestion), each with a category and an id like `DR-3`, and what the reviewer
-read and did not reach. It is committed as `PRISM-<run id>: …` and pushed to the
+read and did not reach. It is committed as `PRISM-<job id>: …` and pushed to the
 branch.
 
 **The decision** is one of two, set by PRISM from the open comments — the
@@ -300,7 +310,7 @@ resolved, still open or withdrawn. You can also ask the reviewer questions from
 the job page once it has finished.
 
 **Who ran it.** Each review's heading in the document says who owns it and who ran
-it (*Review v2 · Architect · owner Priya · by Alex · run …*), so the comments can be traced to a
+it (*Review v2 · Architect · owner Priya · by Alex · job …*), so the comments can be traced to a
 person. **Document-review alerts** (see Settings) post a card to Google Chat when
 a review finishes.
 
@@ -309,7 +319,7 @@ changes the branch checked out in your clone, your files or your uncommitted
 work. The one thing it leaves in the project folder is `.opencode/agents/` — the
 reviewer's own agent files, installed there for every review, pull request or
 document — which you may want in your `.gitignore`. If the push fails the commit
-is kept as `refs/prism/docs/<run id>-<role>` in your clone.
+is kept as `refs/prism/docs/<job id>-<suffix>-<role>` in your clone.
 
 ---
 
@@ -339,8 +349,12 @@ steering note. On the command line: `prism chat <job id> <question>`.
 Create as many jobs as you like. **Two run at a time**; the rest wait their
 turn and start automatically.
 
-The jobs list shows every job at a glance, in two sections: **Running**
-(queued jobs included) on top, and **Completed** below it, newest first.
+The jobs list shows every job at a glance. Pull-request reviews and document
+reviews are listed apart: pick **Pull requests** or **Document reviews** above the
+list (each tab shows how many jobs it holds; opening a job and coming back returns
+to its tab). Within a tab, two sections: **Running** (queued jobs included) on top,
+and **Completed** below it, newest first. The **CLI jobs** screen has the same two
+tabs.
 Each row shows the pull request's source → destination branches and its
 author.
 
@@ -374,8 +388,27 @@ Two rules keep things safe:
   run fully in parallel; only two jobs that happen to target the exact same
   branch still take turns.
 
-The new-job form remembers your last job's settings, so reviewing five PRs in
-one repo usually means changing only the PR id.
+The pull-request form remembers your last job's settings, so reviewing five PRs in
+one repo usually means changing only the PR id. The **Document review** form does
+not: once a review starts, the form is cleared — owner, documents, requirements,
+instructions, reviewer, model and stages — and `+ New job` always opens it empty.
+Only the working folder and its clones stay.
+
+### Job IDs and searching the list
+
+Every job has a **job ID**: ten hex characters such as `3f9c2a71be`. It is on every
+Google Chat card the job posts (at the bottom), on its row in the jobs list, at the
+top of its page and in the first line of its output, and a document review's commits
+are `PRISM-<job id>: …`. A retry is the same job and **keeps its job ID**, so every
+card it ever posted leads back to it.
+
+To find the job a card came from, type or paste its job ID into **Search by job
+ID** above the list (`Ctrl+F` jumps there; `Esc` clears it). The first few
+characters are enough, and a pasted `Job ID 3f9c2a71be` or `PRISM-3f9c2a71be` works
+too. The search also
+matches a job's name. When only a command-line job matches, the list says so and a
+click opens it under **CLI jobs**, which has the same search box. From a terminal:
+`prism jobs --find 3f9c2a71be`.
 
 ### Retrying a job
 
@@ -384,6 +417,13 @@ list, and on the job's own detail screen. Click it to rerun that same job —
 same row, same repo, PR id and settings; nothing to retype, and nothing new
 added to the list. Its previous log and verdict are cleared and it goes
 straight back to queued (or running, if a slot is free).
+
+On a job's own page you can change what the retry uses first: the **model**, and
+for a document review the **reviewer role** (Business Analyst, Architect or QA) —
+pick one, then press `↻ Retry` to rerun the same documents as that role. Each role's
+reviews are tracked separately, so the rerun follows up that role's own earlier
+comments, if it has any. A retry from the jobs list keeps the job's model and role.
+From a terminal: `prism retry <id> --persona architect`.
 
 This is the normal way to handle "Request changes": fix the PR, come back,
 click `↻ Retry`. PRISM recognizes it has already reviewed this PR and scopes
@@ -487,6 +527,7 @@ another machine: ssh in and run `prism`.
     prism run 214              review PR 214 of the repository you are in
     prism run 214 -d           the same, in the background (survives logout)
     prism jobs                 what is running      (--all for finished ones)
+    prism jobs --find <job id> the job a chat card's job ID belongs to
     prism logs <id> -f         follow a job's output
     prism stop <id>            stop it              (--all stops every one)
     prism retry <id>           run it again with the same settings
@@ -520,7 +561,10 @@ never guesses. `--commit/--no-commit` and `--push/--no-push` are the stages;
 requirements folder (without it the documents are reviewed against the codebase
 alone). The review shows up as a
 job like any other: `prism jobs`, `prism logs <id> -f`, `prism stop <id>`, and
-`prism retry <id>` for an incremental re-review after the author's edits.
+`prism retry <id>` for an incremental re-review after the author's edits
+(`--persona qa` reruns it as another reviewer role). Wherever a command takes a job
+id, the job ID from a chat card works too (for jobs started since v7.2 they are the
+same).
 `prism ask <id> "why is DR-2 a blocker?"` asks the reviewer about it. The full
 list of flags is in `man prism`.
 

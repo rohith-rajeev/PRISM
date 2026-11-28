@@ -339,7 +339,7 @@ class DocCard(unittest.TestCase):
     def card(self, **kw):
         base = dict(persona="Architect", owner="Priya", decision="request-changes", impact="6",
                     counts={"Blocker": 1, "Major": 1}, targets=self.TARGETS, reviewer="Alex",
-                    run_id="20261124-1200-abc123", outcome="committed and pushed")
+                    job_id="20261124-1200-abc123", outcome="committed and pushed")
         base.update(kw)
         return {"cardsV2": [{"card": N.build_doc_card(**base)}]}
 
@@ -566,7 +566,7 @@ class DocumentReviewEndToEnd(Isolated):
 
         # signed in the document itself
         doc = sh(self.origin, "show", "feat/x:docs/spec.md")
-        self.assertIn("Review v1 · Architect · owner Priya · by Alex Rivera · run `", doc)
+        self.assertIn("Review v1 · Architect · owner Priya · by Alex Rivera · job `", doc)
         self.assertIn('"reviewer":"Alex Rivera"', doc)
 
         # one alert, to the DOCUMENT webhook only
@@ -633,7 +633,7 @@ class DocumentReviewEndToEnd(Isolated):
         with mock.patch("getpass.getuser", return_value="jdoe"):
             code, out = self.run_docs()
         self.assertEqual(code, 0, out)
-        self.assertIn("· by jdoe · run `", sh(self.origin, "show", "feat/x:docs/spec.md"))
+        self.assertIn("· by jdoe · job `", sh(self.origin, "show", "feat/x:docs/spec.md"))
 
     def test_a_retry_signs_with_the_name_saved_now_and_alerts_the_saved_webhook(self):
         C.set_username("First")

@@ -67,9 +67,10 @@ Every review classifies the change as
 or
 .BR large .
 A large change (very large or expensive to build, roll back or review safely) scores
-at least 8/10, is never approved and is never merged, whatever anyone answers. A
-normal change with an impact of 7 or more still waits for a person to confirm the
-merge.
+at least 8/10. A pull request with an impact of 7 or more, and every large one, waits
+for a person to approve the merge; a detached run has nobody to ask and does not merge
+it. The chat card flags the change and whether a person approved it. A large
+document review is always Request changes.
 .PP A folder that holds several clones needs
 .BR \-\-repo ;
 PRISM never guesses between them.
@@ -97,7 +98,7 @@ the person who answers it, shown on the chat card and in the document beside the
 reviewer.
 The section is written to aid a human review, not to replace it. PRISM then
 commits it to the branch as
-.B PRISM\-<run id>: <brief message>
+.B PRISM\-<job id>: <brief message>
 and pushes it to
 .BR origin ,
 never forced. All of this happens in a temporary
@@ -115,6 +116,19 @@ numbered version in the same section.
 Every run keeps a record and a log under
 .IR ~/.prism/cli\-jobs/ ,
 which is how the desktop application lists, stops and retries jobs started here.
+.PP
+Every job has a
+.BR "job ID" :
+ten hex characters such as
+.BR 3f9c2a71be ,
+which is also its id in
+.BR "prism jobs" .
+A retry is the same job and keeps it. It is printed when the job starts, shown on
+every Google Chat card the job posts, and is the
+.I <job id>
+in a document review's commit messages. Find the job a card came from with
+.BR "prism jobs \-\-find" ;
+the job ID works wherever a command takes a job id.
 The packaged desktop build accepts the same commands, for example
 .BR "PRISM run 214" .
 .SH COMMANDS
@@ -133,7 +147,7 @@ and
 instead of plain arguments. Runs in the foreground; Ctrl\-C stops it cleanly.
 .TP
 .B jobs
-List running jobs.
+List running jobs, by job ID.
 .TP
 .BI "logs " id
 Show a job's transcript.
@@ -326,6 +340,10 @@ of the product, and can it be tested?
 Security, stability and scalability are always checked, whichever persona is chosen,
 and the review states its conclusion on each. Each persona's reviews are tracked
 separately: running the Architect again follows up the Architect's earlier comments.
+On top of that, every review (pull request or document) is also validated against
+OWASP ASVS and the OWASP Top 10 (application code), the CIS AWS Foundations Benchmark /
+AWS Foundational Security Best Practices (infrastructure) and NIST SSDF (the SDLC), and
+states one conclusion per standard on a Standards line.
 .TP
 .BI \-\-requirements " DIR"
 Optional. The folder holding the requirements the documents were decomposed from.
@@ -351,7 +369,7 @@ Without a commit nothing is kept: the review exists only in the log.
 Push the commit to the remote (default). Needs a commit. If the branch moved on
 the remote, PRISM replays its one commit on top and pushes again; if that fails
 the commit is kept as
-.I refs/prism/docs/<run id>\-<role>
+.I refs/prism/docs/<job id>\-<suffix>\-<role>
 in the clone and nothing is lost.
 .TP
 .B \-\-dry\-run
@@ -375,8 +393,19 @@ A flag always beats a saved default.
 .B jobs \-a, \-\-all
 Include finished jobs.
 .TP
+.B jobs \-f, \-\-find \fIJOB_ID\fR
+Only the jobs whose job ID contains
+.I JOB_ID
+(the first few characters are enough; a pasted
+.B "Job ID 3f9c2a71be"
+or
+.B PRISM\-3f9c2a71be
+works too), finished ones included. It also matches the job's name.
+.TP
 .B jobs \-\-json
 Machine\-readable output: one object per job, with the usual state plus
+.B job_id
+(the ID on its chat cards),
 .B reviewer
 (who ran it) and
 .B findings
@@ -410,6 +439,17 @@ Stop every running CLI job.
 .TP
 .B retry \-d, \-q
 Detach, or run quietly. Works for document reviews too.
+.TP
+.B retry \-m, \-\-model \fINAME\fR
+Rerun with another model
+.RB ( default
+for the engine's default).
+.TP
+.B retry \-\-persona \fINAME\fR
+A document review only: rerun it as another reviewer role
+.RB ( ba ", " architect " or " qa ).
+Each role's reviews are tracked separately: the rerun follows up that role's own earlier
+comments, if it has any.
 .TP
 .B rm \-\-all
 Delete every finished job.
@@ -605,6 +645,14 @@ cd ~/work    # holds shop\-backend and shop\-frontend
 prism docs \-\-be docs/spec.md \-\-fe docs/ui\-spec.md \-\-requirements docs/reqs \-d
 .br
 prism logs 7f3a9c \-f
+.RE
+.PP
+Find the job a chat card came from by the job ID in its footer, then follow it:
+.PP
+.RS
+prism jobs \-\-find 3f9c2a71be
+.br
+prism logs 3f9c2a71be \-f
 .RE
 .PP
 Review again after the author's edits, then ask about a comment:

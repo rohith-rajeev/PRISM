@@ -100,20 +100,10 @@ def effective_username():
 
 
 # ---- the owner of a document review request -------------------------------------
-# The person who answers a document review (not the person who ran it). Asked on
-# every document review; the last one given pre-fills the next form (FR-OWN-2).
-def get_last_owner():
-    value = load().get("last_doc_owner")
-    return clean_username(value) if isinstance(value, str) else ""
-
-
-def set_last_owner(name):
-    name = clean_username(name)
-    if not name:
-        return
-    cfg = load()
-    cfg["last_doc_owner"] = name
-    save(cfg)
+# The person who answers a document review (not the person who ran it) is typed on
+# every request and never remembered: a name carried over from the last review is how
+# a review ends up under the wrong owner. A "last_doc_owner" left in the file by
+# v7.0 or v7.1 is simply never read.
 
 
 # ---- codegen integration -------------------------------------------------------

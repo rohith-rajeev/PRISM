@@ -263,17 +263,23 @@ class DocFormLayout(unittest.TestCase):
         self.assertEqual(self.form.build_spec().requirements_path,
                          os.path.join("docs", "requirements"))
 
-    def test_a_previous_job_refills_the_persona_and_the_requirements(self):
+    def test_a_new_request_starts_from_an_empty_form(self):
+        # v7.2: nothing of an earlier request carries over - the owner above all.
         self._ready_form()
         self.form.persona_btns["qa"]._click(None)
         self.form.req_var.set("docs/reqs")
-        spec = self.form.build_spec()
-        self.form.persona_btns["ba"]._click(None)
-        self.form.req_var.set("")
-        self.form.populate(spec)
-        self.assertEqual((self.form.persona_var.get(), self.form.req_var.get()),
-                         ("qa", os.path.join("docs", "reqs")))
-
+        self.form.instr_text.insert("1.0", "look at retries")
+        self.form.dry_var.set(True)
+        self.form.reset()
+        f = self.form
+        self.assertEqual((f.owner_var.get(), f.persona_var.get(), f.req_var.get(),
+                          f.instr_text.get("1.0", "end").strip(), f.dry_var.get(),
+                          f.commit_var.get(), f.push_var.get()),
+                         ("", "ba", "", "", False, True, True))
+        for c in f.cards.values():
+            self.assertEqual((c["branch"].get(), c["files"].get("1.0", "end").strip(),
+                              c["uploads"]), ("", "", []))
+        self.assertTrue(f.proj_var.get())             # where you work is kept
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

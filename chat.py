@@ -106,7 +106,7 @@ def _finding_text(f):
 def snapshot(info):
     """The job's details as text, from a plain dict (see Job.chat_details / the CLI).
 
-    Keys used, all optional: label, kind ("pr" | "docs"), status, stages, settings,
+    Keys used, all optional: label, kind ("pr" | "docs"), job_id, status, stages, settings,
     host, target, branches, owner, reviewer, verdict, impact, impact_reason, scale,
     scale_reason, stopped, merged, error, findings (structured records), documents
     (per-document results), output (list of OUTPUT lines).
@@ -115,6 +115,7 @@ def snapshot(info):
     lines = [
         _line("Job", info.get("label")),
         _line("Kind", "document review" if kind == "docs" else "pull-request review"),
+        _line("Job ID", info.get("job_id")),
         _line("Status", info.get("status")),
         _line("Host", info.get("host")),
         _line("Target", info.get("target")),
@@ -132,6 +133,8 @@ def snapshot(info):
     if info.get("impact"):
         lines.append(_line("Impact", f"{info['impact']}"
                            + (f" — {info['impact_reason']}" if info.get("impact_reason") else "")))
+    if info.get("standards"):
+        lines.append(_line("Security standards", info["standards"]))
     if info.get("scale"):
         lines.append(_line("Scale", f"{info['scale']}"
                            + (f" — {info['scale_reason']}" if info.get("scale_reason") else "")))
@@ -146,6 +149,7 @@ def snapshot(info):
                          + (f" · {d['counts']}" if d.get("counts") else "")
                          + (f" · impact {d['impact']}/10" if d.get("impact") else "")
                          + (f" · scale {d['scale']}" if d.get("scale") else "")
+                         + (f" · standards {d['standards']}" if d.get("standards") else "")
                          + (f" · review copy {d['copy']}" if d.get("copy") else ""))
     findings = info.get("findings")
     if findings:

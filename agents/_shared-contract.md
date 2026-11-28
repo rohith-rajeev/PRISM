@@ -57,9 +57,15 @@ is not.
 **Every review states its scale.** `pr-reviewer` and `doc-reviewer` add
 `**Scale:** normal | large — <why>` beside the verdict and impact lines. PRISM reads it
 and enforces it after parsing (`orchestrator.resolve_scale` / `enforce_scale`): a large
-change is impact 8 or more and is never an approval, and a large pull request is never
-merged. A document review's decision is PRISM's, never the reviewer's: Approve or Request
+change is impact 8 or more; a large pull request keeps its verdict and is merged only
+once a person approves it, and a large document is never an approval. A document review's decision is PRISM's, never the reviewer's: Approve or Request
 changes, computed from the open comments (`docreview.decide`).
+
+**Security standards are an added layer.** On top of its full review (which they replace
+nothing of), every review - pull request or document - is validated against OWASP ASVS,
+the OWASP Top 10, the CIS AWS Foundations Benchmark / AWS Foundational Security Best
+Practices and NIST SSDF, and states one conclusion per standard on a `Standards` line
+(`security.py` holds the text PRISM sends and reads the line back).
 
 **Live chat turns are not reviews.** A prompt that starts `LIVE CHAT` (see `chat.py`)
 asks one question about one job; the reply is shown to the person as-is and nothing

@@ -56,7 +56,8 @@ def _display_author(author_arn):
 
 def build_card(repo_name, pr_id, do_review, verdict_raw=None, verdict_key=None,
               impact_score=None, merged=None, reason=None, author=None,
-              source=None, dest=None, reviewer=None, ref=None):
+              source=None, dest=None, reviewer=None, ref=None, job_id=None, scale=None,
+              approval=None):
     """A small Google Chat card: one header line, a few widget rows.
 
     Kept to this shape deliberately — a card that scrolls off a phone screen
@@ -95,11 +96,46 @@ def build_card(repo_name, pr_id, do_review, verdict_raw=None, verdict_key=None,
         widgets.append({"decoratedText": {
             "topLabel": "Review", "text": "No verdict parsed"}})
 
+    sections = [{"widgets": widgets}]
+    tail = []
+    note = approval_note(scale, approval, impact_score)
+    if note:
+        # A flat Material warning icon, like the card's other icons - not an emoji.
+        tail.append({"decoratedText": {"startIcon": _icon("warning"), "text": _esc(note),
+                                       "wrapText": True}})
+    if job_id:
+        # The job's ID, as on a document card: what to search the job list for.
+        tail.append({"textParagraph": {
+            "text": f'<font color="#5f6368">Job ID {_esc(job_id)}</font>'}})
+    if tail:
+        sections.append({"widgets": tail})
     return {
         # `ref` names a GitLab merge request ("MR !12"); a pull request is "PR #12".
         "header": {"title": ref or f"PR #{pr_id}", "subtitle": repo_name},
-        "sections": [{"widgets": widgets}],
+        "sections": sections,
     }
+
+
+def approval_note(scale=None, approval=None, impact=None):
+    """The card's note on a change that needs a person to approve its merge, or "".
+
+    `approval` is "approved", "not-approved", "unasked", "needed" or None (see
+    orchestrator._approval_state). A large change is always flagged.
+    """
+    large = scale == "large"
+    score = f"{impact}/10" if impact else ""
+    if large:
+        head = "Large or expensive change" + (f" (impact {score})" if score else "")
+    elif approval in ("approved", "not-approved", "unasked"):
+        head = "High impact" + (f" ({score})" if score else "")
+    else:
+        return ""
+    tail = {"approved": "a person approved the merge",
+            "not-approved": "a person did not approve the merge, so it was not merged",
+            "unasked": "it needs a person's approval and nobody was there to give it, so it "
+                       "was not merged",
+            "needed": "it is merged only after a person approves it"}.get(approval, "")
+    return head + (f": {tail}." if tail else ".")
 
 
 def _post(webhook_url, card, card_id, emit, what):
@@ -228,7 +264,7 @@ def _pair(left, right):
 
 
 def build_doc_card(persona, owner="", reviewer="", decision="", impact=None,
-                   impact_reason="", counts=None, targets=(), run_id=None, outcome=None,
+                   impact_reason="", counts=None, targets=(), job_id=None, outcome=None,
                    not_reviewed=0, decision_reason=""):
     """The card for one document review.
 
@@ -239,7 +275,7 @@ def build_doc_card(persona, owner="", reviewer="", decision="", impact=None,
        branch), then one line per document: its decision icon and file name, with the
        parent folder beneath only where two documents in the card share a name.
     Then a short note on why (the decision's reason and the impact's), and a footer line
-    with the run id, what happened to the comments, and any document not reviewed.
+    with the job ID, what happened to the comments, and any document not reviewed.
 
     `targets` is a list of dicts: {"label", "role", "repo", "branch", "documents": [
     {"file", "folder", "verdict_key"}]}.
@@ -286,8 +322,8 @@ def build_doc_card(persona, owner="", reviewer="", decision="", impact=None,
         (f"Impact {impact}/10: {short_reason(impact_reason)}"
          if impact and short_reason(impact_reason) else "")) if x)
     foot = []
-    if run_id:
-        foot.append(f"Run {run_id}")
+    if job_id:
+        foot.append(f"Job ID {job_id}")
     if outcome:
         foot.append(str(outcome))
     if not_reviewed:

@@ -18,6 +18,7 @@ from pathlib import Path
 
 import chat as chat_mod
 import docreview
+import jobid
 from pathutil import native_path
 from orchestrator import (INTERNAL_SUMMARY_KEYS, REGION_DEFAULT, Cancelled, RunControl,
                           followup_declined, full_pipeline, run_followup)
@@ -214,6 +215,14 @@ class Job:
         # What the finished run reported, as data (findings, per-document results,
         # scale...): what the chat answers from, next to the status and the log.
         self.data = {}
+        # The job's ID (see jobid.py), on every chat card it posts and on its row. Fixed
+        # for life: a retry is the same job and keeps it. (`id` is the list's own
+        # number for the job; this is the one people see and search for.)
+        self.job_id = jobid.new()
+
+    def matches(self, query):
+        """Whether a job-list search for `query` finds this job (see jobid.matches)."""
+        return jobid.matches(query, [self.job_id], self.label)
 
     # ----- plumbing -----
     def emit_event(self, kind, payload):
@@ -281,7 +290,7 @@ class Job:
             host = "GitLab " + spec.host_url if getattr(spec, "is_gitlab", False) \
                 else f"CodeCommit ({spec.region})"
         return {
-            "label": spec.label, "kind": "docs" if docs else "pr",
+            "label": spec.label, "kind": "docs" if docs else "pr", "job_id": self.job_id,
             "status": self.status + (f" (waiting for the person: {self.pending_question}"
                                      f")" if self.pending_question and
                                      isinstance(self.pending_question, str) else ""),
@@ -293,6 +302,7 @@ class Job:
             "impact": self.impact or data.get("impact"),
             "impact_reason": data.get("impact_reason"),
             "scale": data.get("scale"), "scale_reason": data.get("scale_reason"),
+            "standards": data.get("standards"),
             "merged": result.get("merged") if "merged" in result else None,
             "stopped": result.get("stopped") or None, "error": self.error,
             "findings": data.get("findings") if data else None,
@@ -310,9 +320,10 @@ class Job:
     def summary_line(self):
         """One-line description for the detail screen header."""
         if getattr(self.spec, "kind", "pr") == "docs":
-            return "  ·  ".join([self.spec.label, self.spec.branches_text,
-                                 self.spec.summary_bits()])
-        bits = [self.spec.label, "GitLab" if self.spec.is_gitlab else self.spec.region]
+            return "  ·  ".join([self.spec.label, f"job ID {self.job_id}",
+                                 self.spec.branches_text, self.spec.summary_bits()])
+        bits = [self.spec.label, f"job ID {self.job_id}",
+                "GitLab" if self.spec.is_gitlab else self.spec.region]
         if self.spec.origin == "codegen":
             bits.append("via codegen")
         if self.branches:
@@ -344,7 +355,8 @@ def run_data(summary):
                        impact=getattr(review, "impact_score", "") or "",
                        impact_reason=getattr(review, "impact_reason", "") or "",
                        scale=getattr(review, "scale", "") or "",
-                       scale_reason=getattr(review, "scale_reason", "") or "")
+                       scale_reason=getattr(review, "scale_reason", "") or "",
+                       standards=getattr(review, "standards", "") or "")
         results = summary.get("results")
         if isinstance(results, list):
             out["documents"] = [{
@@ -352,6 +364,7 @@ def run_data(summary):
                 docreview.decision_words(r.get("verdict_key")),
                 "counts": docreview.counts_text(r.get("counts") or {}),
                 "impact": r.get("impact"), "scale": r.get("scale"), "copy": r.get("copy"),
+                "standards": r.get("standards"),
             } for r in results if isinstance(r, dict)]
             if summary.get("decision"):
                 out["verdict"] = docreview.verdict_label(summary["decision"])
@@ -363,6 +376,11 @@ def run_data(summary):
 
 # Sentinel for retry(): "leave the job's model as it is" (None means the default model).
 KEEP_MODEL = object()
+
+
+def find_jobs(jobs, query):
+    """The jobs a job-list search for `query` finds, in the order given."""
+    return [j for j in jobs if j.matches(query)]
 
 
 class DuplicateJob(Exception):
@@ -440,7 +458,7 @@ class JobManager:
         self._next_id += 1
         return job
 
-    def retry(self, job_id, model=KEEP_MODEL):
+    def retry(self, job_id, model=KEEP_MODEL, persona=None):
         """Rerun a finished job in place — same id, row and spec.
 
         Same repo, PR id, flags and model — nothing to retype, and nothing
@@ -451,6 +469,10 @@ class JobManager:
         local record of what it actually reviewed, so a retry costs no more
         context-setup than any other job.
 
+        `persona` (a document review only) reruns it as another reviewer role - a key
+        of docreview.PERSONAS; None keeps the job's own. ValueError for an unknown
+        role, or a role given for a pull request, which has none.
+
         None for a job that isn't finished yet (nothing to retry) or doesn't
         exist. Raises DuplicateJob exactly like create() when another active
         job already covers this PR — retry is not a way around that guard.
@@ -460,14 +482,23 @@ class JobManager:
         job = self.jobs.get(job_id)
         if job is None or not job.is_terminal:
             return None
-        if model is not KEEP_MODEL and (model or None) != job.spec.model:
+        spec = job.spec
+        if persona is not None:
+            if getattr(spec, "kind", "pr") != "docs":
+                raise ValueError("Only a document review has a reviewer role.")
+            persona = docreview.normalise_persona(persona)
+            if persona != spec.persona:
+                spec = dataclasses.replace(spec, persona=persona)
+        if model is not KEEP_MODEL and (model or None) != spec.model:
             # The next iteration may use a different model; everything else
             # in the spec stays exactly as it was.
-            job.spec = dataclasses.replace(job.spec, model=model or None)
-        dup = self.duplicate_of(job.spec)
+            spec = dataclasses.replace(spec, model=model or None)
+        dup = self.duplicate_of(spec)
         if dup is not None:
             raise DuplicateJob(
-                f"{job.spec.label} is already being reviewed (job #{dup.id}).")
+                f"{spec.label} is already being reviewed (job #{dup.id}).")
+        # Only now: a refused retry leaves the job exactly as it was. It keeps its job ID.
+        job.spec = spec
         job.status = QUEUED
         job.stages = {}
         job.verdict_raw = ""
@@ -520,7 +551,7 @@ class JobManager:
                 emit=lambda m, tag=None: job.emit_event("log", (m, tag)),
                 progress=lambda stage, state: job.emit_event("progress", (stage, state)),
                 control=job.control, ask=job.ask.ask, get_note=job.pop_note,
-                **job.spec.pipeline_kwargs())
+                job_id=job.job_id, **job.spec.pipeline_kwargs())
             # "tokens" is a small dict for the UI to render directly; every
             # other field is a short display string, same as before. The
             # structured findings are data for `prism jobs --json`, not text.

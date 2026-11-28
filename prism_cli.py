@@ -40,6 +40,7 @@ import diagnostics as DG  # noqa: E402
 import docreview as DR  # noqa: E402
 import gitlab as GL  # noqa: E402
 import jobs as J  # noqa: E402
+import jobid  # noqa: E402
 import winproc  # noqa: E402
 from pathutil import native_path, native_rel  # noqa: E402
 from orchestrator import (  # noqa: E402
@@ -688,7 +689,10 @@ def execute(spec, job_id=None, quiet=False, runner=None, interactive=None):
     if dup is not None and dup.get("id") != job_id:
         print(f"{spec.label} is already being reviewed (job {dup['id']}).", file=sys.stderr)
         return EXIT_USAGE
-    CJ.create(spec, job_id)
+    record = CJ.create(spec, job_id)
+    # The job ID on its chat cards, in `prism jobs` and found by `prism jobs --find`: the
+    # job's own id (kept by a retry).
+    card_id = record.get("job_id") or job_id
     CJ.prune()
     control = RunControl()
     if interactive is None:
@@ -696,12 +700,15 @@ def execute(spec, job_id=None, quiet=False, runner=None, interactive=None):
     reporter = Reporter(job_id, control, quiet=quiet, interactive=interactive)
     reporter.start()
     _install_signals(control, reporter)
-    reporter.line(f"▸ PRISM job {job_id}  ·  {spec.label}  ·  follow it from anywhere with: "
+    reporter.line(f"▸ PRISM job {job_id}"
+                  + (f" (job ID {card_id})" if card_id != job_id else "")
+                  + f"  ·  {spec.label}  ·  follow it from anywhere with: "
                   f"{PROG} logs {job_id} -f")
     status, fields, code = J.DONE, {}, EXIT_OK
     try:
         summary = runner(emit=reporter.emit, progress=reporter.progress, control=control,
-                         ask=reporter.ask, get_note=None, **spec.pipeline_kwargs())
+                         ask=reporter.ask, get_note=None, job_id=card_id,
+                         **spec.pipeline_kwargs())
         summary = summary or {}
         fields = {"merged": summary.get("merged") is True,
                   "stopped": str(summary.get("stopped") or ""),
@@ -846,6 +853,9 @@ def build_parser():
 
     j = sub.add_parser("jobs", help="list jobs started from the command line")
     j.add_argument("-a", "--all", action="store_true", help="include finished jobs")
+    j.add_argument("-f", "--find", metavar="JOB_ID",
+                   help="only the jobs whose job ID (from a chat card) contains this - "
+                        "finished ones included; also matches the job's name")
     j.add_argument("--json", action="store_true", help="machine-readable output")
 
     lg = sub.add_parser("logs", help="show a job's transcript")
@@ -864,6 +874,9 @@ def build_parser():
     rt.add_argument("-m", "--model", default=None,
                     help="use this model for the rerun (default: the job's own; "
                          "'default' selects the engine's default model)")
+    rt.add_argument("--persona", metavar="NAME", default=None,
+                    help="a document review only: rerun it as another reviewer role - "
+                         "ba, architect or qa (default: the job's own)")
 
     a = sub.add_parser("ask", help="ask the reviewer about a finished job (read-only)")
     a.add_argument("job_id")
@@ -1016,11 +1029,18 @@ def _row_status(record):
 
 def cmd_jobs(args):
     records = CJ.list_jobs()
-    if not args.all:
+    find = getattr(args, "find", None)
+    if find is not None:
+        # A search looks at every job, finished ones included: that is what it is for.
+        if not jobid.normalise_query(find):
+            raise UsageError("Give the job ID (or part of it) to find.")
+        records = [r for r in records if CJ.matches(r, find)]
+    elif not args.all:
         records = [r for r in records if CJ.is_active(r)]
     if args.json:
         for r in records:
             r["status"] = CJ.status_of(r)
+            r["job_id"] = CJ.job_id_of(r)
             # Always present, so a reader never has to test for them: a record written
             # before they existed (or by a job that has not delivered a review) has none.
             if not isinstance(r.get("findings"), list):
@@ -1030,6 +1050,9 @@ def cmd_jobs(args):
             if (r.get("spec") or {}).get("kind") == "docs":
                 r.setdefault("spec", {}).setdefault("owner", "")
         print(json.dumps(records, indent=1))
+        return EXIT_OK
+    if not records and find is not None:
+        print(f"No job matches {find!r}.")
         return EXIT_OK
     if not records:
         print("No running jobs." if not args.all else "No jobs yet.")
@@ -1053,7 +1076,10 @@ def cmd_jobs(args):
             detail = (detail + "  ·  pushed").strip(" ·")
         elif not active and r.get("committed"):
             detail = (detail + "  ·  committed").strip(" ·")
-        rows.append((r["id"], _row_status(r), CJ.label(r), (detail or "")[:48],
+        # Since v7.2 a job's id is its job ID; an older job run again shows both.
+        card_id = CJ.job_id_of(r)
+        shown_id = r["id"] if card_id in ("", r["id"]) else f"{r['id']} ({card_id})"
+        rows.append((shown_id, _row_status(r), CJ.label(r), (detail or "")[:48],
                      human_age(now - (r.get("started") or now))))
     widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
     for n, row in enumerate(rows):
@@ -1141,12 +1167,21 @@ def cmd_retry(args):
     spec = with_identity(spec)
     if args.model:
         spec = dataclasses.replace(spec, model=None if args.model == "default" else args.model)
+    persona = getattr(args, "persona", None)
+    if persona:
+        if getattr(spec, "kind", "pr") != "docs":
+            raise UsageError("--persona is for a document review; a pull request has no "
+                             "reviewer role.")
+        try:
+            spec = dataclasses.replace(spec, persona=DR.normalise_persona(persona))
+        except ValueError as e:
+            raise UsageError(str(e))
     dup = CJ.find_duplicate(spec)
     if dup is not None and dup.get("id") != args.job_id:
         raise UsageError(f"{spec.label} is already being reviewed (job {dup['id']}).")
     if args.detach:
-        return detach(["retry", args.job_id] + (["--model", args.model] if args.model else []),
-                      args.job_id, spec.label)
+        return detach(["retry", args.job_id] + (["--model", args.model] if args.model else [])
+                      + (["--persona", persona] if persona else []), args.job_id, spec.label)
     return execute(spec, args.job_id, quiet=args.quiet)
 
 
@@ -1227,7 +1262,7 @@ def record_details(record, log_text=None):
         log_text = CJ.read_log(record.get("id"), tail=CHAT.OUTPUT_TAIL_LINES) or ""
     return {
         "label": CJ.label(record), "kind": "docs" if docs else "pr",
-        "status": CJ.status_of(record), "stages": {"current stage": stage} if stage else {},
+        "job_id": CJ.job_id_of(record) or None, "status": CJ.status_of(record), "stages": {"current stage": stage} if stage else {},
         "settings": settings, "host": host or None, "target": target,
         "branches": record.get("branches") or None,
         "owner": spec_data.get("owner") or None, "reviewer": record.get("reviewer") or None,
@@ -1525,6 +1560,30 @@ def ensure_username():
         print()
 
 
+# Commands that name a job: each takes its id or the job ID on its chat cards.
+_JOB_COMMANDS = ("logs", "stop", "retry", "ask", "chat", "rm", "export")
+
+
+def resolve_job_id(given):
+    """A job id for what was typed: a job id as it is, or the id of the job with this job
+    ID (as shown on its chat card, also pasted as "Job ID …" or "PRISM-…"). Unknown values
+    come back as typed, so the command reports them as it always has."""
+    if not given or CJ.load(given) is not None:
+        return given
+    record = CJ.find_by_job_id(given)
+    return record["id"] if record is not None else given
+
+
+def _resolve_job_ids(args):
+    if args.command not in _JOB_COMMANDS:
+        return
+    ids = getattr(args, "job_id", None)
+    if isinstance(ids, list):
+        args.job_id = [resolve_job_id(i) for i in ids]
+    elif ids:
+        args.job_id = resolve_job_id(ids)
+
+
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1535,6 +1594,7 @@ def main(argv=None):
         print(f"PRISM {__version__}")
         return EXIT_OK
     try:
+        _resolve_job_ids(args)
         if args.command in ("run", "docs", "retry") and not getattr(args, "quiet", False):
             ensure_username()
         return HANDLERS[args.command](args)

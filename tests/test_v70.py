@@ -255,30 +255,40 @@ class PrBase(unittest.TestCase):
 
 
 class FrScale(PrBase):
-    def test_acceptance_1_a_large_change_scored_4_with_approve_is_held_at_8(self):
-        res = self.run_pr(PR_REPORT.format(impact=4, why="small",
-                                           scale="**Scale:** large — migrates the orders table\n"),
-                          ask=self.ask("proceed"))
+    def test_acceptance_1_a_large_change_scored_4_is_raised_to_8_and_waits_for_a_person(self):
+        # v7.2: a large change keeps its verdict and a person approves its merge (before
+        # v7.2 it was turned into Request changes and never merged).
+        report = PR_REPORT.format(impact=4, why="small",
+                                  scale="**Scale:** large — migrates the orders table\n")
+        res = self.run_pr(report, ask=self.ask("abort"))
         review = res["review"]
-        self.assertEqual(review.verdict_key, "request-changes")
+        self.assertEqual(review.verdict_key, "approve")
         self.assertEqual(review.impact_score, "8")
         self.assertTrue(review.impact_reason.startswith(o.LARGE_REASON_PREFIX))
-        self.assertEqual(self.asked, [], "no merge confirmation is offered")
+        self.assertEqual(len(self.asked), 1)
+        self.assertIn("LARGE OR EXPENSIVE CHANGE", self.asked[0])
+        self.assertIn("migrates the orders table", self.asked[0])
         self.assertEqual(self.merged, [])
-        self.assertEqual(res["stopped"], "large-change")
-        # stored as Request changes in the description, with the raised score
+        self.assertEqual(res["stopped"], "high-impact-not-confirmed")
+        self.assertFalse(review.person_approved)
         (args, kw), = self.described
-        self.assertIn("Request changes", args[1])
+        self.assertIn("Approve", args[1])
         self.assertEqual(args[2], "8")
         self.assertEqual(kw.get("scale"), "large")
+        self.asked.clear()
+        res = self.run_pr(report, ask=self.ask("proceed"))
+        self.assertEqual(len(self.asked), 1)
+        self.assertTrue(res["merged"])
+        self.assertTrue(res["review"].person_approved)
 
     def test_acceptance_2_a_codegen_client_cannot_merge_a_large_change(self):
         report = PR_REPORT.format(impact=9, why="x", scale="**Scale:** large — infra\n")
         res = self.run_pr(report, ask=None, do_merge=True)      # codegen: nobody to ask
         self.assertEqual(self.merged, [])
+        self.assertEqual(res["stopped"], "high-impact-not-confirmed")
         decision, reason = IB.outcome_from_summary(res, res["review"])
         self.assertEqual(decision, IB.DECISION_NEEDS_HUMAN)
-        self.assertIn("large or expensive", reason)
+        self.assertIn("person", reason)
 
     def test_acceptance_3_a_normal_high_impact_change_still_asks_and_merges_on_proceed(self):
         report = PR_REPORT.format(impact=8, why="auth", scale="**Scale:** normal — one line\n")
@@ -297,8 +307,9 @@ class FrScale(PrBase):
         self.assertEqual(sum("Scale line" in t for t in self.turns), 1, "asked exactly once")
         self.assertEqual(res["review"].scale, "large")
         self.assertTrue(res["review"].scale_missing)
-        self.assertEqual(res["review"].verdict_key, "request-changes")
-        self.assertEqual(self.merged, [])
+        self.assertEqual(res["review"].verdict_key, "approve")
+        self.assertEqual(len(self.asked), 1)                 # a person approved it
+        self.assertTrue(res["merged"])
 
     def test_fr_scale_2_no_scale_line_and_impact_5_is_normal_and_recorded_missing(self):
         res = self.run_pr(PR_REPORT.format(impact=5, why="x", scale=""))
@@ -311,7 +322,7 @@ class FrScale(PrBase):
         res = self.run_pr(PR_REPORT.format(impact=3, why="x", scale=""))
         self.assertEqual(res["review"].scale, "large")
         self.assertFalse(res["review"].scale_missing)
-        self.assertEqual(res["stopped"], "large-change")
+        self.assertEqual(res["stopped"], "high-impact-not-confirmed")   # nobody asked
 
     def test_fr_scale_4_block_is_kept_for_a_large_change(self):
         report = ("**Verdict:** ⛔ Block\n**Impact score:** 9/10 — x\n**Scale:** large — y\n")
@@ -319,10 +330,11 @@ class FrScale(PrBase):
         self.assertEqual(res["review"].verdict_key, "block")
         self.assertEqual(self.merged, [])
 
-    def test_fr_scale_5_a_large_change_is_held_even_in_a_dry_run(self):
+    def test_fr_scale_5_a_large_change_is_not_merged_in_a_dry_run(self):
         res = self.run_pr(PR_REPORT.format(impact=8, why="x", scale="**Scale:** large — y\n"),
-                          dry_run=True)
-        self.assertEqual(res["stopped"], "large-change")
+                          dry_run=True, ask=self.ask("proceed"))
+        self.assertEqual(self.merged, [])
+        self.assertFalse(res["merged"])
 
     def test_findings_carry_the_scale(self):
         res = self.run_pr(PR_REPORT.format(impact=2, why="x", scale="**Scale:** normal — y\n"))
@@ -339,18 +351,21 @@ class FrScale(PrBase):
                            ("no scale here", ("", ""))):
             self.assertEqual(o.parse_scale(text), want, text)
         r = o.ReviewResult(verdict_key="approve", scale="large")
-        self.assertFalse(r.merge_allowed())
+        self.assertTrue(r.merge_allowed())           # v7.2: once a person approves it
 
     def test_the_agent_instructions_state_the_scale_rules(self):
-        """FR-SCALE-7: both reviewers are told what large means, the 8/10 floor and
-        that a large change is never approved."""
+        """FR-SCALE-7: both reviewers are told what large means and the 8/10 floor; a
+        large document is never approved (a large PR waits for a person, since v7.2)."""
         for name in ("pr-reviewer.md", "doc-reviewer.md"):
             text = " ".join((ROOT / "agents" / name).read_text(encoding="utf-8").split())
             with self.subTest(agent=name):
                 self.assertIn("**Scale:**", text)
                 self.assertIn("migrates data or schema", text)
                 self.assertIn("8/10", text)
-                self.assertIn("never approved", text)
+                if name == "doc-reviewer.md":
+                    self.assertIn("never approved", text)
+                else:
+                    self.assertNotIn("never approved", text)
 
 
 class FrScaleDocuments(DocBase):
@@ -393,7 +408,7 @@ class FrOwn(DocBase):
         self.assertIn("owner Priya", job.summary_line())
         self.assertIn("owner Priya", spec.summary_bits())
         self.run_job(reviewer="Alex")
-        self.assertIn("· owner Priya · by Alex · run `", self.remote())
+        self.assertIn("· owner Priya · by Alex · job `", self.remote())
 
     def test_the_owner_is_cleaned_and_survives_a_record(self):
         spec = D.DocJobSpec(project_dir="/p", targets=(self.target(),), owner=" <Priya>\n")
@@ -416,12 +431,10 @@ class FrOwnCommandLine(Isolated):
         spec = P.build_docs_spec(args(files=["docs/spec.md"], owner="Priya"), cwd=clone)
         self.assertEqual(spec.owner, "Priya")
 
-    def test_the_last_owner_is_remembered(self):
-        self.assertEqual(C.get_last_owner(), "")
-        C.set_last_owner("Priya")
-        self.assertEqual(C.get_last_owner(), "Priya")
-        C.set_last_owner("   ")            # an empty answer never clears it
-        self.assertEqual(C.get_last_owner(), "Priya")
+    def test_the_owner_is_never_remembered(self):
+        # v7.2: a name carried over from the last review is how a review ends up under
+        # the wrong owner, so none is kept.
+        self.assertFalse(hasattr(C, "get_last_owner") or hasattr(C, "set_last_owner"))
 
 
 # =========================================================== FR-CARD =========
@@ -433,7 +446,7 @@ class FrCard(unittest.TestCase):
     def card(self, targets, **kw):
         base = dict(persona="QA", owner="Priya", reviewer="Alex", decision="request-changes",
                     impact=6, impact_reason="", counts={"Major": 1}, targets=targets,
-                    run_id="r1", outcome="committed and pushed",
+                    job_id="r1", outcome="committed and pushed",
                     decision_reason="1 major comment open")
         base.update(kw)
         return N.build_doc_card(**base)
@@ -517,7 +530,7 @@ class FrCard(unittest.TestCase):
     def test_fr_card_2_footer_and_fr_card_4_names(self):
         card = self.card([], not_reviewed=1)
         foot = card["sections"][-1]["widgets"][-1]["textParagraph"]["text"]
-        self.assertIn("Run r1 · committed and pushed · 1 document could not be reviewed", foot)
+        self.assertIn("Job ID r1 · committed and pushed · 1 document could not be reviewed", foot)
         self.assertEqual(N.short_repo("group/sub/" + "a" * 40), "a" * 40)
         self.assertEqual(N.short_repo("short-name"), "short-name")
         self.assertEqual(N.short_branch("x" * 60), "x" * 60)
@@ -780,8 +793,12 @@ class FrGitLab(PrBase):
         # The synced head is a merge whose first parent is the reviewed commit.
         self.heads = {"5ynced^1": "c0ffee"}
         o._git_head = lambda repo, ref: self.heads.get(ref, "5ynced")
-        o.time.sleep = lambda s: None
-        self.addCleanup(setattr, o.time, "sleep", time.sleep)
+        # o.time is the process-wide time module: patch it so the real sleep comes back.
+        # (Restoring "time.sleep" read after the stub was set left it a no-op for every
+        # later test.)
+        p2 = mock.patch.object(o.time, "sleep", lambda s: None)
+        p2.start()
+        self.addCleanup(p2.stop)
 
     def run_mr(self, report=GL_REPORT, setup=None, review=None, **kw):
         o.run_opencode_review = review or (lambda *a, **k: (report, "ses_x"))
@@ -821,11 +838,14 @@ class FrGitLab(PrBase):
         self.assertEqual(FakeGitLab.last.merges, [])
         self.assertEqual(res["stopped"], "dry-run")
 
-    def test_acceptance_2_a_large_merge_request_stays_open(self):
-        res = self.run_mr(GL_REPORT.replace("normal — one module", "large — schema"))
+    def test_acceptance_2_a_large_merge_request_waits_for_a_person(self):
+        report = GL_REPORT.replace("normal — one module", "large — schema")
+        res = self.run_mr(report)                  # nobody to ask: stays open
         self.assertEqual(FakeGitLab.last.merges, [])
-        self.assertEqual(res["review"].verdict_key, "request-changes")
-        self.assertEqual(res["stopped"], "large-change")
+        self.assertEqual(res["review"].verdict_key, "approve")
+        self.assertEqual(res["stopped"], "high-impact-not-confirmed")
+        res = self.run_mr(report, ask=self.ask("proceed"))
+        self.assertTrue(res["merged"])
 
     def test_acceptance_3_a_project_that_cannot_fast_forward_stops_without_a_push(self):
         def merge_commit(fake):
@@ -1332,8 +1352,9 @@ class FrDocInForm(Isolated):
         form.cards["BE"]["files"].delete("1.0", "end")
         form._remove_upload(form.cards["BE"], form.cards["BE"]["uploads"][0])
         self.assertEqual([u.name for u in form.build_spec().targets[0].uploads], ["more.pdf"])
-        form.populate(spec)
-        self.assertEqual(len(form.cards["BE"]["uploads"]), 2)
+        form.reset()
+        self.assertEqual(form.cards["BE"]["uploads"], [])
+        self.assertEqual(form.owner_var.get(), "")
 
 
 if __name__ == "__main__":

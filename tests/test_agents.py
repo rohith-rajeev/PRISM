@@ -29,6 +29,7 @@ import orchestrator as o  # noqa: E402
 REPORT = ("## PR #7\n**Verdict:** OK Approve\n"
           "**Impact score:** 2/10 - isolated\n"
           "**Scale:** normal - one isolated file\n"
+          "**Standards:** ASVS: met · Top 10: met · AWS: n/a — no infrastructure · SSDF: met\n"
           "- **[Low] style — `x.py:1`** nit\n")
 
 
@@ -555,7 +556,7 @@ class VerdictRecovery(unittest.TestCase):
         def continue_turn(prompt, *a, **k):
             prompts.append(prompt)
             return 0, ("**Verdict:** ✅ Approve\n**Impact score:** 2/10 — tiny\n"
-                       "**Scale:** normal — tiny\n"), "ses_x"
+                       "**Scale:** normal — tiny\n**Standards:** ASVS: met · Top 10: met · AWS: n/a — no infrastructure · SSDF: met\n"), "ses_x"
         o._continue_turn = continue_turn
         res = self._run(ask=lambda *a, **k: None)
         self.assertEqual(len(prompts), 1)

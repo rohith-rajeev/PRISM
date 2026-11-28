@@ -22,12 +22,11 @@ import difflib
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import tempfile
-import threading
 import time
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -37,6 +36,8 @@ import findings as findings_mod
 import notifier
 import officewrite
 import orchestrator as O
+import jobid
+import security
 from pathutil import native_any, native_path, native_rel, posix_rel
 from orchestrator import Cancelled, _emit_plain
 
@@ -392,32 +393,23 @@ def relevant_stages(spec):
     return stages
 
 
-_ISSUED_IDS = set()
-_ISSUED_LOCK = threading.Lock()
+def new_job_id():
+    """A fresh job ID (see jobid.py): 10 hex characters, never handed out twice."""
+    return jobid.new()
 
 
-def new_run_id():
-    """A readable, sortable, unique id for one run: 20261107-1432-a1b2c3.
-
-    The id is how a run is found later (`git log --grep PRISM-<id>`) and it names the
-    run's temporary worktree, so two runs must never share one. Six random hex digits
-    make a clash between processes in the same minute about 1 in 16 million, and within
-    this process a clash is impossible: an id already handed out is never handed out
-    again.
-    """
-    stamp = time.strftime("%Y%m%d-%H%M")
-    with _ISSUED_LOCK:
-        while True:
-            run_id = f"{stamp}-{uuid.uuid4().hex[:6]}"
-            if run_id not in _ISSUED_IDS:
-                _ISSUED_IDS.add(run_id)
-                return run_id
+def _work_id(job_id):
+    """A name for one run's own working state - its temporary worktree, a kept commit's
+    ref, a fallback folder for review copies. The job ID is shared by every run of a job
+    (a retry included), so each run adds a random suffix and never reuses an earlier
+    run's ref or folder."""
+    return f"{job_id}-{secrets.token_hex(3)}"
 
 
-def commit_message(run_id, brief):
+def commit_message(job_id, brief):
     """`PRISM-<run id>: <brief>`, always one line."""
     brief = " ".join((brief or "document review comments").split())
-    return f"PRISM-{run_id}: {brief}"[:200]
+    return f"PRISM-{job_id}: {brief}"[:200]
 
 
 # ---- the review section: parse, version, render ------------------------------
@@ -484,7 +476,7 @@ def _render_run(run, newest):
     by = config.clean_username(m.get("reviewer"))
     if by:
         who += f" · by {by}"
-    title = (f"Review v{m.get('v', '?')}{who} · run `{m.get('id', '?')}` · {m.get('date', '')}"
+    title = (f"Review v{m.get('v', '?')}{who} · job `{m.get('id', '?')}` · {m.get('date', '')}"
              + (f" · commit `{m['commit'][:8]}`" if m.get("commit") else ""))
     head = f"{_RUN_OPEN}{_meta_json(m)} -->"
     # v7.0 reviews carry a binary decision; an older version keeps its own word.
@@ -978,12 +970,12 @@ class _Worktree:
     under .opencode/ in the project folder, as they do for a pull request review.)
     """
 
-    def __init__(self, target, run_id, emit):
+    def __init__(self, target, work_id, emit):
         self.target = target
         self.clone = target.local_repo
         self.emit = emit
         self.root = O._worktree_root()
-        self.path = self.root / f"docs-{run_id}-{target.role}"
+        self.path = self.root / f"docs-{work_id}-{target.role}"
         self.ref = ""
         self.base_commit = ""
         self.has_remote_branch = False
@@ -1144,6 +1136,8 @@ def build_prompt(target, doc_rel, doc_path, req_folder, req_files, req_truncated
     ]
     if incremental:
         lines.append(INCREMENTAL_MODE)
+        lines.append(security.DOC_TEXT + "\nIn an incremental review, judge the changed "
+                     "parts and say 'unchanged since the last review' for the rest.")
     else:
         if worktree is None:
             lines.append(NO_CODEBASE.format(
@@ -1154,6 +1148,7 @@ def build_prompt(target, doc_rel, doc_path, req_folder, req_files, req_truncated
         else:
             lines.append(REQUIREMENTS_GIVEN if req_folder else REQUIREMENTS_ABSENT)
         lines.append(ALWAYS_TEXT)
+        lines.append(security.DOC_TEXT)
     if worktree is None:
         lines += [f"Review the uploaded document `{doc_rel}` ({uploaded or 'a file'}).",
                   f"Read it from: {doc_path}"]
@@ -1224,7 +1219,7 @@ def build_previous_block(runs, delta, open_list, persona=None):
             "1. Nothing was left open, so there is nothing to verify.\n")
     return (
         f"PREVIOUS REVIEW - this is an INCREMENTAL review. PRISM reviewed this document "
-        f"before (review v{last.get('v', '?')}, run {last.get('id', '?')}"
+        f"before (review v{last.get('v', '?')}, job {last.get('id', '?')}"
         + (f", at commit {last['commit'][:8]}" if last.get("commit") else "")
         + f"; verdict {last.get('verdict', 'unknown')}).\n"
         f"Comments that review left open (each is yours to verify):\n{listed}\n\n"
@@ -1555,12 +1550,12 @@ def _unused(folder, name):
     raise RuntimeError(f"Too many review copies of {name} in {folder}.")
 
 
-def _write_copy(upload_path, data, run_id, emit, sidecar=False):
+def _write_copy(upload_path, data, work_id, emit, sidecar=False):
     """Write a review copy next to the uploaded file; never over it, never over another
     copy. Falls back to ~/.prism/reviewed-documents/<run id>/ when that folder cannot be
     written. Returns the path written."""
     name = _copy_name(upload_path, sidecar=sidecar)
-    for folder in (Path(upload_path).parent, config.CONFIG_DIR / "reviewed-documents" / run_id):
+    for folder in (Path(upload_path).parent, config.CONFIG_DIR / "reviewed-documents" / work_id):
         try:
             folder.mkdir(parents=True, exist_ok=True)
             target = _unused(folder, name)
@@ -1587,7 +1582,7 @@ def section_plain_lines(run):
         f"owner {config.clean_username(m['owner'])}" if m.get("owner") else "",
         f"by {config.clean_username(m['reviewer'])}" if m.get("reviewer") else "") if x)
     title = (f"Review v{m.get('v', '?')}" + (f" · {who}" if who else "")
-             + f" · run {m.get('id', '?')} · {m.get('date', '')}")
+             + f" · job {m.get('id', '?')} · {m.get('date', '')}")
     lines = [f"## {title}", f"Decision: {m.get('verdict') or ''}"]
     if m.get("impact"):
         lines.append(f"Impact: {m['impact']}")
@@ -1628,7 +1623,8 @@ def _load_upload(u, scratch, index):
 def _pipeline(project_dir, targets, requirements_path="", model=None,
               do_commit=True, do_push=True, dry_run=False, custom_instructions="",
               progress=None, emit=_emit_plain, control=None, ask=None, get_note=None,
-              persona=DEFAULT_PERSONA, reviewer="", webhook_url=None, owner=""):
+              persona=DEFAULT_PERSONA, reviewer="", webhook_url=None, owner="",
+              job_id=None):
     """Review -> write -> commit -> push, for every document of every target.
 
     A document is a path on a branch (written into a temporary worktree, committed and
@@ -1672,8 +1668,11 @@ def _pipeline(project_dir, targets, requirements_path="", model=None,
         where = f"{t.label} {t.branch}" if t.has_repo else t.label
         return f"{where}: {', '.join(docs)}"
 
-    run_id = new_run_id()
-    emit(f"▸ Documentation review  |  run {run_id}  |  {persona_label(persona)}  |  "
+    # The job hands its ID in, so its list row, its card and its commits agree; every
+    # run of the job (a retry included) has the same one.
+    job_id = job_id if jobid.valid(job_id) else new_job_id()
+    work_id = _work_id(job_id)
+    emit(f"▸ Documentation review  |  job ID {job_id}  |  {persona_label(persona)}  |  "
          f"owner {owner}  |  "
          + (f"reviewer {reviewer}  |  " if reviewer else "")
          + "  |  ".join(_what(t) for t in targets)
@@ -1705,7 +1704,7 @@ def _pipeline(project_dir, targets, requirements_path="", model=None,
                 emit("▸ No repository: the uploaded document(s) are reviewed without a "
                      "codebase.")
                 continue
-            wt = _Worktree(t, run_id, emit)
+            wt = _Worktree(t, work_id, emit)
             stack.append(wt)         # registered first so a half-made one is cleaned up
             try:
                 trees.append(wt.__enter__())
@@ -1921,6 +1920,17 @@ def _pipeline(project_dir, targets, requirements_path="", model=None,
                      f"{', '.join(ALWAYS_NAMES[w] for w in skipped)}"
                      f" - it is meant to for every review. Check that area yourself, or run "
                      f"the review again.")
+            # Every review is validated against the security standards (security.py);
+            # the conclusions are a Coverage bullet, written into the document.
+            standards = security.parse(body)
+            gaps = security.missing(standards)
+            if standards:
+                emit(f"▸ {rel}: security standards — {standards}")
+            if gaps:
+                emit(f"⚠ The review of {rel} states no conclusion on {', '.join(gaps)} - "
+                     f"every review is meant to. Check "
+                     f"{'that' if len(gaps) == 1 else 'those'} yourself, or run the review "
+                     f"again.")
             earlier = ""
             if previous:
                 # An incremental review is a verification pass: every comment that was
@@ -1966,7 +1976,7 @@ def _pipeline(project_dir, targets, requirements_path="", model=None,
                          "of the document were not examined (see Coverage). A partial review "
                          "is never an approval: the decision is Request changes.")
             version = (max(_version_of(r) for r in runs) + 1) if runs else 1
-            meta = {"id": run_id, "v": version, "date": time.strftime("%Y-%m-%d %H:%M"),
+            meta = {"id": job_id, "v": version, "date": time.strftime("%Y-%m-%d %H:%M"),
                     "persona": persona, "persona_label": persona_label(persona),
                     "commit": wt.base_commit if (wt is not None and d.upload is None) else "",
                     "verdict": verdict_label(key) + (" (partial review)" if partial else ""),
@@ -1993,7 +2003,7 @@ def _pipeline(project_dir, targets, requirements_path="", model=None,
                       "impact": res.impact_score, "impact_reason": res.impact_reason,
                       "counts": counts, "version": version, "scale": res.scale,
                       "scale_reason": res.scale_reason, "uploaded": d.upload is not None,
-                      "partial": bool(partial),
+                      "partial": bool(partial), "standards": standards,
                       "path": where, "repo": t.repo_name if t.has_repo else "",
                       "branch": t.branch if t.has_repo else "",
                       "folder": (Path(posix_rel(where)).parent.name if "/" in posix_rel(where)
@@ -2039,9 +2049,9 @@ def _pipeline(project_dir, targets, requirements_path="", model=None,
                     f"itself is not changed.\n", run)
                 data = None
             if data is not None:
-                copy = _write_copy(u.path, data, run_id, emit)
+                copy = _write_copy(u.path, data, work_id, emit)
             else:
-                copy = _write_copy(u.path, sidecar, run_id, emit, sidecar=True)
+                copy = _write_copy(u.path, sidecar, work_id, emit, sidecar=True)
             copies.append(str(copy))
             result["copy"] = str(copy)
             emit(f"▸ Wrote PRISM review comments (v{version}) for {u.name} to {copy}"
@@ -2098,7 +2108,7 @@ def _pipeline(project_dir, targets, requirements_path="", model=None,
                 brief = (f"{who} review comments v{mine[0]['version']} on {wt.changed[0]}"
                          if len(mine) == 1
                          else f"{who} review comments on {len(mine)} documents")
-                msg = commit_message(run_id, f"{brief} ({counts_text(total)})")
+                msg = commit_message(job_id, f"{brief} ({counts_text(total)})")
                 _git(wt.path, "add", "--", *[posix_rel(c) for c in wt.changed])
                 _git(wt.path, "commit", "-m", msg)
                 wt.commit = _git(wt.path, "rev-parse", "HEAD").stdout.strip()
@@ -2117,7 +2127,7 @@ def _pipeline(project_dir, targets, requirements_path="", model=None,
                 emit("\n═══ Push ═══")
                 for wt in committed:
                     ck()
-                    _push(wt, run_id, emit)
+                    _push(wt, work_id, emit)
                     pushed.append(wt)
                     emit(f"✔ {wt.target.label}: pushed {wt.commit[:8]} to "
                          f"{REMOTE}/{wt.target.branch}")
@@ -2148,17 +2158,17 @@ def _pipeline(project_dir, targets, requirements_path="", model=None,
     emit(f"\n◆ Verdict: {verdict_label(worst) if worst else 'unknown'}   "
          f"Impact: {impact if impact is not None else '?'}/10 {reason}".rstrip())
     emit(f"▸ {len(results)} document(s) reviewed, {comments} comment(s), {blockers} blocker(s)"
-         f" - run {run_id}." + (f" Find it later with: git log --grep 'PRISM-{run_id}'"
+         f" - job ID {job_id}." + (f" Find it later with: git log --grep 'PRISM-{job_id}'"
                                if committed else ""))
     all_pushed = bool(committed) and len(pushed) == len(committed)
     if webhook_url and not dry_run:
         notifier.post_doc_summary(
             webhook_url, emit=emit,
-            **_notice(persona, reviewer, owner, run_id, targets, results, worst, impact,
+            **_notice(persona, reviewer, owner, job_id, targets, results, worst, impact,
                       reason, len(failed), do_commit, bool(committed), all_pushed, copies))
     elif webhook_url:
         emit("▸ Dry run: no chat card is posted.")
-    return {"run_id": run_id, "documents": len(results), "not_reviewed": len(failed),
+    return {"job_id": job_id, "documents": len(results), "not_reviewed": len(failed),
             "comments": comments, "blockers": blockers, "committed": bool(committed),
             "pushed": all_pushed, "decision": worst, "scale": scale, "owner": owner,
             "copies": len(copies),
@@ -2192,7 +2202,7 @@ def decision_reason(results, not_reviewed=0):
     return text[0].upper() + text[1:]
 
 
-def _notice(persona, reviewer, owner, run_id, targets, results, worst, impact, impact_reason,
+def _notice(persona, reviewer, owner, job_id, targets, results, worst, impact, impact_reason,
             not_reviewed, do_commit, committed, pushed, copies):
     """What the document-review alert says, as plain data for notifier.build_doc_card."""
     if pushed:
@@ -2220,11 +2230,11 @@ def _notice(persona, reviewer, owner, run_id, targets, results, worst, impact, i
     return {"persona": persona_label(persona), "owner": owner, "reviewer": reviewer,
             "decision": worst, "impact": impact, "impact_reason": impact_reason,
             "decision_reason": decision_reason(results, not_reviewed),
-            "counts": total, "targets": blocks, "run_id": run_id, "outcome": outcome,
+            "counts": total, "targets": blocks, "job_id": job_id, "outcome": outcome,
             "not_reviewed": not_reviewed}
 
 
-def _push(wt, run_id, emit):
+def _push(wt, work_id, emit):
     """Push the worktree's commit to its branch - never forced.
 
     One automatic recovery: if the branch moved on the remote, the single commit
@@ -2252,7 +2262,7 @@ def _push(wt, run_id, emit):
             else:
                 _git(wt.path, "rebase", "--abort", check=False)
                 first = "the review commit conflicts with newer changes on the branch"
-    keep = f"refs/prism/docs/{run_id}-{t.role}"
+    keep = f"refs/prism/docs/{work_id}-{t.role}"
     try:
         sha = _git(wt.path, "rev-parse", "HEAD").stdout.strip()
         _git(wt.clone, "update-ref", keep, sha)
