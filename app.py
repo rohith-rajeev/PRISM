@@ -3265,7 +3265,13 @@ class App(tk.Tk):
         self.cli_log.tag_config("err", foreground=PAL["bad"])
 
     def _cli_chat_state(self, job_id):
-        return self.cli_chat.setdefault(job_id, {"thread": [], "open": False, "busy": False})
+        st = self.cli_chat.get(job_id)
+        if st is None:
+            # The same conversation `prism chat` keeps, so the terminal and the desktop
+            # follow on from each other.
+            st = self.cli_chat[job_id] = {"thread": list(CJ.read_chat(job_id)),
+                                          "open": False, "busy": False}
+        return st
 
     def _render_cli_chat(self):
         if not self.cli_detail_id:
@@ -3288,12 +3294,14 @@ class App(tk.Tk):
         st = self._cli_chat_state(job_id) if job_id else None
         if record is None or st is None or st["busy"]:
             return False
+        history = list(st["thread"])         # the conversation before this question
         st["thread"].append(("you", text))
         st["busy"] = True
 
         def work():
             try:
-                reply, _how = PC.chat_reply(record, text)
+                reply, _how = PC.chat_reply(record, text, history=history)
+                CJ.append_chat(job_id, ("you", text), ("chat", reply))
             except Exception as e:  # noqa: BLE001
                 reply = f"I couldn't answer that just now ({str(e)[:300]})."
             self.log_q.put((None, "cli_chat", (job_id, reply)))

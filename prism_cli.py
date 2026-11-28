@@ -35,6 +35,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config as CFG  # noqa: E402
 import chat as CHAT  # noqa: E402
+import chatsources as CHS  # noqa: E402
 import cli_jobs as CJ  # noqa: E402
 import diagnostics as DG  # noqa: E402
 import docreview as DR  # noqa: E402
@@ -886,11 +887,15 @@ def build_parser():
         "chat", help="ask about a job, in any state (read-only)",
         description="Ask the live chat about a job - running, queued, held, failed or "
                     "finished, pull request or document review. The answer comes from the "
-                    "job's details and is printed; it never steers the review, uses a "
-                    "steering round or changes anything. Questions that are not about the "
-                    "job are declined.")
+                    "job's details and, for a document review, the documents and "
+                    "requirements themselves, and is printed; it never steers the review, "
+                    "uses a steering round or changes anything. Each question follows on "
+                    "from the earlier ones about the same job (--new starts over). "
+                    "Questions that are not about the job are declined.")
     ch.add_argument("job_id")
-    ch.add_argument("question", nargs="+")
+    ch.add_argument("question", nargs="*")
+    ch.add_argument("--new", action="store_true",
+                    help="forget the earlier questions about this job and start over")
 
     rm = sub.add_parser("rm", help="delete a finished job's record and log")
     rm.add_argument("job_id", nargs="*")
@@ -1276,15 +1281,23 @@ def record_details(record, log_text=None):
     }
 
 
-def chat_reply(record, question, control=None):
+def chat_reply(record, question, control=None, history=None):
     """(reply, how) for a question about a CLI job. The reviewer's session is continued
-    only once the job is finished; a running job is answered from its record."""
+    only once the job is finished; a running job is answered from its record.
+
+    `history` is the conversation so far ([(role, text)], oldest first); None reads the
+    one `prism chat` keeps for the job. The job's documents go with the question."""
     spec = CJ.spec_from_dict(record.get("spec"))
-    details = CHAT.snapshot(record_details(record))
+    details_data = record_details(record)
+    details = CHAT.snapshot(details_data)
     session = record.get("session_id") if CJ.is_finished(record) else None
+    if history is None:
+        history = CJ.read_chat(record.get("id"))
+    sources = CHS.for_job(spec, details_data.get("findings"),
+                          details_data.get("job_id") or record.get("id") or "")
     return CHAT.ask(question, details, CJ.label(record), getattr(spec, "kind", "pr"),
                     spec.project_dir, model=spec.model, session_id=session or None,
-                    control=control)
+                    control=control, history=history, sources=sources)
 
 
 def cmd_chat(args):
@@ -1293,14 +1306,24 @@ def cmd_chat(args):
         CJ.spec_from_dict(record.get("spec"))
     except ValueError as e:
         raise UsageError(f"Cannot chat about {args.job_id}: {e}")
+    if args.new:
+        CJ.clear_chat(record.get("id"))
+    question = " ".join(args.question).strip()
+    if not question:
+        if args.new:
+            print(f"Started a new conversation about {args.job_id}.")
+            return EXIT_OK
+        raise UsageError(f"Ask a question: {PROG} chat {args.job_id} <question>")
     control = RunControl()
     try:
-        reply, _how = chat_reply(record, " ".join(args.question), control=control)
+        reply, _how = chat_reply(record, question, control=control)
     except Cancelled:
         return EXIT_STOPPED
     except Exception as e:  # noqa: BLE001
         print(f"Could not answer: {str(e)[:500]}", file=sys.stderr)
         return EXIT_ERROR
+    # Remembered, so the next `prism chat` about this job follows on from this one.
+    CJ.append_chat(record.get("id"), ("you", question), ("chat", reply))
     print(reply)
     return EXIT_OK
 

@@ -164,8 +164,11 @@ Ask the reviewer about a finished job. Read\-only: nothing is changed or merged.
 .BI "chat " "id question"
 Ask the live chat about a job, in any state: running, queued, held, failed or
 finished, pull request or document review. The answer comes from the job's details
-and is printed. Read\-only: it never steers the review, uses a steering round or
-changes anything, and it declines questions that are not about the job.
+and, for a document review, the text of the reviewed documents and requirement files,
+and is printed. Each question follows on from the earlier ones about the same job;
+.B \-\-new
+forgets them and starts over. Read\-only: it never steers the review, uses a steering
+round or changes anything, and it declines questions that are not about the job.
 .TP
 .BI "rm " id ...
 Delete finished jobs' records and logs.

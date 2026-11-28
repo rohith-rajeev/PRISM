@@ -65,6 +65,7 @@ def preflight():
                 "prism_cli.py", "cli_jobs.py", "folderpicker.py", "docreview.py", "bundle.py",
                 "pathutil.py", "winproc.py", "diagnostics.py", "extract.py", "findings.py",
                 "chat.py", "gitlab.py", "officewrite.py", "jobid.py", "security.py",
+                "chatsources.py",
                 "version.py", Path("agents") / "pr-reviewer.md",
                 Path("agents") / "doc-reviewer.md",
                 Path("docs") / "MANUAL.md"):
@@ -193,6 +194,7 @@ def main():
         "--hidden-import", "officewrite",
         "--hidden-import", "jobid",
         "--hidden-import", "security",
+        "--hidden-import", "chatsources",
         "--collect-submodules", "pypdf",
         "--hidden-import", "winproc",
         "--hidden-import", "diagnostics",

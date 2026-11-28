@@ -1101,7 +1101,7 @@ class FrChatJobs(unittest.TestCase):
         self.calls = []
 
         def runner(text, details, label, kind, project_dir, model=None, session_id=None,
-                   control=None):
+                   control=None, history=None, sources=""):
             self.calls.append({"text": text, "details": details, "kind": kind,
                                "session": session_id})
             return f"answer to {text}", "record"
@@ -1190,7 +1190,7 @@ class FrChatCommandLine(Isolated):
         seen = {}
 
         def ask(question, details, label, kind, project_dir, model=None, session_id=None,
-                control=None, emit=None):
+                control=None, emit=None, history=None, sources=""):
             seen.update(question=question, details=details, session=session_id, kind=kind)
             return "It is still reviewing; no findings yet.", "record"
         out = io.StringIO()

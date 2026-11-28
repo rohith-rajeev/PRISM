@@ -337,10 +337,25 @@ as they are at that moment (status, settings, verdict or decision, impact, scale
 findings, comments and what OUTPUT has shown). If the details don't say, it tells
 you so; while a review is still running it won't guess the outcome.
 
+For a document review it also reads the documents themselves: each reviewed document
+as it was reviewed (without PRISM's comment section) and each requirement file, Word,
+PDF and Excel included. So *what does the spec say about session timeouts?* or *which
+requirement does DR-3 conflict with?* is answered from the documents' own words, next
+to the comments made against them, naming the document and section. A very long
+document is cut in the question and the chat can open its full text, saved under
+PRISM's settings folder (`chat-workspace/sources`).
+
+The chat remembers the conversation: each question is read with the earlier ones and
+their answers, so *why is that one a blocker?* follows on from what was just said.
+Earlier answers are context only; the facts always come from the job and its
+documents, and a wrong earlier answer is corrected rather than repeated.
+
 The chat is read-only and stays on topic: it won't approve, merge or edit anything
 (use a steering note while the job runs, or Retry), and it declines questions that
 aren't about this job. Asking never interrupts the review and never uses up a
-steering note. On the command line: `prism chat <job id> <question>`.
+steering note. On the command line: `prism chat <job id> <question>`. It remembers
+the earlier questions about the job (for a job started from the command line, the
+desktop chat shares the same conversation); `prism chat <job id> --new` starts over.
 
 ---
 

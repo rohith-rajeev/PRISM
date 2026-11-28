@@ -210,7 +210,7 @@ def create(spec, job_id=None, cwd=None):
         "reviewer": getattr(spec, "reviewer", "") or "", "findings": [],
         "job_id": card_id,
     }
-    for ext in ("stop", "log"):          # a reused id must not inherit either
+    for ext in ("stop", "log", "chat"):  # a reused id must not inherit any of them
         try:
             _file(job_id, ext).unlink()
         except OSError:
@@ -377,7 +377,7 @@ def remove(job_id):
         return False
     if is_active(record):
         return False
-    for ext in ("json", "log", "stop"):
+    for ext in ("json", "log", "stop", "chat"):
         try:
             _file(job_id, ext).unlink()
         except OSError:
@@ -390,6 +390,47 @@ def prune(keep=KEEP_FINISHED):
     finished = [r for r in list_jobs() if is_finished(r)]
     for record in finished[keep:]:
         remove(record["id"])
+
+
+# The live chat's conversation about a job: one JSON line per turn, ["you"|"chat", text].
+# A file of its own, not the record: only the owning process writes the record, while
+# `prism chat` may be asked from any terminal while the job runs.
+CHAT_KEEP = 40
+
+
+def read_chat(job_id):
+    """The conversation so far about a job, oldest first: [(role, text)]."""
+    try:
+        lines = _file(job_id, "chat").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    turns = []
+    for line in lines:
+        try:
+            role, text = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if role in ("you", "chat") and isinstance(text, str):
+            turns.append((role, text))
+    return turns[-CHAT_KEEP:]
+
+
+def append_chat(job_id, *turns):
+    """Add turns ((role, text), ...) to a job's conversation. Never raises."""
+    try:
+        jobs_dir(create=True)
+        with open(_file(job_id, "chat"), "a", encoding="utf-8", newline="\n") as fh:
+            for role, text in turns:
+                fh.write(json.dumps([role, text], ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def clear_chat(job_id):
+    try:
+        _file(job_id, "chat").unlink()
+    except OSError:
+        pass
 
 
 def read_log(job_id, tail=None):
