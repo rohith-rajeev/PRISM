@@ -202,9 +202,11 @@ once; still without one, an impact of 8 or more counts as large.
 ## Live chat
 Each job's page shows the reviewer's log as **OUTPUT**. **Chat ▸** opens a live chat
 beside it (70/30) for questions about that job in any state; answers come from the
-job's details only, in a colleague's plain words, and it declines anything else. It is
-read-only and never steers the review or uses a steering round. Command line:
-`prism chat <job id> <question>`.
+job's details and, for a document review, from the reviewed documents and requirement
+files themselves, in a colleague's plain words, and it declines anything else. It
+remembers the conversation, so follow-up questions stay in context. It is read-only and
+never steers the review or uses a steering round. Command line:
+`prism chat <job id> <question>` (`--new` starts the conversation over).
 
 ## Consistent reviews of the same change
 A change is often reviewed more than once — a retry, another PR, another branch,

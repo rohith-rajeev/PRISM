@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import chat as chat_mod
+import chatsources
 import docreview
 import jobid
 from pathutil import native_path
@@ -407,6 +408,7 @@ class JobManager:
         self._followup_runner = followup_runner
         self._doc_followup_runner = doc_followup_runner
         self._chat_runner = chat_runner or chat_mod.ask
+        self._chat_sources = chatsources.for_job
         self.jobs = {}           # insertion-ordered; doubles as display order
         self._next_id = 1
         self._runner = runner
@@ -664,23 +666,30 @@ class JobManager:
         text = (text or "").strip()
         if job is None or not text or job.chat_busy:
             return None
+        # The conversation so far, before this question: what a follow-up refers to.
+        history = list(job.chat)
         job.chat.append(("you", text))
         job.chat_busy = True
         job.chat_control = RunControl()
-        details = chat_mod.snapshot(job.chat_details())
+        info = job.chat_details()
+        details = chat_mod.snapshot(info)
         # The reviewer's own session only once it is finished with and free.
         session = job.session_id if (job.is_terminal and not job.followup_busy) else None
         threading.Thread(target=self._chat_work,
-                         args=(job, text, details, session, job.chat_control),
+                         args=(job, text, details, session, job.chat_control, history,
+                               list(info.get("findings") or [])),
                          daemon=True).start()
         return job
 
-    def _chat_work(self, job, text, details, session, control):
+    def _chat_work(self, job, text, details, session, control, history=(), findings=()):
         spec = job.spec
         try:
+            # The documents are read here, off the UI thread: git and Word/PDF reads.
+            sources = self._chat_sources(spec, findings, job.job_id)
             reply, _how = self._chat_runner(
                 text, details, spec.label, getattr(spec, "kind", "pr"), spec.project_dir,
-                model=spec.model, session_id=session or None, control=control)
+                model=spec.model, session_id=session or None, control=control,
+                history=list(history), sources=sources)
         except Cancelled:
             reply = None
         except Exception as e:  # noqa: BLE001

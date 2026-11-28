@@ -4,6 +4,20 @@ What changed in each release, for people using PRISM — not a commit log.
 This file is what the in-app "check for updates" screen shows for a new
 release, so keep entries short and about what you'd actually notice.
 
+## v7.2.2
+
+- **The job chat reads the documents themselves.** For a document review, every question is
+  answered from the text of the reviewed documents (as they were reviewed, without PRISM's
+  comment section) and of the requirement files — Word, PDF and Excel included — next to the
+  comments made against them. It names the document and section, and says so when the text
+  doesn't contain the answer instead of guessing. A very long document is cut in the
+  question, and the chat can open its full text.
+- **The chat remembers the conversation.** Follow-up questions ("why is that one a
+  blocker?") are read with the earlier questions and answers, so they stay on the same
+  thread. Earlier answers are only context: the facts still come from the job and its
+  documents. `prism chat` remembers too, and shares the conversation with the desktop for a
+  command-line job; `prism chat <id> --new` starts over.
+
 ## v7.2.1
 
 - **The document-review form keeps your reviewer role and model.** A new request still
